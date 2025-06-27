@@ -2,6 +2,17 @@
 
 project(csconnector)
 
+# Find required packages for WebSocket
+find_package(Threads REQUIRED)
+set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+find_package(Boost REQUIRED COMPONENTS system thread)
+
+# WebSocket++ configuration
+# Using Boost.Asio instead of standalone ASIO since Boost is already a dependency
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DASIO_STANDALONE")
+
 # turn off optimization for this project in RelWithDebInfo only
 # configure_msvc_no_optimization()
 
@@ -36,9 +47,25 @@ add_library(csconnector
     include/serializer.hpp
     include/apidiaghandler.hpp
     src/apidiaghandler.cpp
+    include/websocket/websocketserver.hpp
+    src/websocketserver.cpp
+    include/websocket/websockethandler.hpp
+    src/websockethandler.cpp
 )
 
-target_link_libraries (csconnector PUBLIC csdb csnode lib csconnector_gen csconnector_executor_gen variant_gen)
+target_link_libraries (csconnector PUBLIC 
+    csdb 
+    csnode 
+    lib 
+    csconnector_gen 
+    csconnector_executor_gen 
+    variant_gen
+    Boost::system
+    Boost::thread
+    Threads::Threads
+    websocketpp::websocketpp
+    nlohmann_json::nlohmann_json
+)
 
 # INCLUDE DIRECTORIES it's better not to set globally but for each project.
 # INCLUDE DIRECTORIES consists of include libraries (in this case thrift and csdb)
@@ -47,9 +74,20 @@ target_link_libraries (csconnector PUBLIC csdb csnode lib csconnector_gen csconn
 target_include_directories(csconnector
   PUBLIC include
   PRIVATE src
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third-party/websocketpp
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third-party/json/single_include
 )
 
 configure_msvc_flags()
+
+# Add compile definitions
+target_compile_definitions(csconnector PUBLIC 
+    BINARY_TCP_API
+    AJAX_IFACE
+    NODE_API
+    BINARY_TCP_EXECAPI
+    WEBSOCKET_API
+)
 
 set_property(TARGET csconnector PROPERTY CXX_STANDARD 17)
 set_property(TARGET csconnector PROPERTY CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -1,6 +1,8 @@
 #include "stdafx.h"
 
 #include <csdb/currency.hpp>
+#include <nlohmann/json.hpp>
+#include <csnode/ordinalindex.hpp>
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0) // 4245: 'return': conversion from 'int' to 'SOCKET', signed/unsigned mismatch
@@ -14,6 +16,13 @@
 #endif  // _MSC_VER
 
 #include "csconnector/csconnector.hpp"
+
+#ifdef WEBSOCKET_API
+#include <websocket/websocketserver.hpp>
+#include <websocket/websockethandler.hpp>
+#include <nlohmann/json.hpp>
+#include <csnode/blockchain.hpp>
+#endif
 
 #include <csnode/configholder.hpp>
 #include <csnode/transactionspacket.hpp>
@@ -93,6 +102,45 @@ connector::connector(Node& node, cs::CachesSerializationManager& serializationMa
 
     });
 
+#endif
+
+#ifdef WEBSOCKET_API
+    websocket_thread = std::thread([this]() {
+        const uint16_t websocket_port = uint16_t(cs::ConfigHolder::instance().config()->getApiSettings().websocketPort);
+        if (websocket_port == 0) {
+            cslog() << "WebSocket API is disabled ([api] websocket_port = 0)";
+            return;
+        }
+        
+        // Create WebSocket handler and server
+        websocket_handler = std::make_shared<cs::websocket::WebSocketHandler>(api_handler, apiexec_handler);
+        websocket_server = std::make_shared<cs::websocket::WebSocketServer>(websocket_port, websocket_handler);
+        
+        // Set up ordinal index notifications
+        auto ordinalIndex = api_handler->get_s_blockchain().getOrdinalIndex();
+        if (ordinalIndex) {
+            ordinalIndex->setNotificationCallback([this](const std::string& type, const std::string& data, cs::Sequence blockNumber, cs::Sequence txIndex) {
+                if (websocket_handler) {
+                    nlohmann::json ordinalInfo;
+                    ordinalInfo["type"] = type;
+                    ordinalInfo["data"] = data;
+                    ordinalInfo["blockNumber"] = static_cast<int64_t>(blockNumber);
+                    ordinalInfo["txIndex"] = static_cast<int32_t>(txIndex);
+                    
+                    if (type == "sns_inscription") {
+                        websocket_handler->notifyOrdinalInscription(ordinalInfo);
+                    } else if (type == "token_deploy") {
+                        websocket_handler->notifyTokenDeploy(ordinalInfo);
+                    } else if (type == "token_mint") {
+                        websocket_handler->notifyOrdinalInscription(ordinalInfo); // Treat mint as inscription
+                    }
+                }
+            });
+        }
+        
+        cslog() << "Starting WebSocket API on port " << websocket_port;
+        websocket_server->start();
+    });
 #endif
 }
 
@@ -302,6 +350,18 @@ void connector::stop() {
        diag_thread.join();
     }
 
+#ifdef WEBSOCKET_API
+    if (websocket_server && websocket_server->isRunning()) {
+        cslog() << "API: stop WebSocket API";
+        websocket_server->stop();
+        websocket_server.reset();
+    }
+
+    if (websocket_thread.joinable()) {
+        websocket_thread.join();
+    }
+#endif
+
 }
 
 void connector::onPacketExpired(const cs::TransactionsPacket& packet) {
@@ -310,6 +370,52 @@ void connector::onPacketExpired(const cs::TransactionsPacket& packet) {
 
 void connector::onTransactionsRejected(const cs::TransactionsPacket& packet) {
     api_handler->onTransactionsRejected(packet);
+}
+
+void connector::onStoreBlock(const csdb::Pool& pool) {
+    api_handler->store_block_slot(pool);
+    
+#ifdef WEBSOCKET_API
+    // Notify WebSocket clients of new block
+    if (websocket_handler && pool.is_valid()) {
+        try {
+            nlohmann::json blockInfo;
+            blockInfo["sequence"] = static_cast<int64_t>(pool.sequence());
+            blockInfo["hash"] = pool.hash().to_string();
+            blockInfo["prevHash"] = pool.previous_hash().to_string();
+            blockInfo["time"] = static_cast<int64_t>(BlockChain::getBlockTime(pool));
+            blockInfo["transactionsCount"] = static_cast<int32_t>(pool.transactions_count());
+            
+            websocket_handler->notifyNewBlock(blockInfo);
+            
+            // Also notify about individual transactions in the block
+            if (pool.transactions_count() > 0) {
+                for (size_t i = 0; i < pool.transactions_count(); ++i) {
+                    try {
+                        const auto& transaction = pool.transaction(csdb::TransactionID(pool.sequence(), i));
+                        if (transaction.is_valid()) {
+                            nlohmann::json txInfo;
+                            txInfo["poolSeq"] = static_cast<int64_t>(pool.sequence());
+                            txInfo["index"] = static_cast<int32_t>(i);
+                            txInfo["time"] = static_cast<int64_t>(BlockChain::getBlockTime(pool));
+                            
+                            websocket_handler->notifyNewTransaction(txInfo);
+                            
+                            // Ordinal notifications are now handled by the OrdinalIndex callback system
+                        }
+                    }
+                    catch (const std::exception&) {
+                        // Skip invalid transactions, don't break block processing
+                    }
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            // Log error but don't break block processing
+            // Note: Add logging here if needed
+        }
+    }
+#endif
 }
 
 connector::ApiHandlerPtr connector::apiHandler() const {

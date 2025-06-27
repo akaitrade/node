@@ -38,6 +38,7 @@ class BlockHashes;
 class WalletsIds;
 class Fee;
 class TransactionsIndex;
+class OrdinalIndex;
 class TransactionsPacket;
 class BlockChain_Serializer;
 
@@ -364,6 +365,11 @@ public:
     const cs::WalletsCache::Updater& getCacheUpdater() const {
         return *(walletsCacheUpdater_.get());
     }
+    
+    // Ordinal index access methods
+    cs::OrdinalIndex* getOrdinalIndex() {
+        return ordinalIndex_.get();
+    }
 
     /**
      * Try to flush deferred block to DB, intended to call on node exit
@@ -433,6 +439,7 @@ private:
 
     std::unique_ptr<cs::BlockHashes> blockHashes_;
     std::unique_ptr<cs::TransactionsIndex> trxIndex_;
+    std::unique_ptr<cs::OrdinalIndex> ordinalIndex_;
 
     const csdb::Address genesisAddress_;
     const csdb::Address startAddress_;

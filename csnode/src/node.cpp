@@ -21,6 +21,7 @@
 #include <csnode/roundpackage.hpp>
 #include <csnode/configholder.hpp>
 #include <csnode/eventreport.hpp>
+#include <csnode/ordinalindex.hpp>
 
 #include <lib/system/logger.hpp>
 #include <lib/system/progressbar.hpp>
@@ -3806,6 +3807,14 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
 
     csdebug() << line2.str();
     stat_.onRoundStart(cs::Conveyer::instance().currentRoundNumber(), false /*skip_logs*/);
+    
+    // Add ordinal index statistics
+    if (auto* ordinalIndex = getBlockChain().getOrdinalIndex()) {
+        cslog() << " Ordinal inscriptions: " << WithDelimiters(ordinalIndex->getTotalInscriptionCount()) 
+                << ", SNS names: " << WithDelimiters(ordinalIndex->getTotalSNSCount())
+                << ", token types: " << WithDelimiters(ordinalIndex->getTotalTokenCount());
+    }
+    
     csdebug() << line2.str();
 
     solver_->nextRound(updateRound);

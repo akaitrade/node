@@ -296,6 +296,44 @@ public:
         return keyValueImpl<Key, Value>(MDB_RDONLY, MDB_LAST, name);
     }
 
+    // iterate through all entries with a given prefix
+    template<typename Callback>
+    void iterateWithPrefix(const cs::Bytes& prefix, Callback callback, const char* name = nullptr) const {
+        try {
+            auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
+            auto dbi = lmdb::dbi::open(transaction, name);
+            auto cursor = lmdb::cursor::open(transaction, dbi);
+
+            lmdb::val key(prefix.data(), prefix.size());
+            lmdb::val value;
+
+            // Position cursor at first key >= prefix
+            if (cursor.get(key, value, MDB_SET_RANGE)) {
+                do {
+                    // Check if current key still matches prefix
+                    if (key.size() < prefix.size() || 
+                        std::memcmp(key.data(), prefix.data(), prefix.size()) != 0) {
+                        break; // No more keys with this prefix
+                    }
+                    
+                    // Call callback with current key/value
+                    cs::Bytes keyBytes(reinterpret_cast<const uint8_t*>(key.data()), 
+                                      reinterpret_cast<const uint8_t*>(key.data()) + key.size());
+                    cs::Bytes valueBytes(reinterpret_cast<const uint8_t*>(value.data()), 
+                                        reinterpret_cast<const uint8_t*>(value.data()) + value.size());
+                    
+                    if (!callback(keyBytes, valueBytes)) {
+                        break; // Callback requested to stop iteration
+                    }
+                    
+                } while (cursor.get(key, value, MDB_NEXT));
+            }
+        }
+        catch(const lmdb::error& error) {
+            raise(error);
+        }
+    }
+
     template<typename T>
     static T convert(const char* data, size_t size) {
         return createResult<T>(data, size);

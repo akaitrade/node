@@ -1,4 +1,5 @@
 #include <apihandler.hpp>
+#include <csnode/ordinalindex.hpp>
 
 #include <csnode/fee.hpp>
 #include <csnode/conveyer.hpp>
@@ -3157,6 +3158,186 @@ void APIHandler::SyncStateGet(api::SyncStateResult& _return) {
     _return.currRound = static_cast<int64_t>(cs::Conveyer::instance().currentRoundNumber());
 
     SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+// Ordinals API Implementation
+void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std::string& name) {
+    auto ordinalIndex = blockchain_.getOrdinalIndex();
+    if (!ordinalIndex) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "Ordinal index not available");
+        return;
+    }
+
+    try {
+        _return.available = ordinalIndex->isSNSAvailable(name);
+        
+        if (!_return.available) {
+            auto snsInfo = ordinalIndex->getSNSByName(name);
+            if (snsInfo) {
+                _return.snsInfo = api::OrdinalSNS();
+                _return.snsInfo.protocol = snsInfo->p;
+                _return.snsInfo.operation = snsInfo->op;
+                _return.snsInfo.name = snsInfo->name;
+                _return.snsInfo.holder = snsInfo->holder.to_api_addr();
+                _return.snsInfo.blockNumber = snsInfo->blockNumber;
+                _return.snsInfo.txIndex = snsInfo->txIndex;
+                _return.__isset.snsInfo = true;
+            }
+        }
+        
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+    }
+    catch (const std::exception& e) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error checking SNS: ") + e.what());
+    }
+}
+
+void APIHandler::OrdinalSNSGetByHolder(api::OrdinalSNSGetResult& _return, const general::Address& holder) {
+    auto ordinalIndex = blockchain_.getOrdinalIndex();
+    if (!ordinalIndex) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "Ordinal index not available");
+        return;
+    }
+
+    try {
+        const csdb::Address holderAddr = BlockChain::getAddressFromKey(holder);
+        auto snsEntries = ordinalIndex->getSNSByHolder(holderAddr);
+        
+        _return.snsEntries.clear();
+        for (const auto& sns : snsEntries) {
+            api::OrdinalSNS apiSNS;
+            apiSNS.protocol = sns.p;
+            apiSNS.operation = sns.op;
+            apiSNS.name = sns.name;
+            apiSNS.holder = holder;
+            apiSNS.blockNumber = sns.blockNumber;
+            apiSNS.txIndex = sns.txIndex;
+            _return.snsEntries.push_back(apiSNS);
+        }
+        
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+    }
+    catch (const std::exception& e) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting SNS by holder: ") + e.what());
+    }
+}
+
+void APIHandler::OrdinalTokenGet(api::OrdinalTokenInfoResult& _return, const std::string& ticker) {
+    auto ordinalIndex = blockchain_.getOrdinalIndex();
+    if (!ordinalIndex) {
+        // Return success but no token info when ordinal index is not available
+        _return.__isset.tokenInfo = false;
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+
+    try {
+        auto tokenInfo = ordinalIndex->getToken(ticker);
+        
+        if (tokenInfo) {
+            _return.tokenInfo = api::OrdinalToken();
+            _return.tokenInfo.ticker = tokenInfo->ticker;
+            _return.tokenInfo.maxSupply = tokenInfo->maxSupply;
+            _return.tokenInfo.limitPerMint = tokenInfo->limitPerMint;
+            _return.tokenInfo.totalMinted = tokenInfo->totalMinted;
+            _return.tokenInfo.deployBlock = tokenInfo->deployBlock;
+            _return.tokenInfo.deployer = tokenInfo->deployer.to_api_addr();
+            _return.__isset.tokenInfo = true;
+        } else {
+            _return.__isset.tokenInfo = false;
+        }
+        
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+    }
+    catch (const std::exception& e) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting token info: ") + e.what());
+    }
+}
+
+void APIHandler::OrdinalTokenBalanceGet(api::OrdinalTokenBalanceResult& _return, const general::Address& address, const std::string& ticker) {
+    auto ordinalIndex = blockchain_.getOrdinalIndex();
+    if (!ordinalIndex) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "Ordinal index not available");
+        return;
+    }
+
+    try {
+        const csdb::Address addr = BlockChain::getAddressFromKey(address);
+        _return.balance = ordinalIndex->getTokenBalance(addr, ticker);
+        
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+    }
+    catch (const std::exception& e) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting token balance: ") + e.what());
+    }
+}
+
+void APIHandler::OrdinalTokensList(api::OrdinalTokensListResult& _return, const int64_t offset, const int64_t limit) {
+    auto ordinalIndex = blockchain_.getOrdinalIndex();
+    if (!ordinalIndex) {
+        // Return empty result with success status when ordinal index is not available
+        // This indicates ordinal functionality is not enabled rather than an error
+        _return.count = 0;
+        _return.tokens.clear();
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+
+    try {
+        auto allTokens = ordinalIndex->getAllTokens();
+        
+        // Simple pagination (in production, this should be done at the database level)
+        size_t start = static_cast<size_t>(std::max(int64_t(0), offset));
+        size_t count = static_cast<size_t>(std::max(int64_t(0), limit));
+        
+        _return.count = static_cast<int32_t>(allTokens.size());
+        _return.tokens.clear();
+        
+        for (size_t i = start; i < allTokens.size() && i < start + count; ++i) {
+            const auto& token = allTokens[i];
+            api::OrdinalToken apiToken;
+            apiToken.ticker = token.ticker;
+            apiToken.maxSupply = token.maxSupply;
+            apiToken.limitPerMint = token.limitPerMint;
+            apiToken.totalMinted = token.totalMinted;
+            apiToken.deployBlock = token.deployBlock;
+            apiToken.deployer = token.deployer.to_api_addr();
+            _return.tokens.push_back(apiToken);
+        }
+        
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+    }
+    catch (const std::exception& e) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting tokens list: ") + e.what());
+    }
+}
+
+void APIHandler::OrdinalStatsGet(api::OrdinalStatsResult& _return) {
+    auto ordinalIndex = blockchain_.getOrdinalIndex();
+    if (!ordinalIndex) {
+        // Return zero stats when ordinal index is not available
+        _return.totalSNS = 0;
+        _return.totalTokens = 0;
+        _return.totalInscriptions = 0;
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+
+    try {
+        _return.totalSNS = static_cast<int32_t>(ordinalIndex->getTotalSNSCount());
+        _return.totalTokens = static_cast<int32_t>(ordinalIndex->getTotalTokenCount());
+        _return.totalInscriptions = static_cast<int32_t>(ordinalIndex->getTotalInscriptionCount());
+        
+        // Add debug logging to see if we're getting any ordinal data
+        cslog() << "OrdinalStatsGet: SNS=" << _return.totalSNS 
+                << ", Tokens=" << _return.totalTokens 
+                << ", Inscriptions=" << _return.totalInscriptions;
+        
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+    }
+    catch (const std::exception& e) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting ordinal stats: ") + e.what());
+    }
 }
 
 void apiexec::APIEXECHandler::GetSeed(apiexec::GetSeedResult& _return, const general::AccessID accessId) {

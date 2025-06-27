@@ -165,6 +165,14 @@ public:
 
     void SyncStateGet(api::SyncStateResult& _return) override;
 
+    // Ordinals API
+    void OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std::string& name) override;
+    void OrdinalSNSGetByHolder(api::OrdinalSNSGetResult& _return, const general::Address& holder) override;
+    void OrdinalTokenGet(api::OrdinalTokenInfoResult& _return, const std::string& ticker) override;
+    void OrdinalTokenBalanceGet(api::OrdinalTokenBalanceResult& _return, const general::Address& address, const std::string& ticker) override;
+    void OrdinalTokensList(api::OrdinalTokensListResult& _return, const int64_t offset, const int64_t limit) override;
+    void OrdinalStatsGet(api::OrdinalStatsResult& _return) override;
+
     BlockChain& get_s_blockchain() const noexcept {
         return blockchain_;
     }

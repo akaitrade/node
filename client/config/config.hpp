@@ -69,6 +69,8 @@ struct ApiData {
     uint16_t apiexecPort = 9070;
     // off by default:
     uint16_t diagPort = 0; // former 9060;
+    // off by default:
+    uint16_t websocketPort = 0; // former 9095;
     int executorSendTimeout = 4000;
     int executorReceiveTimeout = 4000;
     int serverSendTimeout = 30000;

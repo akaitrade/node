@@ -35,6 +35,15 @@
 namespace cs {
 class TransactionsPacket;
 }
+
+#ifdef WEBSOCKET_API
+namespace cs {
+namespace websocket {
+class WebSocketHandler;
+class WebSocketServer;
+}
+}
+#endif
 class Node;
 
 namespace csconnector {
@@ -66,9 +75,7 @@ public:
         }
     }
 
-    void onStoreBlock(const csdb::Pool& pool) {
-        api_handler->store_block_slot(pool);
-    }
+    void onStoreBlock(const csdb::Pool& pool);
 
     void onMaxBlocksCount(cs::Sequence lastBlockNum) {
         api_handler->maxBlocksCount(lastBlockNum);
@@ -117,6 +124,12 @@ private:
 
     std::thread diag_thread;
     std::shared_ptr<::apache::thrift::server::TThreadedServer> diag_server;
+
+#ifdef WEBSOCKET_API
+    std::thread websocket_thread;
+    std::shared_ptr<cs::websocket::WebSocketHandler> websocket_handler;
+    std::shared_ptr<cs::websocket::WebSocketServer> websocket_server;
+#endif
 
     std::atomic_bool stop_flag;
 };

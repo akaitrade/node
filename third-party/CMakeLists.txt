@@ -10,3 +10,12 @@ add_subdirectory(berkeleydb)
 add_subdirectory(lz4)
 add_subdirectory(rang)
 add_subdirectory(nameof)
+
+# Header-only libraries
+add_library(websocketpp INTERFACE)
+target_include_directories(websocketpp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/websocketpp)
+add_library(websocketpp::websocketpp ALIAS websocketpp)
+
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/json/single_include)
+add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)

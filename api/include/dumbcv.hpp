@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <map>
+#include <condition_variable>
 #include <lib/system/common.hpp>
 #include <csdb/transaction.hpp>
 

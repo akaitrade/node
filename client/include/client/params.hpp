@@ -8,12 +8,23 @@
 //#define MONITOR_NODE
 //#define WEB_WALLET_NODE
 
+#ifndef NODE_API
 #define NODE_API
+#endif
+
+#ifndef AJAX_IFACE
 #define AJAX_IFACE
+#endif
 
 #define AJAX_CONCURRENT_API_CLIENTS INT64_MAX
+
+#ifndef BINARY_TCP_API
 #define BINARY_TCP_API
+#endif
+
+#ifndef BINARY_TCP_EXECAPI
 #define BINARY_TCP_EXECAPI
+#endif
 #define DEFAULT_CURRENCY 1
 
 #if defined(MONITOR_NODE) || defined(WEB_WALLET_NODE)

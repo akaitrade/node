@@ -16,6 +16,7 @@
 #include <csnode/nodeutils.hpp>
 #include <csnode/node.hpp>
 #include <csnode/transactionsindex.hpp>
+#include <csnode/ordinalindex.hpp>
 #include <csnode/transactionsiterator.hpp>
 #include <csnode/configholder.hpp>
 #include <solver/smartcontracts.hpp>
@@ -44,6 +45,7 @@ BlockChain::BlockChain(csdb::Address genesisAddress, csdb::Address startAddress,
     blockHashes_ = std::make_unique<cs::BlockHashes>(cachesPath);
     cachedBlocks_ = std::make_unique<cs::PoolCache>(cachesPath);
     trxIndex_ = std::make_unique<cs::TransactionsIndex>(*this, cachesPath, recreateIndex);
+    ordinalIndex_ = std::make_unique<cs::OrdinalIndex>(*this, cachesPath, recreateIndex);
 }
 
 BlockChain::~BlockChain() {}
@@ -51,11 +53,14 @@ BlockChain::~BlockChain() {}
 void BlockChain::subscribeToSignals() {
     // the order of two following calls matters
     cs::Connector::connect(&storage_.readBlockEvent(), trxIndex_.get(), &TransactionsIndex::onReadFromDb);
+    cs::Connector::connect(&storage_.readBlockEvent(), ordinalIndex_.get(), &OrdinalIndex::onReadFromDb);
     cs::Connector::connect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
     cs::Connector::connect(&storage_.readingStartedEvent(), trxIndex_.get(), &TransactionsIndex::onStartReadFromDb);
+    cs::Connector::connect(&storage_.readingStartedEvent(), ordinalIndex_.get(), &OrdinalIndex::onStartReadFromDb);
     cs::Connector::connect(&storage_.readingStartedEvent(), this, &BlockChain::onStartReadFromDB);
 
     cs::Connector::connect(&storage_.readingStoppedEvent(), trxIndex_.get(), &TransactionsIndex::onDbReadFinished);
+    cs::Connector::connect(&storage_.readingStoppedEvent(), ordinalIndex_.get(), &OrdinalIndex::onDbReadFinished);
 }
 
 bool BlockChain::bindSerializationManToCaches(
@@ -110,6 +115,7 @@ bool BlockChain::init(
     cs::Sequence newBlockchainTop
   ) {
     cs::Connector::connect(&this->removeBlockEvent, trxIndex_.get(), &TransactionsIndex::onRemoveBlock);
+    cs::Connector::connect(&this->removeBlockEvent, ordinalIndex_.get(), &OrdinalIndex::onRemoveBlock);
 
     lastSequence_ = 0;
     bool successfulQuickStart = false;
@@ -149,6 +155,11 @@ bool BlockChain::init(
           if (trxIndex_->recreate() && successfulQuickStart) {
               cslog() << "Blockchain: TrxIndex must be recreated, cancel QUICK START... Restart NODE, please";
               trxIndex_->invalidate();
+              return true;
+          }
+          if (ordinalIndex_->recreate() && successfulQuickStart) {
+              cslog() << "Blockchain: OrdinalIndex must be recreated, cancel QUICK START... Restart NODE, please";
+              ordinalIndex_->invalidate();
               return true;
           }
         }
@@ -758,6 +769,9 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
     // ATTENTION! Due to undesired side effect trxIndex_ must be updated prior to wallets caches
     // update transactions index
     trxIndex_->update(pool);
+    
+    // update ordinal index
+    ordinalIndex_->update(pool);
 
     // update wallet caches
 
