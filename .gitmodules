@@ -4,9 +4,6 @@
 [submodule "third-party/berkeleydb"]
 	path = third-party/berkeleydb
 	url = https://github.com/CREDITSCOM/berkeleydb.git
-[submodule "third-party/thrift-interface-definitions"]
-	path = third-party/thrift-interface-definitions
-	url = https://github.com/CREDITSCOM/thrift-interface-definitions.git
 [submodule "third-party/thrift"]
 	path = third-party/thrift
 	url = https://github.com/CREDITSCOM/thrift.git
@@ -25,3 +22,14 @@
 [submodule "p2p"]
 	path = p2p
 	url = https://github.com/SychevS/p2p.git
+[submodule "third-party/thrift-interface-definitions"]
+	path = third-party/thrift-interface-definitions
+	url = https://github.com/akaitrade/thrift-interface-definitions.git
+	branch = websocketordinal
+[submodule "third-party/websocketpp"]
+	path = third-party/websocketpp
+	url = https://github.com/zaphoyd/websocketpp.git
+	branch = master
+[submodule "third-party/json"]
+	path = third-party/json
+	url = https://github.com/nlohmann/json.git
