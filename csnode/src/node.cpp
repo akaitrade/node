@@ -3811,7 +3811,7 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     // Add ordinal index statistics
     if (auto* ordinalIndex = getBlockChain().getOrdinalIndex()) {
         cslog() << " Ordinal inscriptions: " << WithDelimiters(ordinalIndex->getTotalInscriptionCount()) 
-                << ", SNS names: " << WithDelimiters(ordinalIndex->getTotalSNSCount())
+                << ", CNS names: " << WithDelimiters(ordinalIndex->getTotalCNSCount())
                 << ", token types: " << WithDelimiters(ordinalIndex->getTotalTokenCount());
     }
     

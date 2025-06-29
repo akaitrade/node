@@ -279,6 +279,12 @@ void WebSocketHandler::handleGetTransaction(ConnectionHdl hdl, const WebSocketMe
             response["amount"] = result.transaction.trxn.amount.integral + (result.transaction.trxn.amount.fraction / 1000000000000000000.0);
             response["currency"] = result.transaction.trxn.currency;
             
+            // Include userFields if present
+            if (result.transaction.trxn.__isset.userFields && !result.transaction.trxn.userFields.empty()) {
+                // userFields is already a string in the API, just include it directly
+                response["userFields"] = result.transaction.trxn.userFields;
+            }
+            
             sendResponse(hdl, msg.type, msg.id, response);
         } else {
             json response;
@@ -1139,23 +1145,24 @@ void WebSocketHandler::handleOrdinalSNSCheck(ConnectionHdl hdl, const WebSocketM
         response["available"] = result.available;
         
         if (result.__isset.snsInfo) {
-            json snsInfo;
-            snsInfo["protocol"] = result.snsInfo.protocol;
-            snsInfo["operation"] = result.snsInfo.operation;
-            snsInfo["name"] = result.snsInfo.name;
+            json cnsInfo;
+            cnsInfo["protocol"] = result.snsInfo.protocol;
+            cnsInfo["operation"] = result.snsInfo.operation;
+            cnsInfo["name"] = result.snsInfo.name;
             
             cs::Bytes holderBytes(result.snsInfo.holder.begin(), result.snsInfo.holder.end());
-            snsInfo["holder"] = encodeBase58(holderBytes);
-            snsInfo["blockNumber"] = result.snsInfo.blockNumber;
-            snsInfo["txIndex"] = result.snsInfo.txIndex;
+            cnsInfo["holder"] = encodeBase58(holderBytes);
+            cnsInfo["blockNumber"] = result.snsInfo.blockNumber;
+            cnsInfo["txIndex"] = result.snsInfo.txIndex;
             
-            response["snsInfo"] = snsInfo;
+            // For backward compatibility, keep "snsInfo" but note it's actually CNS
+            response["snsInfo"] = cnsInfo;
         }
         
         sendResponse(hdl, msg.type, msg.id, response);
     }
     catch (const std::exception& e) {
-        sendError(hdl, msg.id, std::string("Error checking ordinal SNS: ") + e.what());
+        sendError(hdl, msg.id, std::string("Error checking CNS name: ") + e.what());
     }
 }
 
@@ -1183,24 +1190,24 @@ void WebSocketHandler::handleOrdinalSNSGetByHolder(ConnectionHdl hdl, const WebS
         json response;
         response["snsEntries"] = json::array();
         
-        for (const auto& snsEntry : result.snsEntries) {
-            json snsJson;
-            snsJson["protocol"] = snsEntry.protocol;
-            snsJson["operation"] = snsEntry.operation;
-            snsJson["name"] = snsEntry.name;
+        for (const auto& cnsEntry : result.snsEntries) {
+            json cnsJson;
+            cnsJson["protocol"] = cnsEntry.protocol;
+            cnsJson["operation"] = cnsEntry.operation;
+            cnsJson["name"] = cnsEntry.name;
             
-            cs::Bytes entryHolderBytes(snsEntry.holder.begin(), snsEntry.holder.end());
-            snsJson["holder"] = encodeBase58(entryHolderBytes);
-            snsJson["blockNumber"] = snsEntry.blockNumber;
-            snsJson["txIndex"] = snsEntry.txIndex;
+            cs::Bytes entryHolderBytes(cnsEntry.holder.begin(), cnsEntry.holder.end());
+            cnsJson["holder"] = encodeBase58(entryHolderBytes);
+            cnsJson["blockNumber"] = cnsEntry.blockNumber;
+            cnsJson["txIndex"] = cnsEntry.txIndex;
             
-            response["snsEntries"].push_back(snsJson);
+            response["snsEntries"].push_back(cnsJson);
         }
         
         sendResponse(hdl, msg.type, msg.id, response);
     }
     catch (const std::exception& e) {
-        sendError(hdl, msg.id, std::string("Error getting ordinal SNS by holder: ") + e.what());
+        sendError(hdl, msg.id, std::string("Error getting CNS by holder: ") + e.what());
     }
 }
 

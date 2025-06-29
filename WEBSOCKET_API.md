@@ -191,6 +191,25 @@ All messages use JSON format with the following structure:
 - `11` - GetSmartContracts
 - `12` - GetSmartContractAddresses
 
+### Token API Types (13-30)
+- `13` - TokenBalancesGet
+- `14` - TokenTransfersGet
+- `15` - TokenTransferGet
+- `16` - TokenTransfersListGet
+- `17` - TokenWalletTransfersGet
+- `18` - TokenTransactionsGet
+- `19` - TokenInfoGet
+- `20` - TokenHoldersGet
+- `21` - TokensListGet
+
+### Ordinal API Types (31-40)
+- `31` - OrdinalSNSCheck (CNS Name Availability)
+- `32` - OrdinalSNSGetByHolder (CNS Names by Owner)
+- `33` - OrdinalTokenGet (Ordinal Token Info)
+- `34` - OrdinalTokenBalanceGet (Ordinal Token Balance)
+- `35` - OrdinalTokensList (List Ordinal Tokens)
+- `36` - OrdinalStatsGet (Ordinal Statistics)
+
 ### Subscription Types (100-199)
 - `100` - Subscribe
 - `101` - Unsubscribe
@@ -200,6 +219,10 @@ All messages use JSON format with the following structure:
 - `201` - NewTransaction
 - `202` - TransactionStatus
 - `203` - SmartContractEvent
+- `204` - TokenTransfer
+- `205` - TokenDeploy
+- `206` - OrdinalInscription
+- `207` - OrdinalTransfer
 
 ### System Types (400-599)
 - `400` - Error
@@ -581,6 +604,297 @@ Get a list of smart contract addresses deployed by a specific address.
 }
 ```
 
+## Ordinal API Functions (CONP-Compliant CNS)
+
+The Credits Node implements a full **Credits Name System (CNS)** following the **CONP (Credits Ordinals Naming Protocol)** specification. CNS allows users to register human-readable names on the Credits blockchain.
+
+### 31. OrdinalSNSCheck (Type: 31)
+
+Check if a CNS name is available for registration or get information about an existing registration.
+
+**Request:**
+```json
+{
+  "type": 31,
+  "id": "cns-check-1",
+  "data": {
+    "name": "myname"
+  }
+}
+```
+
+**Response (Available):**
+```json
+{
+  "type": 31,
+  "id": "cns-check-1",
+  "data": {
+    "available": true
+  }
+}
+```
+
+**Response (Registered):**
+```json
+{
+  "type": 31,
+  "id": "cns-check-1",
+  "data": {
+    "available": false,
+    "cnsInfo": {
+      "protocol": "cns",
+      "operation": "reg",
+      "name": "myname",
+      "relay": "ipfs://QmHash123...",
+      "owner": "base58_encoded_owner_address",
+      "blockNumber": 12345,
+      "txIndex": 2
+    }
+  }
+}
+```
+
+**CONP Compliance Notes:**
+- Supports both `"cns"` (short names) and `"cdns"` (domain names) namespaces
+- Names are case-insensitive and UTF-8 validated
+- No spaces allowed in names
+- Operations: `"reg"` (register), `"upd"` (update), `"trf"` (transfer)
+- Optional `"relay"` field for additional data (IPFS CID, URL, wallet address, etc.)
+
+### 32. OrdinalSNSGetByHolder (Type: 32)
+
+Get all CNS names owned by a specific address.
+
+**Request:**
+```json
+{
+  "type": 32,
+  "id": "cns-by-owner-1",
+  "data": {
+    "address": "base58_encoded_owner_address"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "type": 32,
+  "id": "cns-by-owner-1",
+  "data": {
+    "names": [
+      {
+        "protocol": "cns",
+        "operation": "reg",
+        "name": "alice",
+        "relay": "https://alice.credits",
+        "owner": "base58_encoded_owner_address",
+        "blockNumber": 10000,
+        "txIndex": 1
+      },
+      {
+        "protocol": "cdns",
+        "operation": "reg", 
+        "name": "alice.credits",
+        "relay": "ipfs://QmAbc123...",
+        "owner": "base58_encoded_owner_address",
+        "blockNumber": 10500,
+        "txIndex": 3
+      }
+    ]
+  }
+}
+```
+
+### 33. OrdinalTokenGet (Type: 33)
+
+Get information about a specific ordinal token.
+
+**Request:**
+```json
+{
+  "type": 33,
+  "id": "token-info-1",
+  "data": {
+    "ticker": "CREDS"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "type": 33,
+  "id": "token-info-1",
+  "data": {
+    "found": true,
+    "ticker": "CREDS",
+    "maxSupply": 1000000,
+    "limitPerMint": 1000,
+    "totalMinted": 500000,
+    "deployBlock": 5000,
+    "deployer": "base58_encoded_deployer_address"
+  }
+}
+```
+
+### 34. OrdinalTokenBalanceGet (Type: 34)
+
+Get ordinal token balance for a specific address.
+
+**Request:**
+```json
+{
+  "type": 34,
+  "id": "token-balance-1",
+  "data": {
+    "address": "base58_encoded_address",
+    "ticker": "CREDS"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "type": 34,
+  "id": "token-balance-1",
+  "data": {
+    "address": "base58_encoded_address",
+    "ticker": "CREDS",
+    "balance": 5000
+  }
+}
+```
+
+### 35. OrdinalTokensList (Type: 35)
+
+Get a paginated list of all ordinal tokens.
+
+**Request:**
+```json
+{
+  "type": 35,
+  "id": "tokens-list-1",
+  "data": {
+    "offset": 0,
+    "limit": 10
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "type": 35,
+  "id": "tokens-list-1",
+  "data": {
+    "tokens": [
+      {
+        "ticker": "CREDS",
+        "maxSupply": 1000000,
+        "limitPerMint": 1000,
+        "totalMinted": 500000,
+        "deployBlock": 5000,
+        "deployer": "base58_encoded_deployer_address"
+      },
+      {
+        "ticker": "ORDI",
+        "maxSupply": 21000000,
+        "limitPerMint": 1000,
+        "totalMinted": 10500000,
+        "deployBlock": 7500,
+        "deployer": "base58_encoded_deployer_address"
+      }
+    ],
+    "total": 25
+  }
+}
+```
+
+### 36. OrdinalStatsGet (Type: 36)
+
+Get overall ordinal indexing statistics.
+
+**Request:**
+```json
+{
+  "type": 36,
+  "id": "ordinal-stats-1",
+  "data": {}
+}
+```
+
+**Response:**
+```json
+{
+  "type": 36,
+  "id": "ordinal-stats-1",
+  "data": {
+    "totalCNSCount": 1250,
+    "totalTokenCount": 25,
+    "totalInscriptionCount": 15750,
+    "lastIndexedBlock": 12345
+  }
+}
+```
+
+## CNS Registration Examples
+
+### Creating CNS Inscriptions
+
+To register a CNS name, create a Credits transaction with ordinal inscription data in the user fields:
+
+**Short Name Registration (cns namespace):**
+```json
+{
+  "p": "cns",
+  "op": "reg", 
+  "cns": "alice",
+  "relay": "https://alice.credits"
+}
+```
+
+**Domain Name Registration (cdns namespace):**
+```json
+{
+  "p": "cdns",
+  "op": "reg",
+  "cns": "alice.credits", 
+  "relay": "ipfs://QmHash123..."
+}
+```
+
+**Name Update:**
+```json
+{
+  "p": "cns",
+  "op": "upd",
+  "cns": "alice",
+  "relay": "https://new-alice-site.com"
+}
+```
+
+**Name Transfer:**
+```json
+{
+  "p": "cns", 
+  "op": "trf",
+  "cns": "alice"
+}
+```
+
+### CONP Specification Compliance
+
+The Credits Node CNS implementation fully complies with the CONP specification:
+
+1. **Namespace Support**: Both `"cns"` (short names) and `"cdns"` (domain names)
+2. **Operations**: `"reg"`, `"upd"`, `"trf"` 
+3. **Name Validation**: UTF-8 compliant, case-insensitive, no spaces
+4. **Ownership**: First-seen-wins consensus, ownership verification for updates/transfers
+5. **Relay Data**: Optional field for additional metadata
+6. **Indexing**: Real-time indexing with LMDB storage for fast queries
+
 ## Subscriptions
 
 ### Subscribe (Type: 100)
@@ -591,6 +905,9 @@ Subscribe to real-time events.
 - `"blocks"` - New block notifications
 - `"transactions"` - New transaction notifications
 - `"smart_contracts"` - Smart contract events
+- `"tokens"` - Token transfer and deployment events
+- `"ordinals"` - Ordinal inscription and transfer events
+- `"cns"` - CNS name registration, update, and transfer events
 - `"tx:TRANSACTION_ID"` - Specific transaction status updates
 
 **Request:**
@@ -715,6 +1032,86 @@ Sent when smart contract events occur (requires "smart_contracts" subscription).
 }
 ```
 
+### TokenTransfer (Type: 204)
+
+Sent when token transfers occur (requires "tokens" subscription).
+
+```json
+{
+  "type": 204,
+  "id": "",
+  "data": {
+    "ticker": "CREDS",
+    "from": "base58_encoded_from_address",
+    "to": "base58_encoded_to_address",
+    "amount": 1000,
+    "poolSeq": 12346,
+    "txIndex": 8
+  }
+}
+```
+
+### TokenDeploy (Type: 205)
+
+Sent when new tokens are deployed (requires "tokens" subscription).
+
+```json
+{
+  "type": 205,
+  "id": "",
+  "data": {
+    "ticker": "NEWTOKEN",
+    "maxSupply": 1000000,
+    "limitPerMint": 1000,
+    "deployer": "base58_encoded_deployer_address",
+    "poolSeq": 12346,
+    "txIndex": 1
+  }
+}
+```
+
+### OrdinalInscription (Type: 206)
+
+Sent when new ordinal inscriptions are created (requires "ordinals" subscription).
+
+```json
+{
+  "type": 206,
+  "id": "",
+  "data": {
+    "type": "cns",
+    "inscription": {
+      "protocol": "cns",
+      "operation": "reg",
+      "name": "alice",
+      "relay": "https://alice.credits"
+    },
+    "creator": "base58_encoded_creator_address",
+    "poolSeq": 12346,
+    "txIndex": 3
+  }
+}
+```
+
+### OrdinalTransfer (Type: 207)
+
+Sent when ordinal assets are transferred (requires "ordinals" subscription).
+
+```json
+{
+  "type": 207,
+  "id": "",
+  "data": {
+    "type": "cns",
+    "name": "alice",
+    "from": "base58_encoded_from_address",
+    "to": "base58_encoded_to_address",
+    "poolSeq": 12346,
+    "txIndex": 5
+  }
+}
+```
+
 ## Error Handling
 
 ### Error Response (Type: 400)
@@ -760,6 +1157,13 @@ ws.onopen = function() {
         id: 'block-subscription',
         data: { topic: 'blocks' }
     }));
+    
+    // Subscribe to CNS events
+    ws.send(JSON.stringify({
+        type: 100,
+        id: 'cns-subscription',
+        data: { topic: 'cns' }
+    }));
 };
 
 ws.onmessage = function(event) {
@@ -775,6 +1179,12 @@ ws.onmessage = function(event) {
             break;
         case 200: // NewBlock notification
             console.log('New block:', message.data);
+            break;
+        case 206: // OrdinalInscription notification
+            console.log('New ordinal inscription:', message.data);
+            break;
+        case 207: // OrdinalTransfer notification  
+            console.log('Ordinal transfer:', message.data);
             break;
         case 400: // Error
             console.error('Error:', message.data.error);
@@ -819,6 +1229,26 @@ async def client():
         }
         
         await websocket.send(json.dumps(subscribe_request))
+        
+        # Check CNS name availability
+        cns_check_request = {
+            "type": 31,
+            "id": "cns-check-1",
+            "data": {
+                "name": "alice"
+            }
+        }
+        
+        await websocket.send(json.dumps(cns_check_request))
+        
+        # Get ordinal statistics
+        stats_request = {
+            "type": 36,
+            "id": "ordinal-stats-1",
+            "data": {}
+        }
+        
+        await websocket.send(json.dumps(stats_request))
         
         # Listen for messages
         async for message in websocket:
@@ -975,6 +1405,12 @@ asyncio.run(client())
                     <option value="10">GetSmartContract</option>
                     <option value="11">GetSmartContracts</option>
                     <option value="12">GetSmartContractAddresses</option>
+                    <option value="31">OrdinalSNSCheck (CNS)</option>
+                    <option value="32">OrdinalSNSGetByHolder (CNS)</option>
+                    <option value="33">OrdinalTokenGet</option>
+                    <option value="34">OrdinalTokenBalanceGet</option>
+                    <option value="35">OrdinalTokensList</option>
+                    <option value="36">OrdinalStatsGet</option>
                 </select>
             </div>
             <div class="control-group">
@@ -995,6 +1431,9 @@ asyncio.run(client())
                 <option value="blocks">Blocks</option>
                 <option value="transactions">Transactions</option>
                 <option value="smart_contracts">Smart Contracts</option>
+                <option value="tokens">Tokens</option>
+                <option value="ordinals">Ordinals</option>
+                <option value="cns">CNS Names</option>
             </select>
             <button onclick="subscribe()" id="subscribeBtn" disabled>Subscribe</button>
             <button onclick="unsubscribe()" id="unsubscribeBtn" disabled>Unsubscribe</button>
@@ -1042,7 +1481,19 @@ asyncio.run(client())
                 { name: 'offset', label: 'Offset', type: 'number', placeholder: '0', value: '0' },
                 { name: 'limit', label: 'Limit', type: 'number', placeholder: '10', value: '10' }
             ],
-            12: [{ name: 'deployer', label: 'Deployer Address (Base64)', type: 'text', placeholder: 'Base64 encoded deployer address' }]
+            12: [{ name: 'deployer', label: 'Deployer Address (Base64)', type: 'text', placeholder: 'Base64 encoded deployer address' }],
+            31: [{ name: 'name', label: 'CNS Name', type: 'text', placeholder: 'alice' }],
+            32: [{ name: 'address', label: 'Owner Address (Base58)', type: 'text', placeholder: 'Base58 encoded owner address' }],
+            33: [{ name: 'ticker', label: 'Token Ticker', type: 'text', placeholder: 'CREDS' }],
+            34: [
+                { name: 'address', label: 'Address (Base58)', type: 'text', placeholder: 'Base58 encoded address' },
+                { name: 'ticker', label: 'Token Ticker', type: 'text', placeholder: 'CREDS' }
+            ],
+            35: [
+                { name: 'offset', label: 'Offset', type: 'number', placeholder: '0', value: '0' },
+                { name: 'limit', label: 'Limit', type: 'number', placeholder: '10', value: '10' }
+            ],
+            36: [] // OrdinalStatsGet - no parameters
         };
 
         function connect() {

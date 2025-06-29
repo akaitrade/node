@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <algorithm>
+#include <cctype>
 
 #include <csdb/address.hpp>
 #include <csdb/transaction.hpp>
@@ -25,22 +27,46 @@ namespace cs {
 // Ordinal inscription types
 enum class OrdinalType : uint8_t {
     Unknown = 0,
-    SNS = 1,      // Simple Name Service
+    CNS = 1,      // Credits Name System (implements CONP spec)
     Token = 2,    // Token operations
     Deploy = 3,   // Token deployment
 };
 
-// SNS (Simple Name Service) inscription
-struct SNSInscription {
-    std::string p;      // protocol
-    std::string op;     // operation
-    std::string name;   // name to register
-    csdb::Address holder; // current holder address
-    Sequence blockNumber = 0;  // block number where SNS was registered
+// CNS (Credits Name System) inscription - implements CONP specification
+struct CNSInscription {
+    std::string p;      // namespace: "cdns" or "cns"
+    std::string op;     // operation: "reg", "upd", "trf"
+    std::string cns;    // name (UTF-8, case-insensitive, no spaces)
+    std::string relay;  // optional relay data (wallet address, IPFS CID, URL, etc.)
+    csdb::Address owner; // current owner address (holder)
+    Sequence blockNumber = 0;  // block number where name was registered
     cs::Sequence txIndex = 0;  // transaction index in the block
     
     bool isValid() const {
-        return !p.empty() && !op.empty() && !name.empty();
+        // Validate namespace
+        if (p != "cdns" && p != "cns") return false;
+        
+        // Validate operation
+        if (op != "reg" && op != "upd" && op != "trf") return false;
+        
+        // Name must not be empty
+        if (cns.empty()) return false;
+        
+        return true;
+    }
+    
+    // Helper to normalize name for comparison (lowercase)
+    std::string normalizedName() const {
+        std::string normalized = cns;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+        return normalized;
+    }
+    
+    // Helper to normalize namespace for comparison (lowercase)
+    std::string normalizedNamespace() const {
+        std::string normalized = p;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+        return normalized;
     }
 };
 
@@ -107,17 +133,17 @@ public:
 
     bool recreate() const;
 
-    // Query methods for ordinals
-    std::vector<SNSInscription> getSNSByHolder(const csdb::Address& addr) const;
-    std::optional<SNSInscription> getSNSByName(const std::string& name) const;
-    bool isSNSAvailable(const std::string& name) const;
+    // Query methods for CNS names
+    std::vector<CNSInscription> getCNSByOwner(const csdb::Address& addr) const;
+    std::optional<CNSInscription> getCNSByName(const std::string& namespace_, const std::string& name) const;
+    bool isCNSNameAvailable(const std::string& namespace_, const std::string& name) const;
     
     std::vector<TokenState> getAllTokens() const;
     std::optional<TokenState> getToken(const std::string& ticker) const;
     int64_t getTokenBalance(const csdb::Address& addr, const std::string& ticker) const;
     
     // Statistics
-    size_t getTotalSNSCount() const;
+    size_t getTotalCNSCount() const;
     size_t getTotalTokenCount() const;
     size_t getTotalInscriptionCount() const;
 
@@ -141,24 +167,30 @@ private:
     
     // Ordinal parsing and validation
     std::optional<OrdinalMetadata> parseOrdinalFromTransaction(const csdb::Transaction& tx);
-    std::optional<SNSInscription> parseSNSInscription(const OrdinalJsonParser::JsonObject& json);
+    std::optional<CNSInscription> parseCNSInscription(const OrdinalJsonParser::JsonObject& json);
     std::optional<TokenInscription> parseTokenInscription(const OrdinalJsonParser::JsonObject& json);
     std::optional<TokenDeployInscription> parseTokenDeployInscription(const OrdinalJsonParser::JsonObject& json);
     
     // Storage operations
-    void storeSNS(const SNSInscription& sns, const csdb::TransactionID& txId);
+    void storeCNS(const CNSInscription& cns, const csdb::TransactionID& txId, const csdb::Address& sender);
+    void updateCNS(const std::string& namespace_, const std::string& name, const std::string& relay, const csdb::TransactionID& txId, const csdb::Address& sender);
+    void transferCNS(const std::string& namespace_, const std::string& name, const csdb::Address& newOwner, const csdb::TransactionID& txId, const csdb::Address& sender);
     void storeTokenDeploy(const TokenDeployInscription& deploy, const csdb::TransactionID& txId, const csdb::Address& deployer);
     void storeTokenMint(const TokenInscription& mint, const csdb::TransactionID& txId, const csdb::Address& minter);
     
     // Index removal operations (for reorg handling)
-    void removeSNS(const std::string& name);
+    void removeCNS(const std::string& namespace_, const std::string& name);
     void removeTokenMint(const std::string& ticker, int64_t amount);
     
     // Helper methods
-    cs::Bytes getSNSKey(const std::string& name) const;
+    cs::Bytes getCNSKey(const std::string& namespace_, const std::string& name) const;
     cs::Bytes getTokenKey(const std::string& ticker) const;
     cs::Bytes getTokenBalanceKey(const csdb::Address& addr, const std::string& ticker) const;
     cs::Bytes getOrdinalMetaKey(const csdb::TransactionID& txId) const;
+    
+    // CNS validation helpers
+    bool isValidCNSName(const std::string& name) const;
+    bool isValidUTF8(const std::string& str) const;
     
     // Serialization methods
     cs::Bytes serializeOrdinalMetadata(const OrdinalMetadata& meta);
@@ -175,12 +207,12 @@ private:
     MMappedFileWrap<FileSink> lastIndexedFile_;
     
     // In-memory caches for fast lookup during indexing
-    std::map<std::string, SNSInscription> snsCache_;
+    std::map<std::pair<std::string, std::string>, CNSInscription> cnsCache_;  // Key: (namespace, name)
     std::map<std::string, TokenState> tokenCache_;
     std::map<std::pair<csdb::Address, std::string>, int64_t> balanceCache_;
     
     // Statistics counters
-    mutable size_t totalSNSCount_ = 0;
+    mutable size_t totalCNSCount_ = 0;
     mutable size_t totalTokenCount_ = 0;
     mutable size_t totalInscriptionCount_ = 0;
     mutable bool countersInitialized_ = false;

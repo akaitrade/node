@@ -83,12 +83,12 @@ void OrdinalIndex::onReadFromDb(const csdb::Pool& _pool) {
 void OrdinalIndex::onDbReadFinished() {
     if (recreate_) {
         recreate_ = false;
-        snsCache_.clear();
+        cnsCache_.clear();
         tokenCache_.clear();
         balanceCache_.clear();
         
         // Reset counters for fresh recreation
-        totalSNSCount_ = 0;
+        totalCNSCount_ = 0;
         totalTokenCount_ = 0;
         totalInscriptionCount_ = 0;
         countersInitialized_ = false;
@@ -101,7 +101,7 @@ void OrdinalIndex::onDbReadFinished() {
     
     // Final checkpoint save to ensure progress is preserved
     cslog() << "OrdinalIndex: completed indexing up to block " << lastIndexedPool_ 
-            << " (SNS: " << getTotalSNSCount() << ", Tokens: " << getTotalTokenCount() << ", Total: " << getTotalInscriptionCount() << ")"
+            << " (CNS: " << getTotalCNSCount() << ", Tokens: " << getTotalTokenCount() << ", Total: " << getTotalInscriptionCount() << ")"
             << " - recreate mode was: " << (recreate_ ? "true" : "false");
 }
 
@@ -116,10 +116,10 @@ void OrdinalIndex::onRemoveBlock(const csdb::Pool& _pool) {
         auto& json = *jsonOpt;
 
         switch (ordinalMeta->type) {
-            case OrdinalType::SNS: {
-                auto sns = parseSNSInscription(json);
-                if (sns) {
-                    removeSNS(sns->name);
+            case OrdinalType::CNS: {
+                auto cns = parseCNSInscription(json);
+                if (cns) {
+                    removeCNS(cns->normalizedNamespace(), cns->normalizedName());
                 }
                 break;
             }
@@ -242,18 +242,23 @@ void OrdinalIndex::updateFromNextBlock(const csdb::Pool& _pool) {
         cslog() << "JSON parsed successfully, ordinal type: " << static_cast<int>(ordinalMeta->type);
 
         switch (ordinalMeta->type) {
-            case OrdinalType::SNS: {
-                cslog() << "Processing SNS ordinal...";
-                auto sns = parseSNSInscription(json);
-                if (sns) {
-                    cslog() << "SNS parsed successfully: " << sns->name;
-                    sns->holder = tx.source();
-                    cslog() << "Holder assigned, storing SNS...";
-                    storeSNS(*sns, tx.id());
-                    cslog() << "Found SNS inscription: " << sns->name;
+            case OrdinalType::CNS: {
+                cslog() << "Processing CNS ordinal...";
+                auto cns = parseCNSInscription(json);
+                if (cns) {
+                    cslog() << "CNS parsed successfully: " << cns->cns << " in namespace " << cns->p;
+                    
+                    // For transfer operations, the new owner is the transaction target
+                    if (cns->op == "trf" || cns->op == "TRF") {
+                        transferCNS(cns->normalizedNamespace(), cns->normalizedName(), tx.target(), tx.id(), tx.source());
+                    } else {
+                        storeCNS(*cns, tx.id(), tx.source());
+                    }
+                    
+                    cslog() << "Found CNS inscription: " << cns->p << "/" << cns->cns << " op: " << cns->op;
                 }
                 else {
-                    cslog() << "Failed to parse SNS inscription";
+                    cslog() << "Failed to parse CNS inscription";
                 }
                 break;
             }
@@ -354,10 +359,17 @@ std::optional<OrdinalMetadata> OrdinalIndex::parseOrdinalFromTransaction(const c
 
     // Determine ordinal type based on fields
     if (json.count("p") && json.count("op")) {
+        std::string p = OrdinalJsonParser::getString(json, "p");
         std::string op = OrdinalJsonParser::getString(json, "op");
         
-        if (json.count("name") && op == "reg") {
-            meta.type = OrdinalType::SNS;
+        // Normalize for comparison
+        std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+        std::transform(op.begin(), op.end(), op.begin(), ::tolower);
+        
+        // Check for CNS inscription
+        if (json.count("cns") && (p == "cdns" || p == "cns") && 
+            (op == "reg" || op == "upd" || op == "trf")) {
+            meta.type = OrdinalType::CNS;
         }
         else if (json.count("tick") && json.count("amt") && op == "mint") {
             meta.type = OrdinalType::Token;
@@ -376,22 +388,45 @@ std::optional<OrdinalMetadata> OrdinalIndex::parseOrdinalFromTransaction(const c
     return meta;
 }
 
-std::optional<SNSInscription> OrdinalIndex::parseSNSInscription(const OrdinalJsonParser::JsonObject& json) {
+std::optional<CNSInscription> OrdinalIndex::parseCNSInscription(const OrdinalJsonParser::JsonObject& json) {
     try {
-        if (!json.count("p") || !json.count("op") || !json.count("name")) {
+        if (!json.count("p") || !json.count("op") || !json.count("cns")) {
             return std::nullopt;
         }
 
-        SNSInscription sns;
-        sns.p = OrdinalJsonParser::getString(json, "p");
-        sns.op = OrdinalJsonParser::getString(json, "op");
-        sns.name = OrdinalJsonParser::getString(json, "name");
+        CNSInscription cns;
+        cns.p = OrdinalJsonParser::getString(json, "p");
+        cns.op = OrdinalJsonParser::getString(json, "op");
+        cns.cns = OrdinalJsonParser::getString(json, "cns");
+        
+        // Optional relay field
+        if (json.count("relay")) {
+            cns.relay = OrdinalJsonParser::getString(json, "relay");
+        }
 
-        if (!sns.isValid()) {
+        // Validate namespace (must be cdns or cns)
+        std::string normalizedNamespace = cns.normalizedNamespace();
+        if (normalizedNamespace != "cdns" && normalizedNamespace != "cns") {
+            return std::nullopt;
+        }
+        
+        // Validate operation (must be reg, upd, or trf)
+        std::string normalizedOp = cns.op;
+        std::transform(normalizedOp.begin(), normalizedOp.end(), normalizedOp.begin(), ::tolower);
+        if (normalizedOp != "reg" && normalizedOp != "upd" && normalizedOp != "trf") {
+            return std::nullopt;
+        }
+        
+        // Validate name (UTF-8, no spaces)
+        if (!isValidCNSName(cns.cns)) {
             return std::nullopt;
         }
 
-        return sns;
+        if (!cns.isValid()) {
+            return std::nullopt;
+        }
+
+        return cns;
     }
     catch (const std::exception&) {
         return std::nullopt;
@@ -446,64 +481,197 @@ std::optional<TokenDeployInscription> OrdinalIndex::parseTokenDeployInscription(
     }
 }
 
-void OrdinalIndex::storeSNS(const SNSInscription& sns, const csdb::TransactionID& txId) {
+void OrdinalIndex::storeCNS(const CNSInscription& cns, const csdb::TransactionID& txId, const csdb::Address& sender) {
     try {
-        cslog() << "Storing SNS: " << sns.name << " for holder";
+        std::string normalizedNamespace = cns.normalizedNamespace();
+        std::string normalizedName = cns.normalizedName();
+        std::string normalizedOp = cns.op;
+        std::transform(normalizedOp.begin(), normalizedOp.end(), normalizedOp.begin(), ::tolower);
         
-        // Check if SNS already exists
-        if (!isSNSAvailable(sns.name)) {
-            cslog() << "SNS already registered: " << sns.name;
-            return; // Already registered
+        cslog() << "Storing CNS: namespace=" << normalizedNamespace << ", name=" << normalizedName << ", op=" << normalizedOp;
+        
+        // Handle different operations
+        if (normalizedOp == "reg") {
+            // Registration - check if name already exists
+            if (!isCNSNameAvailable(normalizedNamespace, normalizedName)) {
+                cslog() << "CNS name already registered: " << normalizedNamespace << "/" << normalizedName;
+                return; // Already registered - first-seen wins
+            }
+            
+            // Create new CNS entry
+            CNSInscription storedCns = cns;
+            storedCns.owner = sender;
+            storedCns.blockNumber = txId.pool_seq();
+            storedCns.txIndex = txId.index();
+            
+            // Store in LMDB
+            OrdinalJsonParser::JsonObject cnsJson;
+            cnsJson["p"] = normalizedNamespace;
+            cnsJson["op"] = "reg";
+            cnsJson["cns"] = normalizedName;
+            cnsJson["relay"] = cns.relay;
+            
+            // Safe Base58 encoding for owner
+            auto publicKey = sender.public_key();
+            if (!publicKey.empty()) {
+                cnsJson["owner"] = EncodeBase58(publicKey.data(), publicKey.data() + publicKey.size());
+            } else {
+                cnsJson["owner"] = "";
+                cswarning() << "Empty public key for CNS owner";
+            }
+            
+            cnsJson["block"] = std::to_string(txId.pool_seq());
+            cnsJson["txIndex"] = std::to_string(txId.index());
+            
+            auto serializedData = OrdinalJsonParser::serialize(cnsJson);
+            auto cnsKey = getCNSKey(normalizedNamespace, normalizedName);
+            
+            cslog() << "Inserting CNS into LMDB, key size: " << cnsKey.size() << ", data size: " << serializedData.size();
+            db_->insert(cnsKey, serializedData);
+            
+            // Update cache
+            if (recreate_) {
+                cnsCache_[{normalizedNamespace, normalizedName}] = storedCns;
+            }
+            
+            // Update counters
+            if (countersInitialized_) {
+                totalCNSCount_++;
+                totalInscriptionCount_++;
+            }
+            
+            cslog() << "Successfully registered CNS: " << normalizedNamespace << "/" << normalizedName;
+            
+            // Notify subscribers if callback is set
+            if (notificationCallback_) {
+                notificationCallback_("cns_registration", serializedData, txId.pool_seq(), txId.index());
+            }
         }
-
-        // Store in LMDB
-        OrdinalJsonParser::JsonObject snsJson;
-        snsJson["p"] = sns.p;
-        snsJson["op"] = sns.op;
-        snsJson["name"] = sns.name;
-        
-        // Safe Base58 encoding
-        auto publicKey = sns.holder.public_key();
-        if (!publicKey.empty()) {
-            snsJson["holder"] = EncodeBase58(publicKey.data(), publicKey.data() + publicKey.size());
-        } else {
-            snsJson["holder"] = "";
-            cswarning() << "Empty public key for SNS holder";
+        else if (normalizedOp == "upd") {
+            updateCNS(normalizedNamespace, normalizedName, cns.relay, txId, sender);
         }
-        
-        snsJson["block"] = std::to_string(txId.pool_seq());
-        snsJson["txIndex"] = std::to_string(txId.index());
-
-        auto serializedData = OrdinalJsonParser::serialize(snsJson);
-        auto snsKey = getSNSKey(sns.name);
-        
-        cslog() << "Inserting SNS into LMDB, key size: " << snsKey.size() << ", data size: " << serializedData.size();
-        db_->insert(snsKey, serializedData);
-
-        // Update cache
-        if (recreate_) {
-            snsCache_[sns.name] = sns;
-        }
-        
-        // Update counters
-        if (countersInitialized_) {
-            totalSNSCount_++;
-            totalInscriptionCount_++;
-        }
-        
-        cslog() << "Successfully stored SNS: " << sns.name;
-        
-        // Notify subscribers if callback is set
-        if (notificationCallback_) {
-            notificationCallback_("sns_inscription", serializedData, txId.pool_seq(), txId.index());
+        else if (normalizedOp == "trf") {
+            transferCNS(normalizedNamespace, normalizedName, sender, txId, sender);
         }
     }
     catch (const std::exception& e) {
-        cserror() << "Exception in storeSNS: " << e.what();
+        cserror() << "Exception in storeCNS: " << e.what();
         throw;
     }
     catch (...) {
-        cserror() << "Unknown exception in storeSNS";
+        cserror() << "Unknown exception in storeCNS";
+        throw;
+    }
+}
+
+void OrdinalIndex::updateCNS(const std::string& namespace_, const std::string& name, const std::string& relay, const csdb::TransactionID& txId, const csdb::Address& sender) {
+    try {
+        // Get existing CNS entry
+        auto existingCns = getCNSByName(namespace_, name);
+        if (!existingCns) {
+            cslog() << "CNS name not found for update: " << namespace_ << "/" << name;
+            return; // Name doesn't exist - ignore update
+        }
+        
+        // Verify ownership
+        if (existingCns->owner != sender) {
+            cslog() << "CNS update rejected - sender is not the owner: " << namespace_ << "/" << name;
+            return; // Sender is not the owner
+        }
+        
+        // Update relay field
+        existingCns->relay = relay;
+        
+        // Update in LMDB
+        OrdinalJsonParser::JsonObject cnsJson;
+        cnsJson["p"] = namespace_;
+        cnsJson["op"] = "upd";
+        cnsJson["cns"] = name;
+        cnsJson["relay"] = relay;
+        
+        auto publicKey = existingCns->owner.public_key();
+        if (!publicKey.empty()) {
+            cnsJson["owner"] = EncodeBase58(publicKey.data(), publicKey.data() + publicKey.size());
+        }
+        
+        cnsJson["block"] = std::to_string(existingCns->blockNumber);
+        cnsJson["txIndex"] = std::to_string(existingCns->txIndex);
+        
+        auto serializedData = OrdinalJsonParser::serialize(cnsJson);
+        auto cnsKey = getCNSKey(namespace_, name);
+        
+        db_->insert(cnsKey, serializedData); // Overwrites existing entry
+        
+        // Update cache
+        if (recreate_) {
+            cnsCache_[{namespace_, name}] = *existingCns;
+        }
+        
+        cslog() << "Successfully updated CNS relay: " << namespace_ << "/" << name;
+        
+        // Notify subscribers
+        if (notificationCallback_) {
+            notificationCallback_("cns_update", serializedData, txId.pool_seq(), txId.index());
+        }
+    }
+    catch (const std::exception& e) {
+        cserror() << "Exception in updateCNS: " << e.what();
+        throw;
+    }
+}
+
+void OrdinalIndex::transferCNS(const std::string& namespace_, const std::string& name, const csdb::Address& newOwner, const csdb::TransactionID& txId, const csdb::Address& sender) {
+    try {
+        // Get existing CNS entry
+        auto existingCns = getCNSByName(namespace_, name);
+        if (!existingCns) {
+            cslog() << "CNS name not found for transfer: " << namespace_ << "/" << name;
+            return; // Name doesn't exist - ignore transfer
+        }
+        
+        // Verify ownership
+        if (existingCns->owner != sender) {
+            cslog() << "CNS transfer rejected - sender is not the owner: " << namespace_ << "/" << name;
+            return; // Sender is not the owner
+        }
+        
+        // Transfer ownership - the new owner is the transaction target (recipient)
+        existingCns->owner = newOwner;
+        
+        // Update in LMDB
+        OrdinalJsonParser::JsonObject cnsJson;
+        cnsJson["p"] = namespace_;
+        cnsJson["op"] = "trf";
+        cnsJson["cns"] = name;
+        cnsJson["relay"] = existingCns->relay;
+        
+        auto publicKey = newOwner.public_key();
+        if (!publicKey.empty()) {
+            cnsJson["owner"] = EncodeBase58(publicKey.data(), publicKey.data() + publicKey.size());
+        }
+        
+        cnsJson["block"] = std::to_string(existingCns->blockNumber);
+        cnsJson["txIndex"] = std::to_string(existingCns->txIndex);
+        
+        auto serializedData = OrdinalJsonParser::serialize(cnsJson);
+        auto cnsKey = getCNSKey(namespace_, name);
+        
+        db_->insert(cnsKey, serializedData); // Overwrites existing entry
+        
+        // Update cache
+        if (recreate_) {
+            cnsCache_[{namespace_, name}] = *existingCns;
+        }
+        
+        cslog() << "Successfully transferred CNS ownership: " << namespace_ << "/" << name;
+        
+        // Notify subscribers
+        if (notificationCallback_) {
+            notificationCallback_("cns_transfer", serializedData, txId.pool_seq(), txId.index());
+        }
+    }
+    catch (const std::exception& e) {
+        cserror() << "Exception in transferCNS: " << e.what();
         throw;
     }
 }
@@ -630,15 +798,15 @@ void OrdinalIndex::storeTokenMint(const TokenInscription& mint, const csdb::Tran
     }
 }
 
-void OrdinalIndex::removeSNS(const std::string& name) {
-    db_->remove(getSNSKey(name));
+void OrdinalIndex::removeCNS(const std::string& namespace_, const std::string& name) {
+    db_->remove(getCNSKey(namespace_, name));
     if (recreate_) {
-        snsCache_.erase(name);
+        cnsCache_.erase({namespace_, name});
     }
     
     // Update counters
     if (countersInitialized_) {
-        if (totalSNSCount_ > 0) totalSNSCount_--;
+        if (totalCNSCount_ > 0) totalCNSCount_--;
         if (totalInscriptionCount_ > 0) totalInscriptionCount_--;
     }
 }
@@ -674,91 +842,9 @@ void OrdinalIndex::removeTokenMint(const std::string& ticker, int64_t amount) {
     }
 }
 
-std::vector<SNSInscription> OrdinalIndex::getSNSByHolder(const csdb::Address& addr) const {
-    std::vector<SNSInscription> result;
-    
-    // Iterate through all SNS entries to find ones owned by this holder
-    // In production, this would benefit from a secondary index
-    cs::Bytes prefix{kSNSPrefix};
-    
-    db_->iterateWithPrefix(prefix, [&](const cs::Bytes& key, const cs::Bytes& value) -> bool {
-        auto jsonStr = std::string(value.begin(), value.end());
-        auto jsonOpt = OrdinalJsonParser::parse(jsonStr);
-        if (!jsonOpt) {
-            return true; // Continue iteration
-        }
-        auto& json = *jsonOpt;
-        
-        // Decode holder address from stored JSON
-        std::string holderBase58 = OrdinalJsonParser::getString(json, "holder");
-        if (!holderBase58.empty()) {
-            std::vector<unsigned char> decoded;
-            if (DecodeBase58(holderBase58, decoded)) {
-                cs::PublicKey pubKey;
-                if (decoded.size() == pubKey.size()) {
-                    std::copy(decoded.begin(), decoded.end(), pubKey.begin());
-                    csdb::Address storedHolder = csdb::Address::from_public_key(pubKey);
-                    
-                    // Check if this SNS belongs to the requested holder
-                    if (storedHolder == addr) {
-                        SNSInscription sns;
-                        sns.p = OrdinalJsonParser::getString(json, "p");
-                        sns.op = OrdinalJsonParser::getString(json, "op");
-                        sns.name = OrdinalJsonParser::getString(json, "name");
-                        sns.holder = storedHolder;
-                        sns.blockNumber = OrdinalJsonParser::getInt(json, "block");
-                        sns.txIndex = static_cast<cs::Sequence>(OrdinalJsonParser::getInt(json, "txIndex"));
-                        result.push_back(sns);
-                    }
-                }
-            }
-        }
-        return true; // Continue iteration
-    });
-    
-    return result;
-}
 
-std::optional<SNSInscription> OrdinalIndex::getSNSByName(const std::string& name) const {
-    auto key = getSNSKey(name);
-    if (!db_->isKeyExists(key)) {
-        return std::nullopt;
-    }
-
-    auto jsonStr = db_->value<std::string>(key);
-    auto jsonOpt = OrdinalJsonParser::parse(jsonStr);
-    if (!jsonOpt) {
-        return std::nullopt;
-    }
-    auto& json = *jsonOpt;
-
-    SNSInscription sns;
-    sns.p = OrdinalJsonParser::getString(json, "p");
-    sns.op = OrdinalJsonParser::getString(json, "op");
-    sns.name = OrdinalJsonParser::getString(json, "name");
-    
-    // Decode holder address from Base58
-    std::string holderBase58 = OrdinalJsonParser::getString(json, "holder");
-    if (!holderBase58.empty()) {
-        std::vector<unsigned char> decoded;
-        if (DecodeBase58(holderBase58, decoded)) {
-            cs::PublicKey pubKey;
-            if (decoded.size() == pubKey.size()) {
-                std::copy(decoded.begin(), decoded.end(), pubKey.begin());
-                sns.holder = csdb::Address::from_public_key(pubKey);
-            }
-        }
-    }
-    
-    // Retrieve block number and transaction index
-    sns.blockNumber = OrdinalJsonParser::getInt(json, "block");
-    sns.txIndex = static_cast<cs::Sequence>(OrdinalJsonParser::getInt(json, "txIndex"));
-
-    return sns;
-}
-
-bool OrdinalIndex::isSNSAvailable(const std::string& name) const {
-    return !db_->isKeyExists(getSNSKey(name));
+bool OrdinalIndex::isCNSNameAvailable(const std::string& namespace_, const std::string& name) const {
+    return !db_->isKeyExists(getCNSKey(namespace_, name));
 }
 
 std::vector<TokenState> OrdinalIndex::getAllTokens() const {
@@ -859,12 +945,6 @@ int64_t OrdinalIndex::getTokenBalance(const csdb::Address& addr, const std::stri
     return db_->value<int64_t>(key);
 }
 
-size_t OrdinalIndex::getTotalSNSCount() const {
-    if (!countersInitialized_) {
-        initializeCounters();
-    }
-    return totalSNSCount_;
-}
 
 size_t OrdinalIndex::getTotalTokenCount() const {
     if (!countersInitialized_) {
@@ -880,9 +960,21 @@ size_t OrdinalIndex::getTotalInscriptionCount() const {
     return totalInscriptionCount_;
 }
 
-cs::Bytes OrdinalIndex::getSNSKey(const std::string& name) const {
-    cs::Bytes nameBytes(name.begin(), name.end());
-    return appendPrefix(kSNSPrefix, nameBytes);
+cs::Bytes OrdinalIndex::getCNSKey(const std::string& namespace_, const std::string& name) const {
+    // Create key as: prefix + namespace + separator + name
+    cs::Bytes key;
+    key.push_back(kSNSPrefix); // Reuse SNS prefix for CONP
+    
+    // Add namespace
+    key.insert(key.end(), namespace_.begin(), namespace_.end());
+    
+    // Add separator
+    key.push_back(':');
+    
+    // Add name
+    key.insert(key.end(), name.begin(), name.end());
+    
+    return key;
 }
 
 cs::Bytes OrdinalIndex::getTokenKey(const std::string& ticker) const {
@@ -971,12 +1063,12 @@ void OrdinalIndex::reset() {
     db_->open();
     
     // Clear caches
-    snsCache_.clear();
+    cnsCache_.clear();
     tokenCache_.clear();
     balanceCache_.clear();
     
     // Reset counters
-    totalSNSCount_ = 0;
+    totalCNSCount_ = 0;
     totalTokenCount_ = 0;
     totalInscriptionCount_ = 0;
     countersInitialized_ = false;
@@ -1040,7 +1132,7 @@ cs::Bytes OrdinalIndex::serializeOrdinalMetadata(const OrdinalMetadata& meta) {
 
 void OrdinalIndex::initializeCounters() const {
     if (!db_ || !db_->isOpen()) {
-        totalSNSCount_ = 0;
+        totalCNSCount_ = 0;
         totalTokenCount_ = 0;
         totalInscriptionCount_ = 0;
         countersInitialized_ = true;
@@ -1051,26 +1143,26 @@ void OrdinalIndex::initializeCounters() const {
         // Use total database size for inscription count - this is accurate
         totalInscriptionCount_ = db_->size();
         
-        // For SNS and token counts, use cache during recreation mode
+        // For CNS and token counts, use cache during recreation mode
         if (recreate_) {
-            totalSNSCount_ = snsCache_.size();
+            totalCNSCount_ = cnsCache_.size();
             totalTokenCount_ = tokenCache_.size();
-            cslog() << "Initializing counters from cache during recreation: SNS=" << totalSNSCount_ 
+            cslog() << "Initializing counters from cache during recreation: CNS=" << totalCNSCount_ 
                     << ", Tokens=" << totalTokenCount_ 
                     << ", Inscriptions=" << totalInscriptionCount_;
         }
         else {
             // On restart, count existing entries by trying known key patterns
-            totalSNSCount_ = countExistingEntries(kSNSPrefix);
+            totalCNSCount_ = countExistingEntries(kSNSPrefix);
             totalTokenCount_ = countExistingEntries(kTokenPrefix);
-            cslog() << "Restart detected - counted existing entries: SNS=" << totalSNSCount_ 
+            cslog() << "Restart detected - counted existing entries: CNS=" << totalCNSCount_ 
                     << ", Tokens=" << totalTokenCount_ 
                     << ", Inscriptions=" << totalInscriptionCount_;
         }
     }
     catch (const std::exception& e) {
         cserror() << "Exception initializing counters: " << e.what();
-        totalSNSCount_ = 0;
+        totalCNSCount_ = 0;
         totalTokenCount_ = 0;
         totalInscriptionCount_ = 0;
     }
@@ -1132,6 +1224,184 @@ size_t OrdinalIndex::countExistingEntries(uint8_t prefix) const {
     }
     
     return count;
+}
+
+std::optional<CNSInscription> OrdinalIndex::getCNSByName(const std::string& namespace_, const std::string& name) const {
+    try {
+        auto key = getCNSKey(namespace_, name);
+        if (!db_->isKeyExists(key)) {
+            return std::nullopt;
+        }
+        
+        std::string jsonStr = db_->value<std::string>(key);
+        auto jsonOpt = OrdinalJsonParser::parse(jsonStr);
+        if (!jsonOpt) {
+            return std::nullopt;
+        }
+        
+        auto& json = *jsonOpt;
+        CNSInscription cns;
+        cns.p = OrdinalJsonParser::getString(json, "p");
+        cns.op = OrdinalJsonParser::getString(json, "op");
+        cns.cns = OrdinalJsonParser::getString(json, "cns");
+        
+        if (json.count("relay")) {
+            cns.relay = OrdinalJsonParser::getString(json, "relay");
+        }
+        
+        if (json.count("owner")) {
+            std::string ownerBase58 = OrdinalJsonParser::getString(json, "owner");
+            cs::Bytes ownerBytes;
+            if (DecodeBase58(ownerBase58, ownerBytes)) {
+                cns.owner = csdb::Address::from_public_key(ownerBytes);
+            }
+        }
+        
+        if (json.count("block")) {
+            cns.blockNumber = std::stoull(OrdinalJsonParser::getString(json, "block"));
+        }
+        
+        if (json.count("txIndex")) {
+            cns.txIndex = std::stoull(OrdinalJsonParser::getString(json, "txIndex"));
+        }
+        
+        return cns;
+    }
+    catch (const std::exception& e) {
+        cserror() << "Exception in getCNSByName: " << e.what();
+        return std::nullopt;
+    }
+}
+
+std::vector<CNSInscription> OrdinalIndex::getCNSByOwner(const csdb::Address& addr) const {
+    std::vector<CNSInscription> result;
+    
+    try {
+        // Iterate through all CNS entries
+        cs::Bytes prefix{kSNSPrefix}; // Using SNS prefix for CNS
+        
+        db_->iterateWithPrefix(prefix, [&](const cs::Bytes& /*key*/, const cs::Bytes& value) -> bool {
+            try {
+                std::string jsonStr(value.begin(), value.end());
+                auto jsonOpt = OrdinalJsonParser::parse(jsonStr);
+                if (!jsonOpt) {
+                    return true; // Continue iteration
+                }
+                
+                auto& json = *jsonOpt;
+                
+                // Check if this entry belongs to the specified owner
+                if (json.count("owner")) {
+                    std::string ownerBase58 = OrdinalJsonParser::getString(json, "owner");
+                    cs::Bytes ownerBytes;
+                    if (DecodeBase58(ownerBase58, ownerBytes)) {
+                        csdb::Address entryOwner = csdb::Address::from_public_key(ownerBytes);
+                        if (entryOwner == addr) {
+                            CNSInscription cns;
+                            cns.p = OrdinalJsonParser::getString(json, "p");
+                            cns.op = OrdinalJsonParser::getString(json, "op");
+                            cns.cns = OrdinalJsonParser::getString(json, "cns");
+                            
+                            if (json.count("relay")) {
+                                cns.relay = OrdinalJsonParser::getString(json, "relay");
+                            }
+                            
+                            cns.owner = entryOwner;
+                            
+                            if (json.count("block")) {
+                                cns.blockNumber = std::stoull(OrdinalJsonParser::getString(json, "block"));
+                            }
+                            
+                            if (json.count("txIndex")) {
+                                cns.txIndex = std::stoull(OrdinalJsonParser::getString(json, "txIndex"));
+                            }
+                            
+                            result.push_back(cns);
+                        }
+                    }
+                }
+            }
+            catch (const std::exception&) {
+                // Skip invalid entries
+            }
+            
+            return true; // Continue iteration
+        });
+    }
+    catch (const std::exception& e) {
+        cserror() << "Exception in getCNSByOwner: " << e.what();
+    }
+    
+    return result;
+}
+
+size_t OrdinalIndex::getTotalCNSCount() const {
+    if (!countersInitialized_) {
+        initializeCounters();
+    }
+    return totalCNSCount_;
+}
+
+bool OrdinalIndex::isValidCNSName(const std::string& name) const {
+    // Check if name is empty
+    if (name.empty()) {
+        return false;
+    }
+    
+    // Check for spaces
+    if (name.find(' ') != std::string::npos) {
+        return false;
+    }
+    
+    // Check UTF-8 validity
+    if (!isValidUTF8(name)) {
+        return false;
+    }
+    
+    return true;
+}
+
+bool OrdinalIndex::isValidUTF8(const std::string& str) const {
+    size_t i = 0;
+    while (i < str.length()) {
+        unsigned char c = str[i];
+        
+        // Single byte character (0xxxxxxx)
+        if ((c & 0x80) == 0) {
+            i++;
+        }
+        // Two byte character (110xxxxx 10xxxxxx)
+        else if ((c & 0xE0) == 0xC0) {
+            if (i + 1 >= str.length() || (str[i + 1] & 0xC0) != 0x80) {
+                return false;
+            }
+            i += 2;
+        }
+        // Three byte character (1110xxxx 10xxxxxx 10xxxxxx)
+        else if ((c & 0xF0) == 0xE0) {
+            if (i + 2 >= str.length() || 
+                (str[i + 1] & 0xC0) != 0x80 || 
+                (str[i + 2] & 0xC0) != 0x80) {
+                return false;
+            }
+            i += 3;
+        }
+        // Four byte character (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+        else if ((c & 0xF8) == 0xF0) {
+            if (i + 3 >= str.length() || 
+                (str[i + 1] & 0xC0) != 0x80 || 
+                (str[i + 2] & 0xC0) != 0x80 || 
+                (str[i + 3] & 0xC0) != 0x80) {
+                return false;
+            }
+            i += 4;
+        }
+        else {
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 } // namespace cs

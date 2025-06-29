@@ -3169,18 +3169,28 @@ void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std:
     }
 
     try {
-        _return.available = ordinalIndex->isSNSAvailable(name);
+        // Check both namespaces for backward compatibility, but prefer 'cns'
+        bool availableInCns = ordinalIndex->isCNSNameAvailable("cns", name);
+        bool availableInCdns = ordinalIndex->isCNSNameAvailable("cdns", name);
+        
+        _return.available = availableInCns && availableInCdns;
         
         if (!_return.available) {
-            auto snsInfo = ordinalIndex->getSNSByName(name);
-            if (snsInfo) {
+            // Try to get from 'cns' namespace first
+            auto cnsInfo = ordinalIndex->getCNSByName("cns", name);
+            if (!cnsInfo) {
+                // Try 'cdns' namespace
+                cnsInfo = ordinalIndex->getCNSByName("cdns", name);
+            }
+            
+            if (cnsInfo) {
                 _return.snsInfo = api::OrdinalSNS();
-                _return.snsInfo.protocol = snsInfo->p;
-                _return.snsInfo.operation = snsInfo->op;
-                _return.snsInfo.name = snsInfo->name;
-                _return.snsInfo.holder = snsInfo->holder.to_api_addr();
-                _return.snsInfo.blockNumber = snsInfo->blockNumber;
-                _return.snsInfo.txIndex = snsInfo->txIndex;
+                _return.snsInfo.protocol = cnsInfo->p;
+                _return.snsInfo.operation = cnsInfo->op;
+                _return.snsInfo.name = cnsInfo->cns;  // Use 'cns' field instead of 'name'
+                _return.snsInfo.holder = cnsInfo->owner.to_api_addr();
+                _return.snsInfo.blockNumber = cnsInfo->blockNumber;
+                _return.snsInfo.txIndex = cnsInfo->txIndex;
                 _return.__isset.snsInfo = true;
             }
         }
@@ -3188,7 +3198,7 @@ void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std:
         SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
     }
     catch (const std::exception& e) {
-        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error checking SNS: ") + e.what());
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error checking CNS: ") + e.what());
     }
 }
 
@@ -3201,24 +3211,24 @@ void APIHandler::OrdinalSNSGetByHolder(api::OrdinalSNSGetResult& _return, const 
 
     try {
         const csdb::Address holderAddr = BlockChain::getAddressFromKey(holder);
-        auto snsEntries = ordinalIndex->getSNSByHolder(holderAddr);
+        auto cnsEntries = ordinalIndex->getCNSByOwner(holderAddr);
         
         _return.snsEntries.clear();
-        for (const auto& sns : snsEntries) {
+        for (const auto& cns : cnsEntries) {
             api::OrdinalSNS apiSNS;
-            apiSNS.protocol = sns.p;
-            apiSNS.operation = sns.op;
-            apiSNS.name = sns.name;
+            apiSNS.protocol = cns.p;
+            apiSNS.operation = cns.op;
+            apiSNS.name = cns.cns;  // Use 'cns' field instead of 'name'
             apiSNS.holder = holder;
-            apiSNS.blockNumber = sns.blockNumber;
-            apiSNS.txIndex = sns.txIndex;
+            apiSNS.blockNumber = cns.blockNumber;
+            apiSNS.txIndex = cns.txIndex;
             _return.snsEntries.push_back(apiSNS);
         }
         
         SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
     }
     catch (const std::exception& e) {
-        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting SNS by holder: ") + e.what());
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, std::string("Error getting CNS by holder: ") + e.what());
     }
 }
 
@@ -3324,12 +3334,12 @@ void APIHandler::OrdinalStatsGet(api::OrdinalStatsResult& _return) {
     }
 
     try {
-        _return.totalSNS = static_cast<int32_t>(ordinalIndex->getTotalSNSCount());
+        _return.totalSNS = static_cast<int32_t>(ordinalIndex->getTotalCNSCount());
         _return.totalTokens = static_cast<int32_t>(ordinalIndex->getTotalTokenCount());
         _return.totalInscriptions = static_cast<int32_t>(ordinalIndex->getTotalInscriptionCount());
         
         // Add debug logging to see if we're getting any ordinal data
-        cslog() << "OrdinalStatsGet: SNS=" << _return.totalSNS 
+        cslog() << "OrdinalStatsGet: CNS=" << _return.totalSNS 
                 << ", Tokens=" << _return.totalTokens 
                 << ", Inscriptions=" << _return.totalInscriptions;
         
