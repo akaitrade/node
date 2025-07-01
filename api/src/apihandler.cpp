@@ -2376,6 +2376,7 @@ void APIHandler::ContractAllMethodsGet(ContractAllMethodsGetResult& _return, con
     }
 }
 
+
 void APIHandler::addTokenResult(api::TokenTransfersResult& _return, const csdb::Address& token, const std::string& code, const csdb::Pool& pool, const csdb::Transaction& tr,
                                 const api::SmartContractInvocation& smart, const std::pair<csdb::Address, csdb::Address>& addrPair) {
     api::TokenTransfer transfer;
@@ -3161,7 +3162,7 @@ void APIHandler::SyncStateGet(api::SyncStateResult& _return) {
 }
 
 // Ordinals API Implementation
-void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std::string& name) {
+void APIHandler::OrdinalCNSCheck(api::OrdinalCNSCheckResult& _return, const std::string& name) {
     auto ordinalIndex = blockchain_.getOrdinalIndex();
     if (!ordinalIndex) {
         SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "Ordinal index not available");
@@ -3169,9 +3170,14 @@ void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std:
     }
 
     try {
+        // Debug: Log what we're checking
+        cslog() << "OrdinalCNSCheck: Checking availability for name: '" << name << "'";
+        
         // Check both namespaces for backward compatibility, but prefer 'cns'
         bool availableInCns = ordinalIndex->isCNSNameAvailable("cns", name);
         bool availableInCdns = ordinalIndex->isCNSNameAvailable("cdns", name);
+        
+        cslog() << "OrdinalCNSCheck: availableInCns=" << availableInCns << ", availableInCdns=" << availableInCdns;
         
         _return.available = availableInCns && availableInCdns;
         
@@ -3184,14 +3190,21 @@ void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std:
             }
             
             if (cnsInfo) {
-                _return.snsInfo = api::OrdinalSNS();
-                _return.snsInfo.protocol = cnsInfo->p;
-                _return.snsInfo.operation = cnsInfo->op;
-                _return.snsInfo.name = cnsInfo->cns;  // Use 'cns' field instead of 'name'
-                _return.snsInfo.holder = cnsInfo->owner.to_api_addr();
-                _return.snsInfo.blockNumber = cnsInfo->blockNumber;
-                _return.snsInfo.txIndex = cnsInfo->txIndex;
-                _return.__isset.snsInfo = true;
+                _return.cnsInfo = api::OrdinalCNS();
+                _return.cnsInfo.protocol = cnsInfo->p;
+                _return.cnsInfo.operation = cnsInfo->op;
+                _return.cnsInfo.name = cnsInfo->cns;  // Use 'cns' field instead of 'name'
+                _return.cnsInfo.holder = cnsInfo->owner.to_api_addr();
+                _return.cnsInfo.blockNumber = cnsInfo->blockNumber;
+                _return.cnsInfo.txIndex = cnsInfo->txIndex;
+                
+                // Add relay field if available
+                if (!cnsInfo->relay.empty()) {
+                    _return.cnsInfo.relay = cnsInfo->relay;
+                    _return.cnsInfo.__isset.relay = true;
+                }
+                
+                _return.__isset.cnsInfo = true;
             }
         }
         
@@ -3202,7 +3215,7 @@ void APIHandler::OrdinalSNSCheck(api::OrdinalSNSCheckResult& _return, const std:
     }
 }
 
-void APIHandler::OrdinalSNSGetByHolder(api::OrdinalSNSGetResult& _return, const general::Address& holder) {
+void APIHandler::OrdinalCNSGetByHolder(api::OrdinalCNSGetResult& _return, const general::Address& holder) {
     auto ordinalIndex = blockchain_.getOrdinalIndex();
     if (!ordinalIndex) {
         SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "Ordinal index not available");
@@ -3210,19 +3223,45 @@ void APIHandler::OrdinalSNSGetByHolder(api::OrdinalSNSGetResult& _return, const 
     }
 
     try {
-        const csdb::Address holderAddr = BlockChain::getAddressFromKey(holder);
-        auto cnsEntries = ordinalIndex->getCNSByOwner(holderAddr);
+        // Debug: Log the input address
+        std::string holderBase58 = cs::Utils::byteStreamToHex(holder.data(), holder.size());
+        cslog() << "OrdinalCNSGetByHolder: Input holder address (hex): " << holderBase58;
         
-        _return.snsEntries.clear();
+        const csdb::Address holderAddr = BlockChain::getAddressFromKey(holder);
+        
+        // Debug: Log the converted address
+        auto convertedPubKey = holderAddr.public_key();
+        if (!convertedPubKey.empty()) {
+            std::string convertedBase58 = EncodeBase58(convertedPubKey.data(), convertedPubKey.data() + convertedPubKey.size());
+            cslog() << "OrdinalCNSGetByHolder: Converted address (base58): " << convertedBase58;
+        } else {
+            cslog() << "OrdinalCNSGetByHolder: Converted address has empty public key";
+        }
+        
+        // Debug: Check total CNS count first
+        size_t totalCNS = ordinalIndex->getTotalCNSCount();
+        cslog() << "OrdinalCNSGetByHolder: Total CNS count in database: " << totalCNS;
+        
+        auto cnsEntries = ordinalIndex->getCNSByOwner(holderAddr);
+        cslog() << "OrdinalCNSGetByHolder: Found " << cnsEntries.size() << " CNS entries for this holder";
+        
+        _return.cnsEntries.clear();
         for (const auto& cns : cnsEntries) {
-            api::OrdinalSNS apiSNS;
-            apiSNS.protocol = cns.p;
-            apiSNS.operation = cns.op;
-            apiSNS.name = cns.cns;  // Use 'cns' field instead of 'name'
-            apiSNS.holder = holder;
-            apiSNS.blockNumber = cns.blockNumber;
-            apiSNS.txIndex = cns.txIndex;
-            _return.snsEntries.push_back(apiSNS);
+            api::OrdinalCNS apiCNS;
+            apiCNS.protocol = cns.p;
+            apiCNS.operation = cns.op;
+            apiCNS.name = cns.cns;  // Use 'cns' field instead of 'name'
+            apiCNS.holder = holder;
+            apiCNS.blockNumber = cns.blockNumber;
+            apiCNS.txIndex = cns.txIndex;
+            
+            // Add relay field if available
+            if (!cns.relay.empty()) {
+                apiCNS.relay = cns.relay;
+                apiCNS.__isset.relay = true;
+            }
+            
+            _return.cnsEntries.push_back(apiCNS);
         }
         
         SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
@@ -3326,7 +3365,7 @@ void APIHandler::OrdinalStatsGet(api::OrdinalStatsResult& _return) {
     auto ordinalIndex = blockchain_.getOrdinalIndex();
     if (!ordinalIndex) {
         // Return zero stats when ordinal index is not available
-        _return.totalSNS = 0;
+        _return.totalCNS = 0;
         _return.totalTokens = 0;
         _return.totalInscriptions = 0;
         SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
@@ -3334,12 +3373,12 @@ void APIHandler::OrdinalStatsGet(api::OrdinalStatsResult& _return) {
     }
 
     try {
-        _return.totalSNS = static_cast<int32_t>(ordinalIndex->getTotalCNSCount());
+        _return.totalCNS = static_cast<int32_t>(ordinalIndex->getTotalCNSCount());
         _return.totalTokens = static_cast<int32_t>(ordinalIndex->getTotalTokenCount());
         _return.totalInscriptions = static_cast<int32_t>(ordinalIndex->getTotalInscriptionCount());
         
         // Add debug logging to see if we're getting any ordinal data
-        cslog() << "OrdinalStatsGet: CNS=" << _return.totalSNS 
+        cslog() << "OrdinalStatsGet: CNS=" << _return.totalCNS 
                 << ", Tokens=" << _return.totalTokens 
                 << ", Inscriptions=" << _return.totalInscriptions;
         

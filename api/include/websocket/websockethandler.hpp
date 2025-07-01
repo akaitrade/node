@@ -38,6 +38,14 @@ enum class MessageType {
     GetSmartContract = 10,
     GetSmartContracts = 11,
     GetSmartContractAddresses = 12,
+    GetSmartContractsAll = 22,
+    GetSmartContractData = 23,
+    SmartContractCompile = 24,
+    GetContractAllMethods = 25,
+    GetContractMethods = 26,
+    GetSmartMethodParams = 27,
+    SmartContractExecute = 28,
+    SendTransaction = 29,
     
     // Token API (13-30)
     TokenBalancesGet = 13,
@@ -51,12 +59,13 @@ enum class MessageType {
     TokensListGet = 21,
     
     // Ordinal API (31-40)
-    OrdinalSNSCheck = 31,
-    OrdinalSNSGetByHolder = 32,
+    OrdinalCNSCheck = 31,
+    OrdinalCNSGetByHolder = 32,
     OrdinalTokenGet = 33,
     OrdinalTokenBalanceGet = 34,
     OrdinalTokensList = 35,
     OrdinalStatsGet = 36,
+    OrdinalCDNSGet = 37,
     
     // Subscriptions
     Subscribe = 100,
@@ -130,6 +139,14 @@ private:
     void handleGetSmartContract(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleGetSmartContracts(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleGetSmartContractAddresses(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleGetSmartContractsAll(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleGetSmartContractData(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleSmartContractCompile(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleGetContractAllMethods(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleGetContractMethods(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleGetSmartMethodParams(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleSmartContractExecute(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleSendTransaction(ConnectionHdl hdl, const WebSocketMessage& msg);
     
     // Token API handlers
     void handleTokenBalancesGet(ConnectionHdl hdl, const WebSocketMessage& msg);
@@ -143,12 +160,13 @@ private:
     void handleTokensListGet(ConnectionHdl hdl, const WebSocketMessage& msg);
     
     // Ordinal API handlers
-    void handleOrdinalSNSCheck(ConnectionHdl hdl, const WebSocketMessage& msg);
-    void handleOrdinalSNSGetByHolder(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleOrdinalCNSCheck(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleOrdinalCNSGetByHolder(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleOrdinalTokenGet(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleOrdinalTokenBalanceGet(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleOrdinalTokensList(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleOrdinalStatsGet(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleOrdinalCDNSGet(ConnectionHdl hdl, const WebSocketMessage& msg);
     
     void sendError(ConnectionHdl hdl, const std::string& id, const std::string& error);
     void sendResponse(ConnectionHdl hdl, MessageType type, const std::string& id, const json& data);

@@ -164,16 +164,44 @@ void OrdinalIndex::updateFromNextBlock(const csdb::Pool& _pool) {
     size_t ordinalTxCount = 0;
     size_t txWithUserFields = 0;
     
+    cslog() << "updateFromNextBlock: Processing block " << _pool.sequence() << " with " << totalTxCount << " transactions";
+    
     for (const auto& tx : _pool.transactions()) {
         try {
             // Count transactions with user fields for statistics
             auto userFieldIds = tx.user_field_ids();
             if (!userFieldIds.empty()) {
                 txWithUserFields++;
+                
+                // Debug: Log all user fields for transactions that have them
+                std::string userFieldsStr = "userFields=[";
+                bool first = true;
+                for (auto fieldId : userFieldIds) {
+                    if (!first) userFieldsStr += ",";
+                    first = false;
+                    userFieldsStr += std::to_string(fieldId);
+                    
+                    // Also log the content of each user field
+                    auto userField = tx.user_field(fieldId);
+                    if (userField.is_valid() && userField.type() == csdb::UserField::String) {
+                        std::string content = userField.value<std::string>();
+                        if (content.find("\"p\"") != std::string::npos) {
+                            cslog() << "updateFromNextBlock: Transaction with potential ordinal data in field " << fieldId << ": " << content;
+                        }
+                    }
+                }
+                userFieldsStr += "]";
+                cslog() << "updateFromNextBlock: Transaction with user fields: " << userFieldsStr;
             }
             
             auto ordinalMeta = parseOrdinalFromTransaction(tx);
-            if (!ordinalMeta) continue;
+            if (!ordinalMeta) {
+                // Debug: Log why transaction was not parsed as ordinal
+                if (!userFieldIds.empty()) {
+                    cslog() << "updateFromNextBlock: Transaction with user fields was not parsed as ordinal";
+                }
+                continue;
+            }
             
             ordinalTxCount++;
             cslog() << "Found ordinal transaction in block " << _pool.sequence() << ", type: " << static_cast<int>(ordinalMeta->type);
@@ -307,27 +335,35 @@ void OrdinalIndex::updateFromNextBlock(const csdb::Pool& _pool) {
 }
 
 std::optional<OrdinalMetadata> OrdinalIndex::parseOrdinalFromTransaction(const csdb::Transaction& tx) {
+    cslog() << "parseOrdinalFromTransaction: Parsing transaction for ordinal data";
+    
     // Try primary ordinal field ID first
     auto userField = tx.user_field(kOrdinalFieldId);
+    cslog() << "parseOrdinalFromTransaction: Trying primary field ID " << kOrdinalFieldId << ", valid=" << userField.is_valid();
     
     if (!userField.is_valid()) {
+        cslog() << "parseOrdinalFromTransaction: Primary field not valid, trying alternates";
         // Try alternate field IDs
         for (auto id : kAlternateFieldIds) {
             userField = tx.user_field(id);
+            cslog() << "parseOrdinalFromTransaction: Trying alternate field ID " << id << ", valid=" << userField.is_valid();
             if (userField.is_valid()) {
                 std::string content;
                 if (userField.type() == csdb::UserField::String) {
                     content = userField.value<std::string>();
+                    cslog() << "parseOrdinalFromTransaction: Field " << id << " content: " << content;
                 }
                 
                 // Quick check if this looks like ordinal JSON
                 if (!content.empty() && content.find("\"p\"") != std::string::npos && content.find("\"op\"") != std::string::npos) {
+                    cslog() << "parseOrdinalFromTransaction: Found potential ordinal data in field " << id;
                     break;
                 }
             }
         }
         
         if (!userField.is_valid()) {
+            cslog() << "parseOrdinalFromTransaction: No valid user field found";
             return std::nullopt;
         }
     }
@@ -526,7 +562,16 @@ void OrdinalIndex::storeCNS(const CNSInscription& cns, const csdb::TransactionID
             auto serializedData = OrdinalJsonParser::serialize(cnsJson);
             auto cnsKey = getCNSKey(normalizedNamespace, normalizedName);
             
-            cslog() << "Inserting CNS into LMDB, key size: " << cnsKey.size() << ", data size: " << serializedData.size();
+            // Debug: Log the key being stored
+            std::string keyHex;
+            for (auto byte : cnsKey) {
+                char buf[3];
+                snprintf(buf, sizeof(buf), "%02x", byte);
+                keyHex += buf;
+            }
+            cslog() << "storeCNS: Storing CNS with namespace='" << normalizedNamespace << "', name='" << normalizedName << "', key(hex)=" << keyHex;
+            cslog() << "storeCNS: Key size: " << cnsKey.size() << ", data size: " << serializedData.size() << ", data: " << serializedData;
+            
             db_->insert(cnsKey, serializedData);
             
             // Update cache
@@ -844,7 +889,20 @@ void OrdinalIndex::removeTokenMint(const std::string& ticker, int64_t amount) {
 
 
 bool OrdinalIndex::isCNSNameAvailable(const std::string& namespace_, const std::string& name) const {
-    return !db_->isKeyExists(getCNSKey(namespace_, name));
+    auto key = getCNSKey(namespace_, name);
+    bool keyExists = db_->isKeyExists(key);
+    bool isAvailable = !keyExists;
+    
+    // Debug: Log key generation and lookup
+    std::string keyHex;
+    for (auto byte : key) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", byte);
+        keyHex += buf;
+    }
+    cslog() << "isCNSNameAvailable: namespace='" << namespace_ << "', name='" << name << "', key(hex)=" << keyHex << ", keyExists=" << keyExists << ", isAvailable=" << isAvailable;
+    
+    return isAvailable;
 }
 
 std::vector<TokenState> OrdinalIndex::getAllTokens() const {
@@ -1276,15 +1334,92 @@ std::optional<CNSInscription> OrdinalIndex::getCNSByName(const std::string& name
 std::vector<CNSInscription> OrdinalIndex::getCNSByOwner(const csdb::Address& addr) const {
     std::vector<CNSInscription> result;
     
+    if (!db_ || !db_->isOpen()) {
+        cserror() << "getCNSByOwner: Database not available";
+        return result;
+    }
+    
     try {
-        // Iterate through all CNS entries
-        cs::Bytes prefix{kSNSPrefix}; // Using SNS prefix for CNS
+        // Convert input address to Base58 for comparison
+        auto inputPublicKey = addr.public_key();
+        std::string inputAddressBase58;
+        if (!inputPublicKey.empty()) {
+            inputAddressBase58 = EncodeBase58(inputPublicKey.data(), inputPublicKey.data() + inputPublicKey.size());
+        }
         
-        db_->iterateWithPrefix(prefix, [&](const cs::Bytes& /*key*/, const cs::Bytes& value) -> bool {
+        cslog() << "getCNSByOwner: Looking for CNS entries for address: " << inputAddressBase58;
+        
+        // Debug: Check what prefix we're using and what's in the database
+        cs::Bytes prefix{kSNSPrefix}; // Using SNS prefix for CNS
+        cslog() << "getCNSByOwner: Using prefix: " << static_cast<int>(kSNSPrefix) << " (0x" << std::hex << static_cast<int>(kSNSPrefix) << std::dec << ")";
+        
+        // Debug: Try to dump database entries to see what's there
+        cslog() << "getCNSByOwner: Attempting to dump database entries for debugging...";
+        size_t allEntriesCount = 0;
+        try {
+            // Try iterating with different prefix values to see what's stored
+            for (uint8_t testPrefix = 0; testPrefix <= 10; testPrefix++) {
+                cs::Bytes testPrefixBytes{testPrefix};
+                db_->iterateWithPrefix(testPrefixBytes, [&](const cs::Bytes& key, const cs::Bytes& value) -> bool {
+                    allEntriesCount++;
+                    std::string keyHex;
+                    for (auto byte : key) {
+                        char buf[3];
+                        snprintf(buf, sizeof(buf), "%02x", byte);
+                        keyHex += buf;
+                    }
+                    std::string valueStr(value.begin(), value.end());
+                    cslog() << "getCNSByOwner: DB Entry with prefix " << static_cast<int>(testPrefix) << " - Key(hex): " << keyHex << ", Value: " << valueStr.substr(0, 200) << (valueStr.length() > 200 ? "..." : "");
+                    return allEntriesCount < 20; // Limit to first 20 entries total
+                });
+                if (allEntriesCount >= 20) break;
+            }
+        } catch (const std::exception& e) {
+            cserror() << "getCNSByOwner: Exception dumping database: " << e.what();
+        }
+        cslog() << "getCNSByOwner: Found " << allEntriesCount << " total entries in database across all tested prefixes";
+        
+        // Additional check: Let's specifically look for the known CNS entry that should exist
+        // Try to find the exact key that should exist for example.cs
+        std::vector<std::string> testNamespaces = {"cdns", "cns"};
+        std::vector<std::string> testNames = {"example.cs"};
+        
+        for (const auto& testNs : testNamespaces) {
+            for (const auto& testName : testNames) {
+                auto testKey = getCNSKey(testNs, testName);
+                std::string testKeyHex;
+                for (auto byte : testKey) {
+                    char buf[3];
+                    snprintf(buf, sizeof(buf), "%02x", byte);
+                    testKeyHex += buf;
+                }
+                bool testKeyExists = db_->isKeyExists(testKey);
+                cslog() << "getCNSByOwner: Checking specific key for namespace='" << testNs << "', name='" << testName << "', key(hex)=" << testKeyHex << ", exists=" << testKeyExists;
+                
+                if (testKeyExists) {
+                    try {
+                        std::string testValue = db_->value<std::string>(testKey);
+                        cslog() << "getCNSByOwner: Found data for key: " << testValue;
+                    } catch (const std::exception& e) {
+                        cserror() << "getCNSByOwner: Error reading test key value: " << e.what();
+                    }
+                }
+            }
+        }
+        
+        // Now try the prefix iteration
+        size_t totalEntries = 0;
+        size_t matchingEntries = 0;
+        
+        db_->iterateWithPrefix(prefix, [&](const cs::Bytes& key, const cs::Bytes& value) -> bool {
+            totalEntries++;
             try {
                 std::string jsonStr(value.begin(), value.end());
+                cslog() << "getCNSByOwner: Processing entry " << totalEntries << ", JSON: " << jsonStr;
+                
                 auto jsonOpt = OrdinalJsonParser::parse(jsonStr);
                 if (!jsonOpt) {
+                    cslog() << "getCNSByOwner: Failed to parse JSON for entry " << totalEntries;
                     return true; // Continue iteration
                 }
                 
@@ -1293,40 +1428,46 @@ std::vector<CNSInscription> OrdinalIndex::getCNSByOwner(const csdb::Address& add
                 // Check if this entry belongs to the specified owner
                 if (json.count("owner")) {
                     std::string ownerBase58 = OrdinalJsonParser::getString(json, "owner");
-                    cs::Bytes ownerBytes;
-                    if (DecodeBase58(ownerBase58, ownerBytes)) {
-                        csdb::Address entryOwner = csdb::Address::from_public_key(ownerBytes);
-                        if (entryOwner == addr) {
-                            CNSInscription cns;
-                            cns.p = OrdinalJsonParser::getString(json, "p");
-                            cns.op = OrdinalJsonParser::getString(json, "op");
-                            cns.cns = OrdinalJsonParser::getString(json, "cns");
-                            
-                            if (json.count("relay")) {
-                                cns.relay = OrdinalJsonParser::getString(json, "relay");
-                            }
-                            
-                            cns.owner = entryOwner;
-                            
-                            if (json.count("block")) {
-                                cns.blockNumber = std::stoull(OrdinalJsonParser::getString(json, "block"));
-                            }
-                            
-                            if (json.count("txIndex")) {
-                                cns.txIndex = std::stoull(OrdinalJsonParser::getString(json, "txIndex"));
-                            }
-                            
-                            result.push_back(cns);
+                    cslog() << "getCNSByOwner: Entry owner: " << ownerBase58 << ", looking for: " << inputAddressBase58;
+                    
+                    if (ownerBase58 == inputAddressBase58) {
+                        matchingEntries++;
+                        cslog() << "getCNSByOwner: Found matching entry!";
+                        
+                        CNSInscription cns;
+                        cns.p = OrdinalJsonParser::getString(json, "p");
+                        cns.op = OrdinalJsonParser::getString(json, "op");
+                        cns.cns = OrdinalJsonParser::getString(json, "cns");
+                        
+                        if (json.count("relay")) {
+                            cns.relay = OrdinalJsonParser::getString(json, "relay");
                         }
+                        
+                        cns.owner = addr;
+                        
+                        if (json.count("block")) {
+                            cns.blockNumber = std::stoull(OrdinalJsonParser::getString(json, "block"));
+                        }
+                        
+                        if (json.count("txIndex")) {
+                            cns.txIndex = std::stoull(OrdinalJsonParser::getString(json, "txIndex"));
+                        }
+                        
+                        result.push_back(cns);
+                        cslog() << "getCNSByOwner: Added CNS entry: " << cns.p << "/" << cns.cns;
                     }
+                } else {
+                    cslog() << "getCNSByOwner: Entry has no owner field";
                 }
             }
-            catch (const std::exception&) {
-                // Skip invalid entries
+            catch (const std::exception& e) {
+                cserror() << "getCNSByOwner: Exception processing entry " << totalEntries << ": " << e.what();
             }
             
             return true; // Continue iteration
         });
+        
+        cslog() << "getCNSByOwner: Processed " << totalEntries << " total entries, found " << matchingEntries << " matching entries, returning " << result.size() << " results";
     }
     catch (const std::exception& e) {
         cserror() << "Exception in getCNSByOwner: " << e.what();
