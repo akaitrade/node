@@ -164,7 +164,6 @@ void OrdinalIndex::updateFromNextBlock(const csdb::Pool& _pool) {
     size_t ordinalTxCount = 0;
     size_t txWithUserFields = 0;
     
-    cslog() << "updateFromNextBlock: Processing block " << _pool.sequence() << " with " << totalTxCount << " transactions";
     
     for (const auto& tx : _pool.transactions()) {
         try {
@@ -172,34 +171,10 @@ void OrdinalIndex::updateFromNextBlock(const csdb::Pool& _pool) {
             auto userFieldIds = tx.user_field_ids();
             if (!userFieldIds.empty()) {
                 txWithUserFields++;
-                
-                // Debug: Log all user fields for transactions that have them
-                std::string userFieldsStr = "userFields=[";
-                bool first = true;
-                for (auto fieldId : userFieldIds) {
-                    if (!first) userFieldsStr += ",";
-                    first = false;
-                    userFieldsStr += std::to_string(fieldId);
-                    
-                    // Also log the content of each user field
-                    auto userField = tx.user_field(fieldId);
-                    if (userField.is_valid() && userField.type() == csdb::UserField::String) {
-                        std::string content = userField.value<std::string>();
-                        if (content.find("\"p\"") != std::string::npos) {
-                            cslog() << "updateFromNextBlock: Transaction with potential ordinal data in field " << fieldId << ": " << content;
-                        }
-                    }
-                }
-                userFieldsStr += "]";
-                cslog() << "updateFromNextBlock: Transaction with user fields: " << userFieldsStr;
             }
             
             auto ordinalMeta = parseOrdinalFromTransaction(tx);
             if (!ordinalMeta) {
-                // Debug: Log why transaction was not parsed as ordinal
-                if (!userFieldIds.empty()) {
-                    cslog() << "updateFromNextBlock: Transaction with user fields was not parsed as ordinal";
-                }
                 continue;
             }
             

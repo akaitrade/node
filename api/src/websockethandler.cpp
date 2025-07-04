@@ -148,6 +148,9 @@ void WebSocketHandler::processRequest(ConnectionHdl hdl, const WebSocketMessage&
         case MessageType::SendTransaction:
             handleSendTransaction(hdl, msg);
             break;
+        case MessageType::WalletTransactionsCountGet:
+            handleWalletTransactionsCountGet(hdl, msg);
+            break;
             
         // Token API
         case MessageType::TokenBalancesGet:
@@ -1047,54 +1050,129 @@ void WebSocketHandler::handleSmartContractExecute(ConnectionHdl hdl, const WebSo
 
 void WebSocketHandler::handleSendTransaction(ConnectionHdl hdl, const WebSocketMessage& msg) {
     try {
-        // Required parameters
-        std::string senderAddressBase58 = msg.data["senderAddress"].get<std::string>();
-        std::string targetAddressBase58 = msg.data["targetAddress"].get<std::string>();
-        double amount = msg.data["amount"].get<double>();
-        double maxFee = msg.data["maxFee"].get<double>();
-        
-        // Optional parameters
-        std::string userFields = msg.data.value("userFields", "");
-        
-        // Decode addresses
-        cs::Bytes senderBytes, targetBytes;
-        if (!decodeBase58(senderAddressBase58, senderBytes)) {
-            sendError(hdl, msg.id, "Invalid sender address format");
+        // Required parameters for signed transaction
+        if (!msg.data.contains("transaction")) {
+            sendError(hdl, msg.id, "Missing required 'transaction' parameter - must provide signed transaction");
             return;
         }
-        if (!decodeBase58(targetAddressBase58, targetBytes)) {
+        
+        const json& txData = msg.data["transaction"];
+        
+        // Validate required fields for signed transaction
+        std::vector<std::string> requiredFields = {"id", "source", "target", "amount", "balance", "currency", "signature", "fee", "timeCreation", "type"};
+        for (const auto& field : requiredFields) {
+            if (!txData.contains(field)) {
+                sendError(hdl, msg.id, "Missing required transaction field: " + field);
+                return;
+            }
+        }
+        
+        // Create transaction from signed data
+        api::Transaction transaction;
+        
+        // Set transaction ID
+        transaction.id = txData["id"].get<int64_t>();
+        
+        // Decode Base58 addresses
+        std::string sourceBase58 = txData["source"].get<std::string>();
+        std::string targetBase58 = txData["target"].get<std::string>();
+        
+        cs::Bytes sourceBytes, targetBytes;
+        if (!decodeBase58(sourceBase58, sourceBytes)) {
+            sendError(hdl, msg.id, "Invalid source address format");
+            return;
+        }
+        if (!decodeBase58(targetBase58, targetBytes)) {
             sendError(hdl, msg.id, "Invalid target address format");
             return;
         }
         
-        std::string senderBinary(senderBytes.begin(), senderBytes.end());
-        std::string targetBinary(targetBytes.begin(), targetBytes.end());
-        
-        // Parse amount (integral and fractional parts)
-        int64_t amountIntegral = static_cast<int64_t>(amount);
-        int64_t amountFraction = static_cast<int64_t>((amount - amountIntegral) * 1000000000000000000LL); // 18 decimal places
-        
-        // Create transaction
-        api::Transaction transaction;
-        transaction.id = 0; // Will be set by the system
-        transaction.source = senderBinary;
-        transaction.target = targetBinary;
+        transaction.source = std::string(sourceBytes.begin(), sourceBytes.end());
+        transaction.target = std::string(targetBytes.begin(), targetBytes.end());
         
         // Set amount
-        transaction.amount.integral = amountIntegral;
-        transaction.amount.fraction = amountFraction;
+        const json& amountData = txData["amount"];
+        transaction.amount.integral = amountData["integral"].get<int64_t>();
+        transaction.amount.fraction = amountData["fraction"].get<int64_t>();
         
-        // Set fee (convert to Credits fee format)
-        transaction.fee.commission = static_cast<int16_t>(maxFee * 1000);
+        // Set balance
+        const json& balanceData = txData["balance"];
+        transaction.balance.integral = balanceData["integral"].get<int64_t>();
+        transaction.balance.fraction = balanceData["fraction"].get<int64_t>();
         
-        transaction.type = api::TransactionType::TT_Transfer;
-        transaction.currency = 1; // CS currency
-        transaction.timeCreation = std::time(nullptr) * 1000; // Current time in milliseconds
+        // Set currency
+        transaction.currency = txData["currency"].get<int8_t>();
         
-        // Handle user fields if provided
-        if (!userFields.empty()) {
-            // Convert user fields string to binary
-            transaction.__set_userFields(userFields);
+        // Set signature (Base58 encoded binary)
+        std::string signatureBase58 = txData["signature"].get<std::string>();
+        cs::Bytes signatureBytes;
+        if (!decodeBase58(signatureBase58, signatureBytes)) {
+            sendError(hdl, msg.id, "Invalid signature format");
+            return;
+        }
+        transaction.signature = std::string(signatureBytes.begin(), signatureBytes.end());
+        
+        // Set fee
+        const json& feeData = txData["fee"];
+        transaction.fee.commission = feeData["commission"].get<int16_t>();
+        
+        // Set time creation
+        transaction.timeCreation = txData["timeCreation"].get<int64_t>();
+        
+        // Set transaction type
+        transaction.type = static_cast<api::TransactionType>(txData["type"].get<int>());
+        
+        // Handle optional fields
+        if (txData.contains("userFields")) {
+            std::string userFieldsBase58 = txData["userFields"].get<std::string>();
+            if (!userFieldsBase58.empty()) {
+                cs::Bytes userFieldsBytes;
+                if (decodeBase58(userFieldsBase58, userFieldsBytes)) {
+                    transaction.__set_userFields(std::string(userFieldsBytes.begin(), userFieldsBytes.end()));
+                }
+            }
+        }
+        
+        // Handle smart contract invocation if present
+        if (txData.contains("smartContract")) {
+            const json& scData = txData["smartContract"];
+            api::SmartContractInvocation invocation;
+            
+            invocation.method = scData["method"].get<std::string>();
+            
+            // Handle parameters
+            if (scData.contains("params") && scData["params"].is_array()) {
+                for (const auto& paramJson : scData["params"]) {
+                    general::Variant param;
+                    // Handle different parameter types
+                    if (paramJson.contains("String")) {
+                        param.__set_v_string(paramJson["String"].get<std::string>());
+                    } else if (paramJson.contains("int")) {
+                        param.__set_v_int(paramJson["int"].get<int32_t>());
+                    } else if (paramJson.contains("boolean")) {
+                        param.__set_v_boolean(paramJson["boolean"].get<bool>());
+                    } else if (paramJson.contains("double")) {
+                        param.__set_v_double(paramJson["double"].get<double>());
+                    }
+                    invocation.params.push_back(param);
+                }
+            }
+            
+            // Handle used contracts
+            if (scData.contains("usedContracts") && scData["usedContracts"].is_array()) {
+                for (const auto& contractAddrJson : scData["usedContracts"]) {
+                    std::string contractBase58 = contractAddrJson.get<std::string>();
+                    cs::Bytes contractBytes;
+                    if (decodeBase58(contractBase58, contractBytes)) {
+                        invocation.usedContracts.push_back(std::string(contractBytes.begin(), contractBytes.end()));
+                    }
+                }
+            }
+            
+            invocation.forgetNewState = scData.value("forgetNewState", false);
+            invocation.version = scData.value("version", 1);
+            
+            transaction.__set_smartContract(invocation);
         }
         
         // Execute the transaction using TransactionFlow
@@ -1116,15 +1194,56 @@ void WebSocketHandler::handleSendTransaction(ConnectionHdl hdl, const WebSocketM
             {"integral", result.fee.integral},
             {"fraction", result.fee.fraction}
         };
-        response["amount"] = {
-            {"integral", amountIntegral},
-            {"fraction", amountFraction}
-        };
+        
+        // Include smart contract result if available
+        if (result.__isset.smart_contract_result) {
+            response["hasResult"] = true;
+            response["resultType"] = "variant";
+        } else {
+            response["hasResult"] = false;
+        }
         
         sendResponse(hdl, msg.type, msg.id, response);
     }
     catch (const std::exception& e) {
         sendError(hdl, msg.id, std::string("Error sending transaction: ") + e.what());
+    }
+}
+
+void WebSocketHandler::handleWalletTransactionsCountGet(ConnectionHdl hdl, const WebSocketMessage& msg) {
+    try {
+        if (!msg.data.contains("address")) {
+            sendError(hdl, msg.id, "Missing required 'address' parameter");
+            return;
+        }
+        
+        std::string addressBase58 = msg.data["address"].get<std::string>();
+        
+        // Decode Base58 address to binary format for API call
+        cs::Bytes addressBytes;
+        if (!decodeBase58(addressBase58, addressBytes)) {
+            sendError(hdl, msg.id, "Invalid Base58 address format");
+            return;
+        }
+        
+        std::string addressBinary(addressBytes.begin(), addressBytes.end());
+        
+        // Call API to get wallet transaction count
+        api::WalletTransactionsCountGetResult result;
+        
+        if (apiHandler_) {
+            apiHandler_->WalletTransactionsCountGet(result, addressBinary);
+            
+            json responseData;
+            responseData["count"] = result.lastTransactionInnerId;
+            
+            sendResponse(hdl, msg.type, msg.id, responseData);
+        } else {
+            sendError(hdl, msg.id, "API handler not available");
+        }
+    }
+    catch (const std::exception& e) {
+        sendError(hdl, msg.id, std::string("Error getting wallet transaction count: ") + e.what());
     }
 }
 

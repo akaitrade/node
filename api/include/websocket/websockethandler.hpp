@@ -46,6 +46,7 @@ enum class MessageType {
     GetSmartMethodParams = 27,
     SmartContractExecute = 28,
     SendTransaction = 29,
+    WalletTransactionsCountGet = 30,
     
     // Token API (13-30)
     TokenBalancesGet = 13,
@@ -147,6 +148,7 @@ private:
     void handleGetSmartMethodParams(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleSmartContractExecute(ConnectionHdl hdl, const WebSocketMessage& msg);
     void handleSendTransaction(ConnectionHdl hdl, const WebSocketMessage& msg);
+    void handleWalletTransactionsCountGet(ConnectionHdl hdl, const WebSocketMessage& msg);
     
     // Token API handlers
     void handleTokenBalancesGet(ConnectionHdl hdl, const WebSocketMessage& msg);
