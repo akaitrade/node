@@ -1,0 +1,17 @@
+[node]
+validator_id = "validator_2"
+node_name = "test-node-2"
+listen_port = 8081
+rpc_port = 8082
+data_dir = "./data"
+
+[networking]
+listen_port = 8081
+# Connect to previous nodes
+peers = [
+    "localhost:8080",
+    "localhost:8081",
+]
+
+[development]
+test_mode = true

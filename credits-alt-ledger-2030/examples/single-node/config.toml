@@ -1,0 +1,79 @@
+# CREDITS ALT-LEDGER 2030 - Single Node Configuration
+# Simple standalone node for development and testing
+
+[node]
+# Node identification
+validator_id = "dev-node-1"
+node_name = "development-node"
+
+# Network configuration
+listen_port = 8080
+rpc_port = 8081
+enable_rpc = true
+
+# Migration phase (1, 2, or 3)
+phase = 3
+
+# Data storage
+data_dir = "./data_single"
+log_level = "info"
+
+[dag_engine]
+# DAG engine configuration
+storage_backend = "sled"  # Use embedded database for simplicity
+storage_path = "dag_data"
+cache_size = 5000        # Smaller cache for development
+max_vertices_per_shard = 100000
+min_vertices_per_shard = 10000
+
+[consensus]
+# Single node consensus (no validation needed)
+voting_threshold = 1.0   # Always reach consensus immediately
+max_validators = 1       # Only this node
+round_timeout_seconds = 5
+finality_depth = 1
+
+[sharding]
+# Simple sharding for single node
+initial_shard_count = 1
+rebalance_threshold = 0.9
+max_shard_size = 100000
+min_shard_size = 10000
+
+[networking]
+# No external networking needed
+transport_protocol = "ctdp_v2"
+enable_quic = false      # Disable for simplicity
+max_connections = 10
+connection_timeout_seconds = 10
+
+# No peers for standalone mode
+peers = []
+enable_discovery = false
+enable_local_discovery = false
+
+[performance]
+# Development-friendly settings
+worker_threads = 2
+max_memory_usage_mb = 512
+gc_interval_seconds = 30
+
+[security]
+# Minimal security for development
+enable_tls = false
+enable_rate_limiting = false
+max_requests_per_second = 1000
+
+[logging]
+# Detailed logging for development
+log_file = "./logs/node.log"
+max_log_size_mb = 50
+log_rotation_count = 3
+enable_metrics = true
+
+[development]
+# Development mode enabled
+enable_debug_api = true
+simulate_network_delay = false
+enable_profiling = true
+test_mode = true

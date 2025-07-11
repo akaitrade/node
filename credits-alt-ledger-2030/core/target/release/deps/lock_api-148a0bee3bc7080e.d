@@ -1,0 +1,10 @@
+C:\Users\BK_HOME\Documents\baseprojects\websocketordinalbk\node\credits-alt-ledger-2030\core\target\release\deps\lock_api-148a0bee3bc7080e.d: C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\lib.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\mutex.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\remutex.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\rwlock.rs
+
+C:\Users\BK_HOME\Documents\baseprojects\websocketordinalbk\node\credits-alt-ledger-2030\core\target\release\deps\liblock_api-148a0bee3bc7080e.rlib: C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\lib.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\mutex.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\remutex.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\rwlock.rs
+
+C:\Users\BK_HOME\Documents\baseprojects\websocketordinalbk\node\credits-alt-ledger-2030\core\target\release\deps\liblock_api-148a0bee3bc7080e.rmeta: C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\lib.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\mutex.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\remutex.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\rwlock.rs
+
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\lib.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\mutex.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\remutex.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\lock_api-0.4.13\src\rwlock.rs:

@@ -1,0 +1,10 @@
+{
+  "network_id": "local_test-network-20257/02-221655",
+  "bootstrap_nodes": [
+    {
+      "id": "validator_1",
+      "address": "localhost:8080",
+      "public_key": "genesis_key_placeholder"
+    }
+  ]
+}

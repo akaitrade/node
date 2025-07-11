@@ -1,0 +1,11 @@
+C:\Users\BK_HOME\Documents\baseprojects\websocketordinalbk\node\credits-alt-ledger-2030\core\target\release\deps\wyz-a78fe40da3f3e0c8.d: C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\lib.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\bidi.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\comu.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\fmt.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\range.rs
+
+C:\Users\BK_HOME\Documents\baseprojects\websocketordinalbk\node\credits-alt-ledger-2030\core\target\release\deps\libwyz-a78fe40da3f3e0c8.rlib: C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\lib.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\bidi.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\comu.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\fmt.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\range.rs
+
+C:\Users\BK_HOME\Documents\baseprojects\websocketordinalbk\node\credits-alt-ledger-2030\core\target\release\deps\libwyz-a78fe40da3f3e0c8.rmeta: C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\lib.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\bidi.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\comu.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\fmt.rs C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\range.rs
+
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\lib.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\bidi.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\comu.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\fmt.rs:
+C:\Users\BK_HOME\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wyz-0.5.1\src\range.rs:

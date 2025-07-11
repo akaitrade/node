@@ -1,0 +1,80 @@
+# CREDITS ALT-LEDGER 2030 - Node 2 Configuration
+# Second node connecting to bootstrap node
+
+[node]
+# Node identification
+validator_id = "validator_2" 
+node_name = "peer-node"
+
+# Network configuration (different ports)
+listen_port = 8082
+rpc_port = 8083
+enable_rpc = true
+
+# Migration phase
+phase = 3
+
+# Data storage
+data_dir = "./data_node2"
+log_level = "info"
+
+[dag_engine]
+# DAG engine configuration
+storage_backend = "sled"
+storage_path = "dag_data_node2"
+cache_size = 10000
+max_vertices_per_shard = 500000
+min_vertices_per_shard = 50000
+
+[consensus]
+# Two-node consensus
+voting_threshold = 0.67  # 67% of 2 nodes = need both
+max_validators = 2
+round_timeout_seconds = 30
+finality_depth = 5
+
+[sharding]
+# Simple sharding for small network
+initial_shard_count = 2
+rebalance_threshold = 0.8
+max_shard_size = 500000
+min_shard_size = 50000
+
+[networking]
+# Network transport
+transport_protocol = "ctdp_v2"
+enable_quic = true
+max_connections = 50
+connection_timeout_seconds = 30
+
+# Connect to node1 (bootstrap)
+peers = ["localhost:8080"]
+enable_discovery = true
+enable_local_discovery = true
+bind_address = "0.0.0.0"
+
+[performance]
+# Moderate performance settings
+worker_threads = 4
+max_memory_usage_mb = 1024
+gc_interval_seconds = 60
+
+[security]
+# Basic security for testing
+enable_tls = false  # Disabled for local testing
+enable_rate_limiting = true
+max_requests_per_second = 200
+
+[logging]
+# Standard logging
+log_file = "./logs/peer_node.log"
+max_log_size_mb = 100
+log_rotation_count = 5
+enable_metrics = true
+
+[development]
+# Development features
+enable_debug_api = true
+simulate_network_delay = false
+enable_profiling = false
+test_mode = false

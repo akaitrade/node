@@ -1,0 +1,52 @@
+[package]
+name = "dag_engine"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "dag_engine"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# Use sled instead of RocksDB for Windows (pure Rust, no bindgen required)
+sled = "0.34"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+blake3 = "1.4"
+tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
+thiserror = "1.0"
+parking_lot = "0.12"
+crossbeam = "0.8"
+rayon = "1.7"
+uuid = { version = "1.0", features = ["v4"] }
+dashmap = "5.4"
+lru = "0.11"
+
+# BLS signature support (pure Rust implementations)
+bls12_381 = "0.8"
+group = "0.13"
+
+# Serialization support
+rmp-serde = "1.1"
+serde_json = "1.0"
+serde-big-array = "0.5"
+env_logger = "0.10"
+
+[build-dependencies]
+cbindgen = "0.24"
+
+[features]
+default = ["sled-backend"]
+sled-backend = []
+rocksdb-backend = ["rocksdb"]
+
+[dependencies.rocksdb]
+version = "0.21"
+optional = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

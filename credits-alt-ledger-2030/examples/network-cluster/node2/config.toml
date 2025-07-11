@@ -1,0 +1,63 @@
+# CREDITS ALT-LEDGER 2030 - Node 2 Configuration
+# Generated cluster configuration
+
+[node]
+validator_id = "validator_2"
+node_name = "cluster-node-2"
+listen_port = !PORT!
+rpc_port = !RPC_PORT!
+enable_rpc = true
+phase = 3
+data_dir = "./data_node2"
+log_level = "info"
+
+[dag_engine]
+storage_backend = "sled"
+storage_path = "dag_data"
+cache_size = 15000
+max_vertices_per_shard = 1000000
+min_vertices_per_shard = 100000
+
+[consensus]
+voting_threshold = 0.67
+max_validators = 4
+round_timeout_seconds = 30
+finality_depth = 10
+
+[sharding]
+initial_shard_count = 4
+rebalance_threshold = 0.8
+max_shard_size = 1000000
+min_shard_size = 100000
+
+[networking]
+transport_protocol = "ctdp_v2"
+enable_quic = true
+max_connections = 100
+connection_timeout_seconds = 30
+peers = ["localhost:8080"]
+enable_discovery = true
+enable_local_discovery = true
+bind_address = "0.0.0.0"
+
+[performance]
+worker_threads = 4
+max_memory_usage_mb = 2048
+gc_interval_seconds = 60
+
+[security]
+enable_tls = false
+enable_rate_limiting = true
+max_requests_per_second = 500
+
+[logging]
+log_file = "./logs/node2.log"
+max_log_size_mb = 100
+log_rotation_count = 5
+enable_metrics = true
+
+[development]
+enable_debug_api = true
+simulate_network_delay = false
+enable_profiling = false
+test_mode = false

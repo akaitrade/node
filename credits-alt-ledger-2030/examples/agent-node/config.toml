@@ -1,0 +1,130 @@
+# CREDITS ALT-LEDGER 2030 - Agent Node Configuration
+# Personal blockchain agent with DAG synchronization
+
+[node]
+# Agent identification
+validator_id = "agent_alice"
+node_name = "alice-personal-agent"
+
+# Network configuration
+listen_port = 8090
+rpc_port = 8091
+enable_rpc = true
+
+# Migration phase
+phase = 3
+
+# Data storage
+data_dir = "./data_agent"
+log_level = "info"
+
+[agent]
+# Agent-specific configuration
+agent_name = "alice"
+agent_type = "personal"
+enable_offline_mode = true
+auto_sync_interval = 300    # Sync every 5 minutes
+
+# Personal chain settings
+personal_chain_id = "alice_chain_001"
+enable_private_transactions = true
+transaction_history_limit = 10000
+
+# Cross-agent communication
+enable_cross_agent = true
+cross_agent_discovery = true
+
+[dag_sync]
+# DAG synchronization settings
+sync_enabled = true
+sync_interval_seconds = 60
+max_sync_batch_size = 1000
+
+# DAG nodes to sync with
+dag_nodes = [
+    "localhost:8080",
+    "localhost:8082"
+]
+
+# Sync strategy
+sync_strategy = "selective"  # Only sync relevant data
+sync_depth = 100            # Last 100 blocks
+
+[agent_storage]
+# Agent storage configuration
+storage_backend = "sled"
+storage_path = "agent_data"
+cache_size = 5000
+enable_compression = true
+
+# Personal data encryption
+enable_encryption = true
+encryption_key_file = "./keys/agent_key.pem"
+
+[consensus]
+# Agent consensus (simplified)
+voting_threshold = 1.0      # Single agent = immediate consensus
+max_validators = 1
+round_timeout_seconds = 5
+finality_depth = 1
+
+[networking]
+# Agent networking
+transport_protocol = "ctdp_v2"
+enable_quic = true
+max_connections = 50
+connection_timeout_seconds = 30
+
+# Connect to DAG network
+peers = ["localhost:8080"]  # Bootstrap DAG node
+enable_discovery = true
+enable_local_discovery = true
+
+[performance]
+# Light performance settings for personal use
+worker_threads = 2
+max_memory_usage_mb = 512
+gc_interval_seconds = 60
+
+[security]
+# Agent security
+enable_tls = false          # Simplified for local use
+enable_rate_limiting = true
+max_requests_per_second = 100
+
+# Personal key management
+personal_key_file = "./keys/personal.key"
+enable_biometric_auth = false
+
+[logging]
+# Agent logging
+log_file = "./logs/agent.log"
+max_log_size_mb = 50
+log_rotation_count = 3
+enable_metrics = true
+
+[development]
+# Agent development features
+enable_debug_api = true
+simulate_network_delay = false
+enable_profiling = false
+test_mode = false
+
+[smart_contracts]
+# Smart contract support for agents
+enable_smart_contracts = true
+contract_vm = "wasm"
+max_contract_size = 1048576  # 1MB
+gas_limit = 1000000
+
+[applications]
+# Application integration
+enable_app_api = true
+app_api_port = 8092
+allowed_origins = ["*"]     # Allow all for development
+
+# Built-in applications
+enable_wallet = true
+enable_identity = true
+enable_messaging = true
+enable_file_storage = true

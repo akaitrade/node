@@ -1,0 +1,94 @@
+{
+  "network_id": "credits-testnet-cluster",
+  "genesis_time": "2024-01-01T00:00:00Z",
+  "chain_id": "credits-test-001",
+  
+  "genesis_validators": [
+    {
+      "id": "validator_1",
+      "address": "localhost:8080", 
+      "public_key": "ed25519_validator_1_public_key_placeholder",
+      "private_key": "ed25519_validator_1_private_key_placeholder",
+      "stake": 2500000,
+      "role": "bootstrap"
+    },
+    {
+      "id": "validator_2",
+      "address": "localhost:8082",
+      "public_key": "ed25519_validator_2_public_key_placeholder", 
+      "private_key": "ed25519_validator_2_private_key_placeholder",
+      "stake": 2500000,
+      "role": "validator"
+    },
+    {
+      "id": "validator_3",
+      "address": "localhost:8084",
+      "public_key": "ed25519_validator_3_public_key_placeholder",
+      "private_key": "ed25519_validator_3_private_key_placeholder", 
+      "stake": 2500000,
+      "role": "validator"
+    },
+    {
+      "id": "validator_4",
+      "address": "localhost:8086",
+      "public_key": "ed25519_validator_4_public_key_placeholder",
+      "private_key": "ed25519_validator_4_private_key_placeholder",
+      "stake": 2500000,
+      "role": "validator"
+    }
+  ],
+
+  "genesis_accounts": [
+    {
+      "address": "credits1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9yf5tl",
+      "balance": 100000000000,
+      "currency": 1,
+      "description": "Genesis Treasury Account"
+    },
+    {
+      "address": "credits1test1111111111111111111111111111wqg0x3",
+      "balance": 50000000000,
+      "currency": 1, 
+      "description": "Test Account 1"
+    },
+    {
+      "address": "credits1test2222222222222222222222222222v6h8v3",
+      "balance": 50000000000,
+      "currency": 1,
+      "description": "Test Account 2"
+    }
+  ],
+
+  "consensus_config": {
+    "consensus_algorithm": "virtual_voting",
+    "voting_threshold": 0.67,
+    "round_timeout_ms": 30000,
+    "max_validators": 100,
+    "min_validators": 4,
+    "bft_threshold": 0.67,
+    "finality_depth": 10
+  },
+
+  "network_config": {
+    "protocol_version": "ctdp_v2",
+    "max_connections": 1000,
+    "connection_timeout_ms": 30000,
+    "enable_quic": true,
+    "enable_compression": true
+  },
+
+  "sharding_config": {
+    "initial_shard_count": 4,
+    "max_shard_size": 1000000,
+    "min_shard_size": 100000,
+    "rebalance_threshold": 0.8
+  },
+
+  "economic_config": {
+    "base_currency": 1,
+    "transaction_fee": 100000,
+    "smart_contract_fee": 1000000,
+    "validator_reward": 5000000,
+    "block_reward": 10000000
+  }
+}

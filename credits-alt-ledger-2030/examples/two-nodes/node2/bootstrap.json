@@ -1,0 +1,43 @@
+{
+  "network_id": "two-node-testnet",
+  "genesis_time": "2024-01-01T00:00:00Z",
+  "bootstrap_nodes": [
+    {
+      "id": "validator_1",
+      "address": "localhost:8080",
+      "public_key": "bootstrap_key_placeholder",
+      "role": "bootstrap"
+    }
+  ],
+  "validators": [
+    {
+      "id": "validator_1",
+      "address": "localhost:8080",
+      "public_key": "validator_1_key",
+      "stake": 1000000
+    },
+    {
+      "id": "validator_2", 
+      "address": "localhost:8084",
+      "public_key": "validator_2_key",
+      "stake": 1000000
+    },
+    {
+      "id": "validator_3", 
+      "address": "localhost:8091",
+      "public_key": "validator_2_key",
+      "stake": 1000000
+    }
+  ],
+  "consensus_config": {
+    "consensus_algorithm": "virtual_voting",
+    "voting_threshold": 0.67,
+    "round_timeout_ms": 30000,
+    "max_validators": 2
+  },
+  "network_config": {
+    "protocol_version": "ctdp_v2",
+    "max_connections": 50,
+    "connection_timeout_ms": 30000
+  }
+}

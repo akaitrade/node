@@ -1,0 +1,124 @@
+# CREDITS ALT-LEDGER 2030 - Production Bootstrap Node Configuration
+# Stable entry point for the CREDITS network
+
+[node]
+# Node identification
+validator_id = "bootstrap_node_main"
+node_name = "credits-bootstrap-main"
+
+# Network configuration
+listen_port = 8080
+rpc_port = 8081
+enable_rpc = true
+
+# Migration phase (production)
+phase = 3
+
+# Data storage
+data_dir = "./data_bootstrap"
+log_level = "warn"  # Less verbose for production
+
+[dag_engine]
+# Production DAG engine settings
+storage_backend = "rocksdb"  # Production database
+storage_path = "dag_data"
+cache_size = 50000          # Large cache for performance
+max_vertices_per_shard = 5000000
+min_vertices_per_shard = 500000
+
+[consensus]
+# Production consensus settings
+voting_threshold = 0.67
+max_validators = 100        # Support large network
+round_timeout_seconds = 60  # Longer timeout for stability
+finality_depth = 20        # More finality for security
+
+[sharding]
+# Production sharding
+initial_shard_count = 8     # More shards for load
+rebalance_threshold = 0.75
+max_shard_size = 5000000
+min_shard_size = 500000
+
+[networking]
+# Production networking
+transport_protocol = "ctdp_v2"
+enable_quic = true
+max_connections = 2000      # High connection limit
+connection_timeout_seconds = 60
+
+# Bootstrap node doesn't specify peers - others connect to it
+peers = []
+enable_discovery = true
+enable_local_discovery = false  # Disable for production
+bind_address = "0.0.0.0"       # Accept from any IP
+
+# DNS seeds for wider discovery
+dns_seeds = [
+    "seed1.credits-ledger.network",
+    "seed2.credits-ledger.network"
+]
+
+[performance]
+# Production performance settings
+worker_threads = 8              # More CPU cores
+max_memory_usage_mb = 8192     # 8GB RAM limit
+gc_interval_seconds = 300      # Less frequent GC
+
+[security]
+# Production security
+enable_tls = true
+cert_file = "./certs/bootstrap.crt"
+key_file = "./certs/bootstrap.key"
+enable_rate_limiting = true
+max_requests_per_second = 1000
+
+# IP whitelist for admin functions
+admin_whitelist = [
+    "127.0.0.1",
+    "10.0.0.0/8",
+    "192.168.0.0/16"
+]
+
+[logging]
+# Production logging
+log_file = "./logs/bootstrap.log"
+max_log_size_mb = 500
+log_rotation_count = 10
+enable_metrics = true
+
+# Syslog integration
+enable_syslog = true
+syslog_facility = "daemon"
+syslog_tag = "credits-bootstrap"
+
+[monitoring]
+# Monitoring and health checks
+enable_health_check = true
+health_check_port = 8090
+metrics_port = 8091
+
+# Prometheus metrics
+enable_prometheus = true
+prometheus_namespace = "credits"
+
+[development]
+# Production settings
+enable_debug_api = false
+simulate_network_delay = false
+enable_profiling = false
+test_mode = false
+
+[backup]
+# Backup configuration
+enable_auto_backup = true
+backup_interval_hours = 6
+backup_retention_days = 30
+backup_location = "./backups"
+
+[maintenance]
+# Maintenance settings
+enable_auto_updates = false
+maintenance_window_start = "02:00"
+maintenance_window_end = "04:00"
+enable_graceful_shutdown = true

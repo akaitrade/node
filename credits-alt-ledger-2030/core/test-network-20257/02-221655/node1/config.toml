@@ -1,0 +1,12 @@
+[node]
+validator_id = "validator_1"
+node_name = "test-node-1"
+listen_port = 8080
+rpc_port = 8081
+data_dir = "./data"
+
+[networking]
+listen_port = 8080
+
+[development]
+test_mode = true
