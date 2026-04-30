@@ -87,6 +87,7 @@ endif()
 
 # This large list is necessary to prevent thrift from generating unused stuff
 add_definitions(-DUSE_STD_THREAD)
+add_definitions(-DBOOST_ALL_NO_LIB)
 
 if (MSVC)
     MARK_AS_ADVANCED(
