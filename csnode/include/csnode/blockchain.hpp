@@ -22,6 +22,7 @@
 #include <csnode/multiwallets.hpp>
 #include <csnode/walletsids.hpp>
 #include <csnode/poolcache.hpp>
+#include <csnode/threadpool.hpp>
 #include <csnode/caches_serialization_manager.hpp>
 
 #include <roundpackage.hpp>
@@ -118,7 +119,7 @@ public:
      *            for future use and will be recorded on time
      */
 
-    bool storeBlock(csdb::Pool& pool, cs::PoolStoreType type);
+    bool storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipVerify = false);
 
     /**
      * @fn    std::optional<csdb::Pool> BlockChain::createBlock(csdb::Pool pool);
@@ -410,7 +411,9 @@ private:
     void logBlockInfo(csdb::Pool& pool);
 
     // Thread unsafe
-    bool finalizeBlock(csdb::Pool& pool, bool isTrusted, cs::PublicKeys lastConfidants);
+    bool finalizeBlock(csdb::Pool& pool, bool isTrusted, cs::PublicKeys lastConfidants, bool skipVerify = false);
+    // Read-only signature checks. Safe to invoke concurrently from multiple threads on different pools.
+    bool verifyBlockSignatures(const csdb::Pool& pool, const cs::PublicKeys& lastConfidants, bool isTrusted) const;
     bool applyBlockToCaches(const csdb::Pool& pool);
 
     void onStartReadFromDB(cs::Sequence lastWrittenPoolSeq);
@@ -467,7 +470,7 @@ private:
      *            pool)
      */
 
-    std::optional<csdb::Pool> recordBlock(csdb::Pool& pool, bool isTrusted);
+    std::optional<csdb::Pool> recordBlock(csdb::Pool& pool, bool isTrusted, bool skipVerify = false);
 
     // to store outrunning blocks until the time to insert comes;
     // stores pairs of <sequence, metadata>
@@ -479,6 +482,12 @@ private:
 
     mutable std::mutex cachedBlocksMutex_;
     std::unique_ptr<cs::PoolCache> cachedBlocks_;
+
+    // Parallel signature verifier pool (sync-time use only). testCachedBlocks
+    // pre-verifies a batch of consecutive blocks here, then applies them in
+    // order with skipVerify=true.
+    std::unique_ptr<cs::VerifierPool> verifierPool_;
+    size_t verifyBatchSize_ = 32;
 
     // block storage to defer storing it in blockchain until confirmation from other nodes got
     // (idea is it is more easy not to store block immediately then to revert it after storing)

@@ -58,6 +58,13 @@ struct PoolSyncData {
     uint16_t sequencesVerificationFrequency = 350;   // sequences received verification frequency : 0-never; 1-once per round: other- in ms;
 };
 
+struct StorageData {
+    size_t asyncWriteQueueSize = 5000;   // bounded queue for the async DB writer
+    size_t writeBatchSize = 100;         // pools coalesced into one DB write
+    size_t verifyWorkerCount = 4;        // parallel signature-verifier threads
+    size_t verifyBatchSize = 32;         // blocks dispatched per verify batch
+};
+
 struct ApiData {
     // on by default:
     uint16_t port = 9090;
@@ -214,6 +221,10 @@ public:
         return poolSyncData_;
     }
 
+    const StorageData& getStorageSettings() const {
+        return storageData_;
+    }
+
     const ApiData& getApiSettings() const {
         return apiData_;
     }
@@ -343,6 +354,7 @@ private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
     void readPoolSynchronizerData(const boost::property_tree::ptree& config);
+    void readStorageData(const boost::property_tree::ptree& config);
     void readApiData(const boost::property_tree::ptree& config);
     void readConveyerData(const boost::property_tree::ptree& config);
     void readEventsReportData(const boost::property_tree::ptree& config);
@@ -390,6 +402,7 @@ private:
     boost::log::settings loggerSettings_{};
 
     PoolSyncData poolSyncData_;
+    StorageData storageData_;
     ApiData apiData_;
     DbSQLData dbSQLData_;
 

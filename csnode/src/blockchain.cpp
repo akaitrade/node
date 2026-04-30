@@ -160,9 +160,20 @@ bool BlockChain::init(
         return false;
     };
 
-    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase)) {
+    const auto& storageCfg = cs::ConfigHolder::instance().config()->getStorageSettings();
+
+    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
+                       storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
+    }
+
+    // Spin up the parallel signature verifier (sync-time only; idle at steady state).
+    if (storageCfg.verifyWorkerCount > 0 && storageCfg.verifyBatchSize > 1) {
+        verifierPool_ = std::make_unique<cs::VerifierPool>(storageCfg.verifyWorkerCount);
+        verifyBatchSize_ = storageCfg.verifyBatchSize;
+        cslog() << kLogPrefix << "verifier pool: " << storageCfg.verifyWorkerCount
+                << " workers, batch size " << storageCfg.verifyBatchSize;
     }
 
     if (newBlockchainTop != cs::kWrongSequence) {
@@ -661,79 +672,65 @@ void BlockChain::logBlockInfo(csdb::Pool& pool) {
     csdebug() << " last storage size: " << getSize();
 }
 
-bool BlockChain::finalizeBlock(csdb::Pool& pool, bool isTrusted, cs::PublicKeys lastConfidants) {
+bool BlockChain::verifyBlockSignatures(const csdb::Pool& pool,
+                                       const cs::PublicKeys& lastConfidants,
+                                       bool isTrusted) const {
+    cs::Sequence currentSequence = pool.sequence();
+    const auto& signatures = pool.signatures();
+    const auto& realTrusted = pool.realTrusted();
+
+    if (signatures.empty() && (!isTrusted || pool.sequence() != 0)) {
+        return false;
+    }
+
+    if (signatures.size() < static_cast<size_t>(cs::Utils::maskValue(realTrusted)) && !isTrusted && pool.sequence() != 0) {
+        return false;
+    }
+
+    // Round confirmations: this block's roundConfirmations against PREVIOUS block's confidants.
+    if (currentSequence > 1) {
+        cs::Bytes trustedToHash;
+        cs::ODataStream tth(trustedToHash);
+        tth << currentSequence;
+        tth << pool.confidants();
+        cs::Hash trustedHash = cscrypto::calculateHash(trustedToHash.data(), trustedToHash.size());
+
+        const cs::Signatures& sigs = pool.roundConfirmations();
+        const auto confMask = cs::Utils::bitsToMask(pool.numberConfirmations(), pool.roundConfirmationMask());
+
+        if (!BlockChain::isBootstrap(pool) && confMask.size() > 1) {
+            if (!NodeUtils::checkGroupSignature(lastConfidants, confMask, sigs, trustedHash)) {
+                return false;
+            }
+        }
+    }
+
+    // Pool signatures: this block's signatures against THIS block's confidants.
+    if (currentSequence > 0) {
+        Hash tempHash;
+        auto hash = pool.hash().to_binary();
+        std::copy(hash.cbegin(), hash.cend(), tempHash.data());
+        const auto mask = cs::Utils::bitsToMask(pool.numberTrusted(), pool.realTrusted());
+        if (!NodeUtils::checkGroupSignature(pool.confidants(), mask, signatures, tempHash)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool BlockChain::finalizeBlock(csdb::Pool& pool, bool isTrusted, cs::PublicKeys lastConfidants, bool skipVerify) {
     if (!pool.compose()) {
         csmeta(cserror) << kLogPrefix << "Couldn't compose block: " << pool.sequence();
         return false;
     }
 
-    cs::Sequence currentSequence = pool.sequence();
-    const auto& confidants = pool.confidants();
-    const auto& signatures = pool.signatures();
-    const auto& realTrusted = pool.realTrusted();
-    if (currentSequence > 1) {
-        csdebug() << kLogPrefix << "Finalize: starting confidants validation procedure (#" << currentSequence << "):";
-
-        cs::Bytes trustedToHash;
-        cs::ODataStream tth(trustedToHash);
-        tth << currentSequence;
-        tth << confidants;
-
-        cs::Hash trustedHash = cscrypto::calculateHash(trustedToHash.data(), trustedToHash.size());
-
-        const cs::Signatures& sigs = pool.roundConfirmations();
-        const auto& confMask = cs::Utils::bitsToMask(pool.numberConfirmations(), pool.roundConfirmationMask());
-        // for debugging only delete->
-        csdebug() << kLogPrefix << "Mask size = " << confMask.size() << " for next confidants:";
-        for (auto& it : lastConfidants) {
-            csdebug() << cs::Utils::byteStreamToHex(it.data(), it.size());
-        }
-        // <-delete
-        if (!BlockChain::isBootstrap(pool) && confMask.size() > 1) {
-            if (!NodeUtils::checkGroupSignature(lastConfidants, confMask, sigs, trustedHash)) {
-                csdebug() << kLogPrefix << "           The Confidants confirmations are not OK";
-                return false;
-            }
-            else {
-                csdebug() << kLogPrefix << "           The Confidants confirmations are OK";
-            }
-        }
-        else {
-            // TODO: add SS or bootstrap confidants PKey to the prevConfidants
-        }
-    }
-
-    if (signatures.empty() && (!isTrusted || pool.sequence() != 0)) {
-        csmeta(csdebug) << kLogPrefix << "The pool #" << pool.sequence() << " doesn't contain signatures";
-        return false;
-    }
-
-    if (signatures.size() < static_cast<size_t>(cs::Utils::maskValue(realTrusted)) && !isTrusted && pool.sequence() != 0) {
-        csmeta(csdebug) << kLogPrefix << "The number of signatures is insufficient";
-        return false;
-    }
-    auto mask = cs::Utils::bitsToMask(pool.numberTrusted(), pool.realTrusted());
-
-    // pool signatures check: start
-    if (pool.sequence() > 0) {
-        //  csmeta(csdebug) << "Pool Hash: " << cs::Utils::byteStreamToHex(pool.hash().to_binary().data(), pool.hash().to_binary().size());
-        //  csmeta(csdebug) << "Prev Hash: " << cs::Utils::byteStreamToHex(pool.previous_hash().to_binary().data(), pool.previous_hash().to_binary().size());
-        Hash tempHash;
-        auto hash = pool.hash().to_binary();
-        //csdebug() << "New pool " << pool.sequence() << ": " << cs::Utils::byteStreamToHex(pool.to_binary());
-        std::copy(hash.cbegin(), hash.cend(), tempHash.data());
-        if (NodeUtils::checkGroupSignature(confidants, mask, signatures, tempHash)) {
-            csmeta(csdebug) << kLogPrefix << "The number of signatures is sufficient and all of them are OK";
-        }
-        else {
-            cswarning() << kLogPrefix << "Some of Pool Signatures aren't valid. The pool will not be written to DB. It will be automatically written, when we get proper data";
+    if (!skipVerify) {
+        if (!verifyBlockSignatures(pool, lastConfidants, isTrusted)) {
+            cswarning() << kLogPrefix << "block #" << pool.sequence() << " failed signature verification";
             return false;
         }
     }
-    else {
-        csmeta(csdebug) << kLogPrefix << "Genesis block will be written without signatures verification";
-    }
-    // pool signatures check: end
 
     if (pool.transactions_count() > 0) {
         const auto block_time = BlockChain::getBlockTime(pool);
@@ -1271,7 +1268,7 @@ std::string  BlockChain::printWalletCaches() {
     return res;
 }
 
-std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrusted) {
+std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrusted, bool skipVerify) {
     const auto last_seq = getLastSeq();
     const auto pool_seq = pool.sequence();
 
@@ -1312,7 +1309,7 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         }
     }
 
-    if (finalizeBlock(pool, isTrusted, lastConfidants)) {
+    if (finalizeBlock(pool, isTrusted, lastConfidants, skipVerify)) {
         csdebug() << kLogPrefix << "The block is correct";
         if (!applyBlockToCaches(pool)) {
             csdebug() << kLogPrefix << "failed to apply block to caches";
@@ -1554,7 +1551,7 @@ bool BlockChain::isSpecial(const csdb::Transaction& t) {
     return false;
 }
 
-bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
+bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipVerify) {
     const auto lastSequence = getLastSeq();
     const auto poolSequence = pool.sequence();
     
@@ -1655,7 +1652,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
         }
 
         // write immediately
-        if (recordBlock(pool, false).has_value()) {
+        if (recordBlock(pool, false, skipVerify).has_value()) {
             csdebug() << kLogPrefix << "block #" << poolSequence << " has recorded to chain successfully";
             // unable to call because stack overflow in case of huge written blocks amount possible:
             // testCachedBlocks();
@@ -1730,51 +1727,122 @@ void BlockChain::testCachedBlocks() {
 
     size_t countStored = 0;
     cs::Sequence fromSeq = lastSeq;
+    const size_t batchSize = (verifierPool_ && verifyBatchSize_ > 1) ? verifyBatchSize_ : 1;
 
     while (!cachedBlocks_->isEmpty()) {
         if (stop_) {
-            // stop requested while handle cached blocks
             return;
         }
 
-        auto firstBlockInCache = cachedBlocks_->minSequence();
+        const auto firstBlockInCache = cachedBlocks_->minSequence();
+        if (firstBlockInCache != lastSeq) {
+            csdebug() << kLogPrefix << "Stop store blocks from cache. Next blocks in cache #" << firstBlockInCache;
+            break;
+        }
 
-        if (firstBlockInCache == lastSeq) {
-            // retrieve and use block if it is exactly what we need:
+        // Collect a batch of consecutive blocks (peek; do not pop yet).
+        std::vector<cs::PoolCache::Data> batch;
+        batch.reserve(batchSize);
+        cs::Sequence wantSeq = lastSeq;
+        for (size_t i = 0; i < batchSize; ++i) {
+            if (!cachedBlocks_->contains(wantSeq)) break;
+            auto v = cachedBlocks_->value(wantSeq);
+            if (!v.has_value()) break;
+            batch.push_back(std::move(v.value()));
+            ++wantSeq;
+        }
+
+        if (batch.empty()) break;
+
+        const bool useParallelVerify = verifierPool_ && batch.size() > 1;
+        size_t verifiedCount = 0;
+
+        if (useParallelVerify) {
+            // Build lastConfidants per block. First needs the previous chain block;
+            // subsequent ones get them from the preceding batch entry directly.
+            std::vector<cs::PublicKeys> lastConfList(batch.size());
+            if (lastSeq > 1) {
+                cs::Lock dblock(dbLock_);
+                if (deferredBlock_.is_valid() && deferredBlock_.sequence() + 1 == lastSeq) {
+                    lastConfList[0] = deferredBlock_.confidants();
+                }
+                else {
+                    lastConfList[0] = loadBlock(lastSeq - 1).confidants();
+                }
+            }
+            for (size_t i = 1; i < batch.size(); ++i) {
+                lastConfList[i] = batch[i - 1].pool.confidants();
+            }
+
+            // Force pool.hash() cache so workers do read-only access to it.
+            for (auto& d : batch) {
+                (void)d.pool.hash();
+            }
+
+            // Dispatch parallel verifies; collect futures.
+            std::vector<std::future<bool>> futures;
+            futures.reserve(batch.size());
+            for (size_t i = 0; i < batch.size(); ++i) {
+                const csdb::Pool& pool = batch[i].pool;
+                const cs::PublicKeys& lc = lastConfList[i];
+                futures.push_back(verifierPool_->submit([this, &pool, &lc]() {
+                    return verifyBlockSignatures(pool, lc, /*isTrusted=*/false);
+                }));
+            }
+
+            // Apply in order. Stop applying at the first verify failure.
+            for (size_t i = 0; i < batch.size(); ++i) {
+                if (!futures[i].get()) {
+                    cserror() << kLogPrefix << "verify failed at block " << batch[i].pool.sequence()
+                              << " in batch; dropping it and rest from cache";
+                    break;
+                }
+                cachedBlocks_->remove(batch[i].pool.sequence());
+                if (!storeBlock(batch[i].pool, batch[i].type, /*skipVerify=*/true)) {
+                    cserror() << kLogPrefix << "apply failed at block " << batch[i].pool.sequence()
+                              << "; dropping rest from cache";
+                    break;
+                }
+                ++verifiedCount;
+                ++countStored;
+            }
+
+            // Drop unapplied tail (verify failure or apply failure).
+            for (size_t i = verifiedCount; i < batch.size(); ++i) {
+                cachedBlocks_->remove(batch[i].pool.sequence());
+            }
+        }
+        else {
+            // Single-block path (steady-state, or verifierPool not configured).
             auto data = cachedBlocks_->pop(firstBlockInCache);
-
             if (!data.has_value()) {
                 cswarning() << "cached blocks returned not valid pool, stop testing cache";
                 break;
             }
-
             if (data.value().pool.is_read_only() && data.value().type == cs::PoolStoreType::Created) {
                 cswarning() << "created block from chache is read-only";
             }
-
-            const bool ok = storeBlock(data.value().pool, data.value().type);
-
-            if (!ok) {
+            if (!storeBlock(data.value().pool, data.value().type)) {
                 cserror() << kLogPrefix << "Failed to record cached block to chain, drop it & wait to request again";
                 break;
             }
-
+            ++verifiedCount;
             ++countStored;
-
-            if (countStored >= 1000) {
-                cslog() << "BLOCKCHAIN> stored " << WithDelimiters(countStored)
-                    << " blocks " << WithDelimiters(fromSeq) << " .. " << WithDelimiters(fromSeq + countStored) << " from cache";
-                countStored = 0;
-                fromSeq = lastSeq + 1;
-            }
-
-            lastSeq = getLastSeq() + 1;
         }
-        else {
-            // stop processing, we have not got required block in cache yet
-            csdebug() << kLogPrefix << "Stop store blocks from cache. Next blocks in cache #" << firstBlockInCache;
+
+        if (countStored >= 1000) {
+            cslog() << "BLOCKCHAIN> stored " << WithDelimiters(countStored)
+                << " blocks " << WithDelimiters(fromSeq) << " .. " << WithDelimiters(fromSeq + countStored) << " from cache";
+            countStored = 0;
+            fromSeq = lastSeq + 1;
+        }
+
+        if (verifiedCount < batch.size()) {
+            // Hit a failure; let next sync request bring the missing blocks again.
             break;
         }
+
+        lastSeq = getLastSeq() + 1;
     }
 
     if (countStored > 0) {

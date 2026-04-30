@@ -22,8 +22,7 @@ namespace {
 constexpr const char* kCfSeqNo = "seq_no";
 constexpr const char* kCfContracts = "contracts";
 
-// Big-endian encode a uint32 so RocksDB's lexicographic key order matches
-// numeric order (BDB DB_RECNO gave us numeric order for free).
+// Big-endian so RocksDB's lex order matches numeric order.
 inline std::string PackBE32(uint32_t v) {
     char b[4];
     b[0] = static_cast<char>((v >> 24) & 0xFF);
@@ -86,17 +85,13 @@ bool DatabaseRocksDB::open(const std::string& path) {
     rocksdb::Options options;
     options.create_if_missing = true;
     options.create_missing_column_families = true;
-    // LZ4 throughout, LZ4HC at the bottom. LZ4HC is slower-encode/same-decode
-    // as plain LZ4 with noticeably better ratio; bottommost level usually
-    // contains 80-90% of the data, written rarely (compaction-time only),
-    // read often -- so spending extra encode time there is worth it.
-    // ZSTD would compress better but requires vendoring zstd as a submodule;
-    // not worth the extra dep until LZ4 numbers prove insufficient.
+    // LZ4 hot, LZ4HC bottommost (slower-encode/better ratio; cold tier).
     options.compression = rocksdb::kLZ4Compression;
     options.bottommost_compression = rocksdb::kLZ4HCCompression;
     options.level_compaction_dynamic_level_bytes = true;
-    options.max_background_jobs = 4;
-    options.bytes_per_sync = 1u << 20;  // 1 MiB
+    options.max_background_jobs = 8;                 // tune up for sync-time throughput
+    options.write_buffer_size = 256u << 20;          // 256 MiB memtable
+    options.bytes_per_sync = 1u << 20;               // 1 MiB
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
 
     rocksdb::BlockBasedTableOptions topt;
@@ -139,16 +134,39 @@ bool DatabaseRocksDB::put(const cs::Bytes& key, uint32_t seq_no, const cs::Bytes
     if (!db_) { set_last_error(NotOpen); return false; }
 
     const std::string be_key = PackBE32(seq_no + 1);
-
-    // The seq_no CF stores the same uint32_t value (seq_no+1) in native-endian
-    // form so that DatabaseRocksDB::seq_no() returns the same byte pattern that
-    // DatabaseBerkeleyDB::seq_no() did. Internal storage detail; never iterated.
+    // seq_no CF stores native-endian uint32 to match BDB byte pattern.
     const uint32_t native_seq = seq_no + 1;
 
     rocksdb::WriteBatch batch;
     batch.Put(cf_blocks_, rocksdb::Slice(be_key), BytesSlice(value));
     batch.Put(cf_seq_no_, BytesSlice(key),
               rocksdb::Slice(reinterpret_cast<const char*>(&native_seq), sizeof(native_seq)));
+
+    auto s = db_->Write(rocksdb::WriteOptions(), &batch);
+    if (!s.ok()) { set_last_error_from_status(s); return false; }
+    set_last_error();
+    return true;
+}
+
+bool DatabaseRocksDB::put_batch(const std::vector<PendingWrite>& items) {
+    if (!db_) { set_last_error(NotOpen); return false; }
+    if (items.empty()) { set_last_error(); return true; }
+
+    // One WriteBatch covering 2*N puts (blocks + seq_no for each item).
+    // Amortizes RocksDB's per-Write overhead (mutex, WAL append) across the batch.
+    rocksdb::WriteBatch batch;
+    std::vector<std::string> be_keys;
+    std::vector<uint32_t> native_seqs;
+    be_keys.reserve(items.size());
+    native_seqs.reserve(items.size());
+
+    for (const auto& item : items) {
+        be_keys.push_back(PackBE32(item.seq_no + 1));
+        native_seqs.push_back(item.seq_no + 1);
+        batch.Put(cf_blocks_, rocksdb::Slice(be_keys.back()), BytesSlice(item.payload));
+        batch.Put(cf_seq_no_, BytesSlice(item.hash_key),
+                  rocksdb::Slice(reinterpret_cast<const char*>(&native_seqs.back()), sizeof(uint32_t)));
+    }
 
     auto s = db_->Write(rocksdb::WriteOptions(), &batch);
     if (!s.ok()) { set_last_error_from_status(s); return false; }
@@ -199,7 +217,6 @@ bool DatabaseRocksDB::seq_no(const cs::Bytes& key, uint32_t* value) {
         return false;
     }
     std::memcpy(value, buf.data(), sizeof(uint32_t));
-    // Note: caller receives seq_no+1 (the stored value), matching BDB behavior.
     return true;
 }
 
@@ -242,10 +259,7 @@ bool DatabaseRocksDB::remove(const cs::Bytes& key) {
 }
 
 bool DatabaseRocksDB::write_batch(const ItemList&) {
-    // BDB impl does the same: this is intentionally unimplemented; flag callers
-    // in debug builds. If a real ItemList batch is needed later, route through
-    // a rocksdb::WriteBatch over cf_blocks_/cf_seq_no_.
-    assert(false);
+    assert(false);   // unimplemented; mirrors BDB
     if (!db_) { set_last_error(NotOpen); return false; }
     set_last_error();
     return true;

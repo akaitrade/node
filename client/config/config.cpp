@@ -35,6 +35,7 @@ const std::string BLOCK_NAME_HOST_INPUT = "host_input";
 const std::string BLOCK_NAME_HOST_OUTPUT = "host_output";
 const std::string BLOCK_NAME_HOST_ADDRESS = "host_address";
 const std::string BLOCK_NAME_POOL_SYNC = "pool_sync";
+const std::string BLOCK_NAME_STORAGE = "storage";
 const std::string BLOCK_NAME_API = "api";
 const std::string BLOCK_NAME_CONVEYER = "conveyer";
 const std::string BLOCK_NAME_EVENT_REPORTER = "event_report";
@@ -68,6 +69,11 @@ const std::string PARAM_NAME_PORT = "port";
 
 const std::string PARAM_NAME_POOL_SYNC_POOLS_COUNT = "block_pools_count";
 const std::string PARAM_NAME_POOL_SYNC_SEQ_VERIF_FREQ = "sequences_verification_frequency";
+
+const std::string PARAM_NAME_STORAGE_ASYNC_WRITE_QUEUE_SIZE = "async_write_queue_size";
+const std::string PARAM_NAME_STORAGE_WRITE_BATCH_SIZE = "write_batch_size";
+const std::string PARAM_NAME_STORAGE_VERIFY_WORKER_COUNT = "verify_worker_count";
+const std::string PARAM_NAME_STORAGE_VERIFY_BATCH_SIZE = "verify_batch_size";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -874,6 +880,7 @@ Config Config::readFromFile(const std::string& fileName) {
 
         result.setLoggerSettings(config);
         result.readPoolSynchronizerData(config);
+        result.readStorageData(config);
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
@@ -939,6 +946,20 @@ void Config::readPoolSynchronizerData(const boost::property_tree::ptree& config)
 
     checkAndSaveValue(data, block, PARAM_NAME_POOL_SYNC_POOLS_COUNT, poolSyncData_.blockPoolsCount);
     checkAndSaveValue(data, block, PARAM_NAME_POOL_SYNC_SEQ_VERIF_FREQ, poolSyncData_.sequencesVerificationFrequency);
+}
+
+void Config::readStorageData(const boost::property_tree::ptree& config) {
+    const std::string& block = BLOCK_NAME_STORAGE;
+
+    if (!config.count(block)) {
+        return;   // keep defaults
+    }
+
+    const boost::property_tree::ptree& data = config.get_child(block);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ASYNC_WRITE_QUEUE_SIZE, storageData_.asyncWriteQueueSize);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_WRITE_BATCH_SIZE, storageData_.writeBatchSize);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VERIFY_WORKER_COUNT, storageData_.verifyWorkerCount);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VERIFY_BATCH_SIZE, storageData_.verifyBatchSize);
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

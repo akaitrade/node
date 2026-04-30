@@ -140,7 +140,9 @@ public:
     bool open(const ::std::string& path_to_base = ::std::string{},
               OpenCallback callback = nullptr,
               cs::Sequence newBlockchainTop = cs::kWrongSequence,
-              cs::Sequence startReadFrom = 0);
+              cs::Sequence startReadFrom = 0,
+              size_t asyncWriteQueueMax = 5000,
+              size_t writeBatchSize = 100);
 
     /**
      * @brief Creating the storage using the parameters set.

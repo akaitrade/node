@@ -95,6 +95,9 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
 
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
+        // Anchor cursor + stall clock at sync start; from here we ratchet forward only.
+        maxRequestedSequence_ = lastWrittenSequence;
+        lastProgressAt_ = std::chrono::steady_clock::now();
         timer_.start(
             cs::ConfigHolder::instance().config()->getPoolSyncSettings().sequencesVerificationFrequency,
             Timer::Type::HighPrecise,
@@ -142,6 +145,9 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
     }
 
     if (oldCachedBlocksSize != blockChain_->getCachedBlocksSize() || oldLastWrittenSequence != lastWrittenSequence) {
+        if (lastWrittenSequence > oldLastWrittenSequence) {
+            lastProgressAt_ = std::chrono::steady_clock::now();   // resets stall watchdog
+        }
         const bool isFinished = showSyncronizationProgress(lastWrittenSequence);
 
         if (isFinished) {
@@ -174,12 +180,27 @@ void PoolSynchronizer::onTimeOut() {
         return;
     }
 
+    // Stall watchdog: reset in-flight state if no progress for kStallTimeout.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastProgressAt_ > kStallTimeout) {
+        const auto stalledFor = std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressAt_).count();
+        cswarning() << "SYNC: stall watchdog -- no progress for " << stalledFor
+                    << "s, clearing in-flight requests and refiring";
+        synchroLog_.clear();
+        maxRequestedSequence_ = blockChain_->getLastSeq();
+        lastProgressAt_ = now;
+        sendBlockRequest();
+        return;
+    }
+
     auto currentRound = cs::Conveyer::instance().currentRoundNumber();
 
     if (blockChain_->getLastSeq() < currentRound) {
-        csdebug() << __func__ << ": call SyncroFinished";
+        // Extend the request window; do NOT teardown sync state every tick.
+        sendBlockRequest();
+    }
+    else if (blockChain_->getLastSeq() >= currentRound) {
         synchroFinished();
-        sync(currentRound);
     }
 }
 
@@ -331,7 +352,11 @@ void PoolSynchronizer::sendBlockRequest() {
         return;
     }
 
-    maxRequestedSequence_ = blockChain_->getLastSeq();
+    // Ratchet forward only; never rewind (that caused the per-tick re-request loop).
+    const auto lastWritten = blockChain_->getLastSeq();
+    if (maxRequestedSequence_ == kWrongSequence || maxRequestedSequence_ < lastWritten) {
+        maxRequestedSequence_ = lastWritten;
+    }
 
     auto requiredBlocks = blockChain_->getRequiredBlocks();
     auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
@@ -387,14 +412,17 @@ std::vector<Sequence> PoolSynchronizer::getNeededSequences(
             break;
         }
 
-        //the blocks already requested
-        auto it = synchroLog_.begin();
-        while (it != synchroLog_.end()) {
-            auto& tmpSet = std::get<0>(it->second);
-            if (std::find(tmpSet.begin(), tmpSet.end(), sequence) != tmpSet.end()) {
+        // Skip seqs already in flight to any peer.
+        bool alreadyRequested = false;
+        for (const auto& entry : synchroLog_) {
+            const auto& seqs = std::get<0>(entry.second);
+            if (std::find(seqs.begin(), seqs.end(), sequence) != seqs.end()) {
+                alreadyRequested = true;
                 break;
             }
-            ++it;
+        }
+        if (alreadyRequested) {
+            continue;
         }
 
         for (size_t j = 1; j <= requiredBlocks.size(); ++j) {
@@ -466,7 +494,7 @@ void PoolSynchronizer::updateSynchroLog() {
         auto msg = std::get<1>(it->second);
         auto timeEvent = std::get<2>(it->second);
         //csdebug() << cs::Utils::byteStreamToHex(it->first) << ": " << std::get<0>(it->second).back() << ", time: " << timeEvent << ", status: " << static_cast<int>(msg);
-        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + 2000))) {
+        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + kNoAnswerEntryTtlMs))) {
             //csdebug() << __func__ << " -> " << synchroLog_.size() << ": key " << cs::Utils::byteStreamToHex(it->first) << " erased";
             it = synchroLog_.erase(it);
         }
@@ -499,7 +527,7 @@ bool PoolSynchronizer::checkSynchroLog(const cs::PublicKey& sender) { //is true 
     if (synchroLog_.find(sender) != synchroLog_.end()) {
         auto timeEvent = std::get<2>(it->second);
         auto timeNow = cs::Utils::currentTimestamp();
-        if (std::get<1>(it->second) == SyncroMessage::AwaitAnswer || (std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow < timeEvent + 500)) {
+        if (std::get<1>(it->second) == SyncroMessage::AwaitAnswer || (std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow < timeEvent + kPerPeerCooldownMs)) {
             //csdebug() << __func__ << ": key " << cs::Utils::byteStreamToHex(sender) << " is still busy";
             return false;
         }

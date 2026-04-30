@@ -1,13 +1,5 @@
-/**
- * @file database_rocksdb.hpp
- *
- * RocksDB-backed implementation of csdb::Database. Behaviorally equivalent to
- * DatabaseBerkeleyDB: three logical tables (blocks, seq_no, contracts) live in
- * three column families; the blocks CF is keyed by big-endian (seq_no + 1) so
- * RocksDB's lexicographic iteration order matches numeric sequence order.
- *
- * Selected at configure-time via -DCSDB_BACKEND=rocksdb.
- */
+// RocksDB-backed csdb::Database. CFs: blocks, seq_no, contracts.
+// blocks keyed BE(seq+1). Selected via -DCSDB_BACKEND=rocksdb.
 
 #ifndef _CREDITS_CSDB_DATABASE_ROCKSDB_H_INCLUDED_
 #define _CREDITS_CSDB_DATABASE_ROCKSDB_H_INCLUDED_
@@ -36,6 +28,7 @@ public:
 private:
     bool is_open() const final;
     bool put(const cs::Bytes& key, uint32_t seq_no, const cs::Bytes& value) final;
+    bool put_batch(const std::vector<PendingWrite>& items) final;
     bool get(const cs::Bytes& key, cs::Bytes* value) final;
     bool get(const uint32_t seq_no, cs::Bytes* value) final;
     bool remove(const cs::Bytes&) final;

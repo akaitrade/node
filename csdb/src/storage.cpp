@@ -50,23 +50,20 @@ namespace csdb {
 
 namespace {
 
-// tinycs: empty-block stub format. Empty pools (transactions().empty()) are
-// stored as a 73-byte stub instead of the full ~700-byte serialization. The
-// 0xFF tag distinguishes the stub from a normal Pool::to_binary() output,
-// whose first byte is `Pool::version_` (always a small integer in practice).
-//
-//   [tag=0xFF : 1][sequence : 8 LE][previous_hash : 32][hash : 32]
-//
-// Goal: drop the consensus signatures + confidants + round-confirmations for
-// empty rounds (~95% of an empty block's bytes) while preserving everything
-// the rest of the node needs to verify the chain hash linkage and answer
-// "give me the pool at seq N" queries.
-constexpr uint8_t kEmptyStubTag = 0xFF;
-constexpr size_t  kEmptyStubSize = 1 + sizeof(uint64_t) + 32 + 32;  // 73
+// tinycs empty-block stub: [tag][seq:8][prev_hash:32][hash:32][n_conf:1][conf:n*32].
+// Confidants kept because finalizeBlock() validates next block's signatures
+// against them. Own signatures discarded (no historical audit of empty rounds).
+constexpr uint8_t kEmptyStubTag       = 0xFE;
+constexpr size_t  kPubKeySize         = 32;
+constexpr size_t  kEmptyStubHeaderSize = 1 + sizeof(uint64_t) + 32 + 32 + 1;  // 74
 
 cs::Bytes build_empty_pool_stub(const Pool& pool) {
+    const auto& confidants = pool.confidants();
+    const size_t confCount = confidants.size();
+    assert(confCount <= 0xFF);
+
     cs::Bytes stub;
-    stub.reserve(kEmptyStubSize);
+    stub.reserve(kEmptyStubHeaderSize + confCount * kPubKeySize);
     stub.push_back(kEmptyStubTag);
 
     const uint64_t seq = static_cast<uint64_t>(pool.sequence());
@@ -76,20 +73,28 @@ cs::Bytes build_empty_pool_stub(const Pool& pool) {
 
     const cs::Bytes prev = pool.previous_hash().to_binary();
     const cs::Bytes hash = pool.hash().to_binary();
-    // hash_size mismatches would corrupt the stub. Hard-fail in debug.
     assert(prev.size() == 32 && hash.size() == 32);
     stub.insert(stub.end(), prev.begin(), prev.end());
     stub.insert(stub.end(), hash.begin(), hash.end());
+
+    stub.push_back(static_cast<uint8_t>(confCount));
+    for (const auto& pk : confidants) {
+        assert(pk.size() == kPubKeySize);
+        stub.insert(stub.end(), pk.begin(), pk.end());
+    }
 
     return stub;
 }
 
 inline bool is_empty_pool_stub(const cs::Bytes& bytes) {
-    return bytes.size() == kEmptyStubSize && bytes[0] == kEmptyStubTag;
+    if (bytes.size() < kEmptyStubHeaderSize || bytes[0] != kEmptyStubTag) {
+        return false;
+    }
+    const size_t confCount = bytes[kEmptyStubHeaderSize - 1];  // count byte at offset 73
+    return bytes.size() == kEmptyStubHeaderSize + confCount * kPubKeySize;
 }
 
-// Reconstruct a synthetic empty Pool from a stub's bytes. Returns an invalid
-// Pool (is_valid()==false) on parse failure so callers can detect corruption.
+// Returns invalid Pool on malformed stub.
 Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
     if (!is_empty_pool_stub(bytes)) {
         return Pool{};
@@ -107,6 +112,20 @@ Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
 
     Pool pool(prev_hash, static_cast<cs::Sequence>(seq));
     pool.set_hash(std::move(this_hash));
+
+    const size_t confCount = bytes[kEmptyStubHeaderSize - 1];
+    if (confCount > 0) {
+        std::vector<cs::PublicKey> confidants;
+        confidants.reserve(confCount);
+        const size_t confidantsOffset = kEmptyStubHeaderSize;
+        for (size_t i = 0; i < confCount; ++i) {
+            cs::PublicKey pk;
+            std::memcpy(pk.data(), &bytes[confidantsOffset + i * kPubKeySize], kPubKeySize);
+            confidants.push_back(pk);
+        }
+        pool.set_confidants(confidants);
+    }
+
     return pool;
 }
 
@@ -186,8 +205,12 @@ public:
 
     ~priv() {
         if (write_thread.joinable()) {
-            quit = true;
-            write_cond_var.notify_one();
+            // writer drains write_queue before honoring quit.
+            {
+                std::unique_lock<std::mutex> lock(write_lock);
+                quit = true;
+            }
+            write_cond_var.notify_all();
             write_thread.join();
         }
     }
@@ -209,9 +232,14 @@ private:
 
     std::mutex data_lock;
 
+    // Async write pipeline. Bounded; full queue back-pressures producers.
+    // Defaults overridable via Storage::open(...).
+    size_t asyncWriteQueueMax_ = 5000;
+    size_t writeBatchSize_ = 100;        // pools coalesced into one db->put_batch
     std::deque<Pool> write_queue;
     std::mutex write_lock;
-    std::condition_variable write_cond_var;
+    std::condition_variable write_cond_var;     // queue non-empty
+    std::condition_variable queue_space_cond;   // queue has space
 
     struct PoolElement {
         cs::Sequence seq; struct bySequence {};
@@ -394,22 +422,44 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
 }
 
 void Storage::priv::write_routine() {
-    std::unique_lock<std::mutex> lock(write_lock);
-    while (!quit) {
-        write_cond_var.wait(lock);
-        while (!write_queue.empty()) {
-            Pool& pool = write_queue.front();
-            if (!pool.is_read_only()) {
-                if (!pool.compose()) {
-                    set_last_error(Storage::DataIntegrityError, "Pool passed to storage is not composed and failed to compose now");
-                }
-            }
-            const PoolHash hash = pool.hash();
+    while (true) {
+        std::unique_lock<std::mutex> lock(write_lock);
+        write_cond_var.wait(lock, [this] { return quit || !write_queue.empty(); });
 
-            db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary());
+        if (write_queue.empty() && quit) {
+            return;
+        }
 
+        // Peek up to writeBatchSize_ pools (don't pop -- write_queue_search
+        // needs them visible until the I/O completes).
+        std::vector<Pool> pools;
+        const size_t take = std::min(writeBatchSize_, write_queue.size());
+        pools.reserve(take);
+        auto it = write_queue.begin();
+        for (size_t i = 0; i < take; ++i, ++it) {
+            pools.push_back(*it);
+        }
+
+        // Build all payloads outside the lock; one db->put_batch coalesces
+        // 2*N RocksDB puts into a single WriteBatch / single WAL append.
+        lock.unlock();
+
+        std::vector<Database::PendingWrite> requests;
+        requests.reserve(pools.size());
+        for (auto& pool : pools) {
+            requests.push_back(Database::PendingWrite{
+                pool.hash().to_binary(),
+                static_cast<uint32_t>(pool.sequence()),
+                pool.transactions().empty() ? build_empty_pool_stub(pool) : pool.to_binary()
+            });
+        }
+        db->put_batch(requests);
+
+        lock.lock();
+        for (size_t i = 0; i < pools.size(); ++i) {
             write_queue.pop_front();
         }
+        queue_space_cond.notify_all();
     }
 }
 
@@ -560,11 +610,20 @@ bool Storage::open(
     const ::std::string& path_to_base,
     OpenCallback callback,
     cs::Sequence newBlockchainTop,
-    cs::Sequence startReadFrom
+    cs::Sequence startReadFrom,
+    size_t asyncWriteQueueMax,
+    size_t writeBatchSize
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
         path = ::csdb::internal::app_data_path() + "/CREDITS";
+    }
+
+    if (asyncWriteQueueMax > 0) {
+        d->asyncWriteQueueMax_ = asyncWriteQueueMax;
+    }
+    if (writeBatchSize > 0) {
+        d->writeBatchSize_ = writeBatchSize;
     }
 
 #ifdef CSDB_USE_ROCKSDB
@@ -573,13 +632,23 @@ bool Storage::open(
     auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
 #endif
     db->open(path);
-
-    //d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
-
+    d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
     return open(OpenOptions{db, newBlockchainTop, startReadFrom}, callback);
 }
 
 void Storage::close() {
+    // Drain the async writer before destroying the underlying db. Otherwise
+    // the writer thread can use-after-free / deadlock inside RocksDB's
+    // destructor while we reset(). Same logic as ~priv but hoisted to close
+    // time so the cache-save phase that follows runs against a quiet system.
+    if (d->write_thread.joinable()) {
+        {
+            std::unique_lock<std::mutex> lock(d->write_lock);
+            d->quit = true;
+        }
+        d->write_cond_var.notify_all();
+        d->write_thread.join();
+    }
     d->db.reset();
     d->set_last_error();
 }
@@ -620,17 +689,16 @@ bool Storage::pool_save(Pool pool) {
         d->set_last_error(InvalidParameter, "%s: Trying to save pool with another prev hash [hash: %s]", funcName(), pool.previous_hash().to_string().c_str());
         return false;
     }
-    /*
-      {
+
+    // Hand off to write_routine; backpressure if queue full.
+    {
         std::unique_lock<std::mutex> lock(d->write_lock);
+        d->queue_space_cond.wait(lock, [this] {
+            return d->write_queue.size() < d->asyncWriteQueueMax_;
+        });
         d->write_queue.push_back(pool);
         d->write_cond_var.notify_one();
-      }
-    */
-    const cs::Bytes payload = pool.transactions().empty()
-        ? build_empty_pool_stub(pool)
-        : pool.to_binary();
-    d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), payload);
+    }
 
     {
         std::unique_lock<std::mutex> lock(d->data_lock);

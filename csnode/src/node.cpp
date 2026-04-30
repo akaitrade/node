@@ -2107,6 +2107,10 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
                 // not on the very start
                 cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
                 roundPackRequest(sender, rNum);
+                // Also kick sync directly; round-pack reply alone often gets dropped here too.
+                if (poolSynchronizer_) {
+                    poolSynchronizer_->sync(rNum, cs::PoolSynchronizer::kRoundDifferentForSync);
+                }
             }
 
             return MessageActions::Drop;
