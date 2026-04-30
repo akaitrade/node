@@ -10,6 +10,12 @@ option(CSDB_BUILD_BENCHMARK "Bulid benchmark" OFF)
 include (TestBigEndian)
 TEST_BIG_ENDIAN(CSDB_PLATFORM_IS_BIG_ENDIAN)
 
+if(CSDB_BACKEND STREQUAL "rocksdb")
+    set(CSDB_BACKEND_SOURCES src/database_rocksdb.cpp include/csdb/database_rocksdb.hpp)
+else()
+    set(CSDB_BACKEND_SOURCES src/database_berkeleydb.cpp include/csdb/database_berkeleydb.hpp)
+endif()
+
 add_library(${PROJECT_NAME} STATIC
   src/csdb.cpp
   src/amount.cpp
@@ -29,7 +35,7 @@ add_library(${PROJECT_NAME} STATIC
   src/priv_crypto.cpp
   src/priv_crypto.hpp
   src/database.cpp
-  src/database_berkeleydb.cpp
+  ${CSDB_BACKEND_SOURCES}
   src/user_field.cpp
   include/csdb/internal/shared_data.hpp
   include/csdb/internal/shared_data_ptr_implementation.hpp
@@ -48,7 +54,6 @@ add_library(${PROJECT_NAME} STATIC
   include/csdb/wallet.hpp
   include/csdb/storage.hpp
   include/csdb/database.hpp
-  include/csdb/database_berkeleydb.hpp
   include/csdb/user_field.hpp
   )
 
@@ -72,13 +77,20 @@ target_include_directories(
 )
 
 include_directories(${Boost_INCLUDE_DIR})
+if(CSDB_BACKEND STREQUAL "rocksdb")
+    set(CSDB_BACKEND_LIB rocksdb)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CSDB_USE_ROCKSDB)
+else()
+    set(CSDB_BACKEND_LIB BerkeleyDB)
+endif()
+
 target_link_libraries(
   ${PROJECT_NAME}
   cscrypto
   Boost::system
   Boost::filesystem
   Boost::disable_autolinking
-  BerkeleyDB
+  ${CSDB_BACKEND_LIB}
   lz4
   lib
 )

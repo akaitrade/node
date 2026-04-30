@@ -20,7 +20,11 @@
 
 #include <csdb/address.hpp>
 #include <csdb/database.hpp>
+#ifdef CSDB_USE_ROCKSDB
+#include <csdb/database_rocksdb.hpp>
+#else
 #include <csdb/database_berkeleydb.hpp>
+#endif
 #include <csdb/internal/shared_data_ptr_implementation.hpp>
 #include <csdb/internal/utils.hpp>
 #include <csdb/pool.hpp>
@@ -503,7 +507,11 @@ bool Storage::open(
         path = ::csdb::internal::app_data_path() + "/CREDITS";
     }
 
+#ifdef CSDB_USE_ROCKSDB
+    auto db{::std::make_shared<::csdb::DatabaseRocksDB>()};
+#else
     auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
+#endif
     db->open(path);
 
     //d->write_thread = std::thread(&Storage::priv::write_routine, d.get());

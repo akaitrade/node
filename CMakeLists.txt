@@ -23,6 +23,13 @@ option(LEVELDB_BUILD_TESTS "" OFF)
 option(LEVELDB_AUTORUN_TESTS "" OFF)
 option(DBSQL "Enable PostgeSQL server connection" OFF)
 
+set(CSDB_BACKEND "berkeleydb" CACHE STRING "csdb storage backend: berkeleydb or rocksdb")
+set_property(CACHE CSDB_BACKEND PROPERTY STRINGS berkeleydb rocksdb)
+if(NOT CSDB_BACKEND STREQUAL "berkeleydb" AND NOT CSDB_BACKEND STREQUAL "rocksdb")
+    message(FATAL_ERROR "CSDB_BACKEND must be 'berkeleydb' or 'rocksdb' (got '${CSDB_BACKEND}')")
+endif()
+message(STATUS "csdb backend: ${CSDB_BACKEND}")
+
 IF(DBSQL)
     ADD_DEFINITIONS(-DDBSQL)
 ENDIF(DBSQL)
@@ -87,6 +94,7 @@ endif()
 
 # This large list is necessary to prevent thrift from generating unused stuff
 add_definitions(-DUSE_STD_THREAD)
+add_definitions(-DBOOST_ALL_NO_LIB)
 
 if (MSVC)
     MARK_AS_ADVANCED(
