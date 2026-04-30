@@ -102,6 +102,13 @@ bool DatabaseRocksDB::open(const std::string& path) {
     topt.format_version = 5;
     options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(topt));
 
+    if (bulk_load_) {
+        // Disables auto-compaction, raises stall triggers to ~infinity,
+        // bumps write_buffer_size + max_write_buffer_number. SSTs pile up in
+        // L0 unthrottled until compact_full() is called at end of import.
+        options.PrepareForBulkLoad();
+    }
+
     rocksdb::ColumnFamilyOptions cf_opts(options);
     std::vector<rocksdb::ColumnFamilyDescriptor> cfs = {
         {rocksdb::kDefaultColumnFamilyName, cf_opts},  // blocks
@@ -142,7 +149,9 @@ bool DatabaseRocksDB::put(const cs::Bytes& key, uint32_t seq_no, const cs::Bytes
     batch.Put(cf_seq_no_, BytesSlice(key),
               rocksdb::Slice(reinterpret_cast<const char*>(&native_seq), sizeof(native_seq)));
 
-    auto s = db_->Write(rocksdb::WriteOptions(), &batch);
+    rocksdb::WriteOptions wo;
+    if (bulk_load_) wo.disableWAL = true;
+    auto s = db_->Write(wo, &batch);
     if (!s.ok()) { set_last_error_from_status(s); return false; }
     set_last_error();
     return true;
@@ -168,8 +177,34 @@ bool DatabaseRocksDB::put_batch(const std::vector<PendingWrite>& items) {
                   rocksdb::Slice(reinterpret_cast<const char*>(&native_seqs.back()), sizeof(uint32_t)));
     }
 
-    auto s = db_->Write(rocksdb::WriteOptions(), &batch);
+    rocksdb::WriteOptions wo;
+    if (bulk_load_) wo.disableWAL = true;
+    auto s = db_->Write(wo, &batch);
     if (!s.ok()) { set_last_error_from_status(s); return false; }
+    set_last_error();
+    return true;
+}
+
+void DatabaseRocksDB::set_bulk_load(bool yes) {
+    bulk_load_ = yes;
+}
+
+bool DatabaseRocksDB::compact_full() {
+    if (!db_) { set_last_error(NotOpen); return false; }
+    rocksdb::FlushOptions fo;
+    fo.wait = true;
+    for (auto* cf : {cf_blocks_, cf_seq_no_, cf_contracts_}) {
+        if (!cf) continue;
+        auto s = db_->Flush(fo, cf);
+        if (!s.ok()) { set_last_error_from_status(s); return false; }
+    }
+    rocksdb::CompactRangeOptions co;
+    co.exclusive_manual_compaction = true;
+    for (auto* cf : {cf_blocks_, cf_seq_no_, cf_contracts_}) {
+        if (!cf) continue;
+        auto s = db_->CompactRange(co, cf, nullptr, nullptr);
+        if (!s.ok()) { set_last_error_from_status(s); return false; }
+    }
     set_last_error();
     return true;
 }

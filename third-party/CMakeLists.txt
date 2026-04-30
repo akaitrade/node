@@ -9,11 +9,25 @@ configure_third_party_compiler_flags()
 # lz4: used by csdb directly and (below) handed to rocksdb as its LZ4.
 add_subdirectory(lz4)
 
+# Migration tool needs both backends linked into csdb. CSDB_BACKEND still picks
+# the default for node.exe, but CSDB_BUILD_MIGRATE forces both subdirs in.
+set(_csdb_need_bdb     OFF)
+set(_csdb_need_rocksdb OFF)
 if(CSDB_BACKEND STREQUAL "berkeleydb")
+    set(_csdb_need_bdb ON)
+elseif(CSDB_BACKEND STREQUAL "rocksdb")
+    set(_csdb_need_rocksdb ON)
+endif()
+if(CSDB_BUILD_MIGRATE)
+    set(_csdb_need_bdb     ON)
+    set(_csdb_need_rocksdb ON)
+endif()
+
+if(_csdb_need_bdb)
     add_subdirectory(berkeleydb)
 endif()
 
-if(CSDB_BACKEND STREQUAL "rocksdb")
+if(_csdb_need_rocksdb)
     set(WITH_TESTS           OFF CACHE BOOL   "" FORCE)
     set(WITH_TOOLS           OFF CACHE BOOL   "" FORCE)
     set(WITH_CORE_TOOLS      OFF CACHE BOOL   "" FORCE)

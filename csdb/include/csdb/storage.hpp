@@ -99,6 +99,9 @@ public:
         ::std::shared_ptr<Database> db;
         ::cs::Sequence newBlockchainTop = ::cs::kWrongSequence;
         ::cs::Sequence startSequence = 0;
+        // 0 = leave Storage defaults (5000 / 100) untouched.
+        size_t asyncWriteQueueMax = 0;
+        size_t writeBatchSize = 0;
     };
 
     struct OpenProgress {

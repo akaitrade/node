@@ -20,11 +20,15 @@
 
 #include <csdb/address.hpp>
 #include <csdb/database.hpp>
-#ifdef CSDB_USE_ROCKSDB
+#if defined(CSDB_BUILD_MIGRATE)
+#include <csdb/database_berkeleydb.hpp>
+#include <csdb/database_rocksdb.hpp>
+#elif defined(CSDB_USE_ROCKSDB)
 #include <csdb/database_rocksdb.hpp>
 #else
 #include <csdb/database_berkeleydb.hpp>
 #endif
+#include <csdb/empty_pool_stub.hpp>
 #include <csdb/internal/shared_data_ptr_implementation.hpp>
 #include <csdb/internal/utils.hpp>
 #include <csdb/pool.hpp>
@@ -48,16 +52,16 @@ last_error_struct& last_error_map(const void* p) {
 
 namespace csdb {
 
-namespace {
-
 // tinycs empty-block stub v3:
 //   [tag][seq:8][prev_hash:32][hash:32][n_conf:1][conf:n*32][uf_size:4 LE][uf_blob:size]
 // Confidants are kept so finalizeBlock can validate the next block's signatures.
 // user_fields blob is kept so mining reward (kFieldBlockReward) and any other
 // per-block extension fields survive into slow-start cache rebuild.
+namespace {
 constexpr uint8_t kEmptyStubTag       = 0xFD;   // v3 (was 0xFE = v2 sans user_fields)
 constexpr size_t  kPubKeySize         = 32;
 constexpr size_t  kEmptyStubHeaderSize = 1 + sizeof(uint64_t) + 32 + 32 + 1;  // 74
+}  // namespace
 
 cs::Bytes build_empty_pool_stub(const Pool& pool) {
     const auto& confidants = pool.confidants();
@@ -97,7 +101,7 @@ cs::Bytes build_empty_pool_stub(const Pool& pool) {
     return stub;
 }
 
-inline bool is_empty_pool_stub(const cs::Bytes& bytes) {
+bool is_empty_pool_stub(const cs::Bytes& bytes) {
     if (bytes.size() < kEmptyStubHeaderSize || bytes[0] != kEmptyStubTag) {
         return false;
     }
@@ -157,6 +161,8 @@ Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
 
     return pool;
 }
+
+namespace {
 
 struct head_info_t {
     size_t len_;     // Number of blocks in the chain
@@ -566,6 +572,18 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
         return false;
     }
 
+    if (opt.asyncWriteQueueMax > 0) {
+        d->asyncWriteQueueMax_ = opt.asyncWriteQueueMax;
+    }
+    if (opt.writeBatchSize > 0) {
+        d->writeBatchSize_ = opt.writeBatchSize;
+    }
+
+    // Start async writer (idempotent: re-opens won't spawn a second thread).
+    if (!d->write_thread.joinable()) {
+        d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
+    }
+
     if (opt.newBlockchainTop != cs::kWrongSequence) {
         auto seqToRemove = static_cast<uint32_t>(opt.newBlockchainTop + 1);
         auto seqLast = seqToRemove;
@@ -661,7 +679,6 @@ bool Storage::open(
     auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
 #endif
     db->open(path);
-    d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
     return open(OpenOptions{db, newBlockchainTop, startReadFrom}, callback);
 }
 

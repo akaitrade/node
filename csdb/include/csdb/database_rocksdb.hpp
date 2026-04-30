@@ -23,6 +23,17 @@ public:
     ~DatabaseRocksDB() override;
 
 public:
+    // Optional: enable RocksDB bulk-load mode. Disables auto-compaction +
+    // raises stall triggers to effectively infinity; writes use disableWAL.
+    // Caller MUST invoke compact_full() before close to consolidate the LSM.
+    // Must be set before open(). Single-importer use only (no concurrent
+    // readers expecting durability mid-load).
+    void set_bulk_load(bool yes);
+
+    // Manual flush + full-range compaction across all CFs. Intended to be
+    // called once at the end of a bulk-load run.
+    bool compact_full();
+
     bool open(const std::string& path);
 
 private:
@@ -48,6 +59,7 @@ private:
     rocksdb::ColumnFamilyHandle* cf_blocks_ = nullptr;     // default CF
     rocksdb::ColumnFamilyHandle* cf_seq_no_ = nullptr;
     rocksdb::ColumnFamilyHandle* cf_contracts_ = nullptr;
+    bool bulk_load_ = false;
 };
 
 }  // namespace csdb

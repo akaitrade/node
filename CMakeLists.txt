@@ -30,6 +30,13 @@ if(NOT CSDB_BACKEND STREQUAL "berkeleydb" AND NOT CSDB_BACKEND STREQUAL "rocksdb
 endif()
 message(STATUS "csdb backend: ${CSDB_BACKEND}")
 
+# When ON, csdb compiles BOTH backend .cpp files and the csdb_migrate tool is
+# built. CSDB_BACKEND still selects the default backend used by node.exe.
+option(CSDB_BUILD_MIGRATE "Build BDB->RocksDB migration tool (compiles both backends)" OFF)
+if(CSDB_BUILD_MIGRATE)
+    message(STATUS "csdb migrate tool: enabled (both backends will be compiled)")
+endif()
+
 IF(DBSQL)
     ADD_DEFINITIONS(-DDBSQL)
 ENDIF(DBSQL)
@@ -241,6 +248,10 @@ add_subdirectory(csdb)
 add_subdirectory(solver)
 add_subdirectory(client)
 add_subdirectory(lmdbxx)
+
+if(CSDB_BUILD_MIGRATE)
+    add_subdirectory(tools/csdb_migrate)
+endif()
 
 if(NOT ${SKIP_SAMPLES})
     add_subdirectory(samples)
