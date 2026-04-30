@@ -50,6 +50,66 @@ namespace csdb {
 
 namespace {
 
+// tinycs: empty-block stub format. Empty pools (transactions().empty()) are
+// stored as a 73-byte stub instead of the full ~700-byte serialization. The
+// 0xFF tag distinguishes the stub from a normal Pool::to_binary() output,
+// whose first byte is `Pool::version_` (always a small integer in practice).
+//
+//   [tag=0xFF : 1][sequence : 8 LE][previous_hash : 32][hash : 32]
+//
+// Goal: drop the consensus signatures + confidants + round-confirmations for
+// empty rounds (~95% of an empty block's bytes) while preserving everything
+// the rest of the node needs to verify the chain hash linkage and answer
+// "give me the pool at seq N" queries.
+constexpr uint8_t kEmptyStubTag = 0xFF;
+constexpr size_t  kEmptyStubSize = 1 + sizeof(uint64_t) + 32 + 32;  // 73
+
+cs::Bytes build_empty_pool_stub(const Pool& pool) {
+    cs::Bytes stub;
+    stub.reserve(kEmptyStubSize);
+    stub.push_back(kEmptyStubTag);
+
+    const uint64_t seq = static_cast<uint64_t>(pool.sequence());
+    for (int i = 0; i < 8; ++i) {
+        stub.push_back(static_cast<uint8_t>((seq >> (i * 8)) & 0xFF));
+    }
+
+    const cs::Bytes prev = pool.previous_hash().to_binary();
+    const cs::Bytes hash = pool.hash().to_binary();
+    // hash_size mismatches would corrupt the stub. Hard-fail in debug.
+    assert(prev.size() == 32 && hash.size() == 32);
+    stub.insert(stub.end(), prev.begin(), prev.end());
+    stub.insert(stub.end(), hash.begin(), hash.end());
+
+    return stub;
+}
+
+inline bool is_empty_pool_stub(const cs::Bytes& bytes) {
+    return bytes.size() == kEmptyStubSize && bytes[0] == kEmptyStubTag;
+}
+
+// Reconstruct a synthetic empty Pool from a stub's bytes. Returns an invalid
+// Pool (is_valid()==false) on parse failure so callers can detect corruption.
+Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
+    if (!is_empty_pool_stub(bytes)) {
+        return Pool{};
+    }
+
+    uint64_t seq = 0;
+    for (int i = 0; i < 8; ++i) {
+        seq |= static_cast<uint64_t>(bytes[1 + i]) << (i * 8);
+    }
+    cs::Bytes prev_bytes(bytes.begin() + 9,  bytes.begin() + 9 + 32);
+    cs::Bytes hash_bytes(bytes.begin() + 41, bytes.begin() + 41 + 32);
+
+    PoolHash prev_hash = PoolHash::from_binary(std::move(prev_bytes));
+    PoolHash this_hash = PoolHash::from_binary(std::move(hash_bytes));
+
+    Pool pool(prev_hash, static_cast<cs::Sequence>(seq));
+    pool.set_hash(std::move(this_hash));
+    return pool;
+}
+
 struct head_info_t {
     size_t len_;     // Number of blocks in the chain
     PoolHash next_;  // next pool hash, or empty string for genesis
@@ -239,7 +299,7 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
     it->seek_to_last();
     if (it->is_valid()) {
         cs::Bytes v = it->value();
-        Pool p = Pool::from_binary(std::move(v));
+        Pool p = is_empty_pool_stub(v) ? parse_empty_pool_stub(v) : Pool::from_binary(std::move(v));
         if (p.is_valid()) {
             last_seq_in_db = p.sequence();
             emit start_reading_event(p.sequence());
@@ -280,7 +340,7 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
 
     if (count_pool == last_seq_in_db && !slowStart) {
         cs::Bytes v = it->value();
-        Pool p = Pool::from_binary(std::move(v));
+        Pool p = is_empty_pool_stub(v) ? parse_empty_pool_stub(v) : Pool::from_binary(std::move(v));
         if (p.is_valid()) {
             last_hash = p.hash();
         }
@@ -298,7 +358,7 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
     for (; it->is_valid(); it->next()) {
         cs::Bytes v = it->value();
 
-            Pool p = Pool::from_binary(std::move(v));
+            Pool p = is_empty_pool_stub(v) ? parse_empty_pool_stub(v) : Pool::from_binary(std::move(v));
             if (!p.is_valid()) {
                 set_last_error(Storage::DataIntegrityError, "Data integrity error: Corrupted pool %d.", count_pool);
                 cserror() << "Please restart node with command : client --set-bc-top " << count_pool - 1;
@@ -567,7 +627,10 @@ bool Storage::pool_save(Pool pool) {
         d->write_cond_var.notify_one();
       }
     */
-    d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary());
+    const cs::Bytes payload = pool.transactions().empty()
+        ? build_empty_pool_stub(pool)
+        : pool.to_binary();
+    d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), payload);
 
     {
         std::unique_lock<std::mutex> lock(d->data_lock);
@@ -633,7 +696,18 @@ Pool Storage::pool_load_internal(const PoolHash& hash, const bool metaOnly, size
     }
 
     if (needParseData) {
-        if (metaOnly) {
+        if (is_empty_pool_stub(data)) {
+            // tinycs: this seq's body was dropped at save time. Reconstruct a
+            // synthetic empty Pool that round-trips hash() and previous_hash()
+            // correctly. transactions/signatures/confidants come back empty;
+            // callers that consult those for empty blocks will see empty.
+            res = parse_empty_pool_stub(data);
+            trxCnt = 0;
+            if (res.is_valid()) {
+                d->pools_cache_insert(res.sequence(), res.hash(), res);
+            }
+        }
+        else if (metaOnly) {
             res = Pool::meta_from_binary(std::move(data), trxCnt);
         }
         else {
@@ -727,8 +801,15 @@ Pool Storage::pool_load(const cs::Sequence sequence) const {
     }
 
     if (needParseData) {
-        res = Pool::from_binary(std::move(data));
-        d->pools_cache_insert(res.sequence(), res.hash(), res);
+        if (is_empty_pool_stub(data)) {
+            res = parse_empty_pool_stub(data);
+        }
+        else {
+            res = Pool::from_binary(std::move(data));
+        }
+        if (res.is_valid()) {
+            d->pools_cache_insert(res.sequence(), res.hash(), res);
+        }
     }
 
     if (!res.is_valid()) {
@@ -764,7 +845,13 @@ Pool Storage::pool_load_meta(const PoolHash& hash, size_t& cnt) const {
         return Pool{};
     }
 
-    res = Pool::meta_from_binary(std::move(data), cnt);
+    if (is_empty_pool_stub(data)) {
+        res = parse_empty_pool_stub(data);
+        cnt = 0;
+    }
+    else {
+        res = Pool::meta_from_binary(std::move(data), cnt);
+    }
     if (!res.is_valid()) {
         d->set_last_error(DataIntegrityError, "%s: Error decoding pool [hash: %s]", funcName(), hash.to_string().c_str());
     }

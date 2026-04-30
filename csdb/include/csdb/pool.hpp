@@ -176,6 +176,11 @@ public:
     void set_version(uint8_t version) noexcept;
     void set_previous_hash(PoolHash previous_hash) noexcept;
     void set_sequence(cs::Sequence sequence) noexcept;
+    /// Direct setter for the cached pool hash. Bypasses the normal hash
+    /// derivation pipeline (which computes from contents). Use only when
+    /// reconstructing a Pool from a compact representation (e.g. tinycs's
+    /// empty-block stub) where the original hash was preserved out-of-band.
+    void set_hash(PoolHash hash) noexcept;
     void set_storage(const Storage& storage) noexcept;
     void set_confidants(const std::vector<cs::PublicKey>& confidants) noexcept;
     void set_signatures(std::vector<cs::Signature>& blockSignatures) noexcept;

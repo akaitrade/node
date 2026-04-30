@@ -786,6 +786,16 @@ void Pool::set_previous_hash(PoolHash previous_hash) noexcept {
     data->previous_hash_ = std::move(previous_hash);
 }
 
+void Pool::set_hash(PoolHash hash) noexcept {
+    if (d.constData()->read_only_) {
+        return;
+    }
+
+    priv* data = d.data();
+    data->is_valid_ = true;
+    data->hash_ = std::move(hash);
+}
+
 void Pool::set_confidants(const std::vector<cs::PublicKey>& confidants) noexcept {
     if (d.constData()->read_only_) {
         return;
