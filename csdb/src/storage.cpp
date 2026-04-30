@@ -50,10 +50,12 @@ namespace csdb {
 
 namespace {
 
-// tinycs empty-block stub: [tag][seq:8][prev_hash:32][hash:32][n_conf:1][conf:n*32].
-// Confidants kept because finalizeBlock() validates next block's signatures
-// against them. Own signatures discarded (no historical audit of empty rounds).
-constexpr uint8_t kEmptyStubTag       = 0xFE;
+// tinycs empty-block stub v3:
+//   [tag][seq:8][prev_hash:32][hash:32][n_conf:1][conf:n*32][uf_size:4 LE][uf_blob:size]
+// Confidants are kept so finalizeBlock can validate the next block's signatures.
+// user_fields blob is kept so mining reward (kFieldBlockReward) and any other
+// per-block extension fields survive into slow-start cache rebuild.
+constexpr uint8_t kEmptyStubTag       = 0xFD;   // v3 (was 0xFE = v2 sans user_fields)
 constexpr size_t  kPubKeySize         = 32;
 constexpr size_t  kEmptyStubHeaderSize = 1 + sizeof(uint64_t) + 32 + 32 + 1;  // 74
 
@@ -62,8 +64,11 @@ cs::Bytes build_empty_pool_stub(const Pool& pool) {
     const size_t confCount = confidants.size();
     assert(confCount <= 0xFF);
 
+    const cs::Bytes ufBlob = pool.serialize_user_fields();
+    const uint32_t ufSize = static_cast<uint32_t>(ufBlob.size());
+
     cs::Bytes stub;
-    stub.reserve(kEmptyStubHeaderSize + confCount * kPubKeySize);
+    stub.reserve(kEmptyStubHeaderSize + confCount * kPubKeySize + 4 + ufBlob.size());
     stub.push_back(kEmptyStubTag);
 
     const uint64_t seq = static_cast<uint64_t>(pool.sequence());
@@ -83,6 +88,12 @@ cs::Bytes build_empty_pool_stub(const Pool& pool) {
         stub.insert(stub.end(), pk.begin(), pk.end());
     }
 
+    // user_fields blob (4-byte LE size, then bytes; size may be 0)
+    for (int i = 0; i < 4; ++i) {
+        stub.push_back(static_cast<uint8_t>((ufSize >> (i * 8)) & 0xFF));
+    }
+    stub.insert(stub.end(), ufBlob.begin(), ufBlob.end());
+
     return stub;
 }
 
@@ -90,8 +101,14 @@ inline bool is_empty_pool_stub(const cs::Bytes& bytes) {
     if (bytes.size() < kEmptyStubHeaderSize || bytes[0] != kEmptyStubTag) {
         return false;
     }
-    const size_t confCount = bytes[kEmptyStubHeaderSize - 1];  // count byte at offset 73
-    return bytes.size() == kEmptyStubHeaderSize + confCount * kPubKeySize;
+    const size_t confCount = bytes[kEmptyStubHeaderSize - 1];   // count byte at offset 73
+    const size_t fixed = kEmptyStubHeaderSize + confCount * kPubKeySize;
+    if (bytes.size() < fixed + 4) return false;                  // need uf_size field
+    uint32_t ufSize = 0;
+    for (int i = 0; i < 4; ++i) {
+        ufSize |= static_cast<uint32_t>(bytes[fixed + i]) << (i * 8);
+    }
+    return bytes.size() == fixed + 4 + ufSize;
 }
 
 // Returns invalid Pool on malformed stub.
@@ -114,16 +131,28 @@ Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
     pool.set_hash(std::move(this_hash));
 
     const size_t confCount = bytes[kEmptyStubHeaderSize - 1];
+    const size_t confidantsOffset = kEmptyStubHeaderSize;
     if (confCount > 0) {
         std::vector<cs::PublicKey> confidants;
         confidants.reserve(confCount);
-        const size_t confidantsOffset = kEmptyStubHeaderSize;
         for (size_t i = 0; i < confCount; ++i) {
             cs::PublicKey pk;
             std::memcpy(pk.data(), &bytes[confidantsOffset + i * kPubKeySize], kPubKeySize);
             confidants.push_back(pk);
         }
         pool.set_confidants(confidants);
+    }
+
+    // user_fields blob (kFieldBlockReward etc.) for mining-era support.
+    const size_t ufSizeOffset = confidantsOffset + confCount * kPubKeySize;
+    uint32_t ufSize = 0;
+    for (int i = 0; i < 4; ++i) {
+        ufSize |= static_cast<uint32_t>(bytes[ufSizeOffset + i]) << (i * 8);
+    }
+    if (ufSize > 0) {
+        cs::Bytes ufBlob(bytes.begin() + ufSizeOffset + 4,
+                         bytes.begin() + ufSizeOffset + 4 + ufSize);
+        pool.deserialize_user_fields(ufBlob);
     }
 
     return pool;

@@ -178,6 +178,11 @@ public:
     void set_sequence(cs::Sequence sequence) noexcept;
     /// Bypass hash derivation; for reconstructing a Pool whose hash was preserved out-of-band (tinycs stubs).
     void set_hash(PoolHash hash) noexcept;
+
+    /// Serialize/deserialize the user_fields map only. Used by tinycs stub format
+    /// to preserve mining reward and similar per-block extension data.
+    cs::Bytes serialize_user_fields() const;
+    bool deserialize_user_fields(const cs::Bytes& data);
     void set_storage(const Storage& storage) noexcept;
     void set_confidants(const std::vector<cs::PublicKey>& confidants) noexcept;
     void set_signatures(std::vector<cs::Signature>& blockSignatures) noexcept;

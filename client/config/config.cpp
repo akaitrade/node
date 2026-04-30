@@ -74,6 +74,7 @@ const std::string PARAM_NAME_STORAGE_ASYNC_WRITE_QUEUE_SIZE = "async_write_queue
 const std::string PARAM_NAME_STORAGE_WRITE_BATCH_SIZE = "write_batch_size";
 const std::string PARAM_NAME_STORAGE_VERIFY_WORKER_COUNT = "verify_worker_count";
 const std::string PARAM_NAME_STORAGE_VERIFY_BATCH_SIZE = "verify_batch_size";
+const std::string PARAM_NAME_STORAGE_PROGRESS_LOG_INTERVAL = "progress_log_interval";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -960,6 +961,7 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_WRITE_BATCH_SIZE, storageData_.writeBatchSize);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VERIFY_WORKER_COUNT, storageData_.verifyWorkerCount);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VERIFY_BATCH_SIZE, storageData_.verifyBatchSize);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_PROGRESS_LOG_INTERVAL, storageData_.progressLogInterval);
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

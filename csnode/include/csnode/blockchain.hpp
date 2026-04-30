@@ -488,6 +488,7 @@ private:
     // order with skipVerify=true.
     std::unique_ptr<cs::VerifierPool> verifierPool_;
     size_t verifyBatchSize_ = 32;
+    size_t progressLogInterval_ = 1000;   // print "stored N from cache" every N applied during drain
 
     // block storage to defer storing it in blockchain until confirmation from other nodes got
     // (idea is it is more easy not to store block immediately then to revert it after storing)

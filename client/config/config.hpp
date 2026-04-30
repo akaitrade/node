@@ -63,6 +63,7 @@ struct StorageData {
     size_t writeBatchSize = 100;         // pools coalesced into one DB write
     size_t verifyWorkerCount = 4;        // parallel signature-verifier threads
     size_t verifyBatchSize = 32;         // blocks dispatched per verify batch
+    size_t progressLogInterval = 1000;   // print "stored N blocks" every N applied during cache drain
 };
 
 struct ApiData {

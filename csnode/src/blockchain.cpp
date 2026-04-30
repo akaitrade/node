@@ -175,6 +175,9 @@ bool BlockChain::init(
         cslog() << kLogPrefix << "verifier pool: " << storageCfg.verifyWorkerCount
                 << " workers, batch size " << storageCfg.verifyBatchSize;
     }
+    if (storageCfg.progressLogInterval > 0) {
+        progressLogInterval_ = storageCfg.progressLogInterval;
+    }
 
     if (newBlockchainTop != cs::kWrongSequence) {
         return true;
@@ -1830,7 +1833,7 @@ void BlockChain::testCachedBlocks() {
             ++countStored;
         }
 
-        if (countStored >= 1000) {
+        if (countStored >= progressLogInterval_) {
             cslog() << "BLOCKCHAIN> stored " << WithDelimiters(countStored)
                 << " blocks " << WithDelimiters(fromSeq) << " .. " << WithDelimiters(fromSeq + countStored) << " from cache";
             countStored = 0;

@@ -796,6 +796,28 @@ void Pool::set_hash(PoolHash hash) noexcept {
     data->hash_ = std::move(hash);
 }
 
+cs::Bytes Pool::serialize_user_fields() const {
+    ::csdb::priv::obstream os;
+    os.put(d->user_fields_);
+    return std::move(const_cast<cs::Bytes&>(os.buffer()));
+}
+
+bool Pool::deserialize_user_fields(const cs::Bytes& data) {
+    if (d.constData()->read_only_) {
+        return false;
+    }
+    if (data.empty()) {
+        return true;   // nothing to deserialize, leave empty map alone
+    }
+    ::csdb::priv::ibstream is(data.data(), data.size());
+    priv* mut = d.data();
+    if (!is.get(mut->user_fields_)) {
+        return false;
+    }
+    mut->is_valid_ = true;
+    return true;
+}
+
 void Pool::set_confidants(const std::vector<cs::PublicKey>& confidants) noexcept {
     if (d.constData()->read_only_) {
         return;
