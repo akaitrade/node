@@ -64,6 +64,8 @@ struct StorageData {
     size_t verifyWorkerCount = 4;        // parallel signature-verifier threads
     size_t verifyBatchSize = 32;         // blocks dispatched per verify batch
     size_t progressLogInterval = 1000;   // print "stored N blocks" every N applied during cache drain
+    bool parallelContractExecution = false; // master switch for per-contract parallel execution
+    size_t contractParallelWorkers = 4;     // cap on in-flight contract executions when enabled
 };
 
 struct ApiData {

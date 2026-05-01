@@ -19,8 +19,11 @@
 #endif
 
 #include <any>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <unordered_set>
 
 #include <lib/system/common.hpp>
 #include <lib/system/process.hpp>
@@ -37,6 +40,43 @@ class BlockChain;
 namespace cs {
 class Executor;
 class SolverCore;
+
+// Per-contract-address mutual exclusion: serialises in-flight executor calls
+// for the same contract while letting calls to different contracts run in
+// parallel. Used in place of the historical static mutex on executeByteCode.
+class ContractCallLockManager {
+public:
+    void acquire(const general::Address& addr) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return active_.find(addr) == active_.end(); });
+        active_.insert(addr);
+    }
+
+    void release(const general::Address& addr) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            active_.erase(addr);
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::unordered_set<general::Address> active_;
+};
+
+class ContractCallLockGuard {
+public:
+    ContractCallLockGuard(ContractCallLockManager& mgr, const general::Address& addr)
+      : mgr_(mgr), addr_(addr) { mgr_.acquire(addr_); }
+    ~ContractCallLockGuard() { mgr_.release(addr_); }
+    ContractCallLockGuard(const ContractCallLockGuard&) = delete;
+    ContractCallLockGuard& operator=(const ContractCallLockGuard&) = delete;
+private:
+    ContractCallLockManager& mgr_;
+    general::Address addr_;
+};
 
 struct ExecutorSettings {
     using Types = std::tuple<cs::Reference<const BlockChain>, cs::Reference<const cs::SolverCore>>;
@@ -266,6 +306,7 @@ private:
     const int16_t EXECUTOR_VERSION = 4;
 
     std::mutex callExecutorLock_;
+    ContractCallLockManager contractCallLockManager_;
     std::atomic<bool> isWatcherRunning_ = { false };
 
     cs::ExecutorManager manager_;

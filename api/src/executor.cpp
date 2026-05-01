@@ -12,10 +12,20 @@
 
 #include "serializer.hpp"
 
+#include <optional>
+
 #include <csnode/configholder.hpp>
 
 #include <solver/solvercore.hpp>
 #include <solver/smartcontracts.hpp>
+
+namespace {
+// Returns true when per-contract parallel execution is enabled in config.
+bool parallelContractExecutionEnabled() {
+    const auto* cfg = cs::ConfigHolder::instance().config();
+    return cfg && cfg->getStorageSettings().parallelContractExecution;
+}
+}
 
 void cs::ExecutorSettings::set(cs::Reference<const BlockChain> blockchain, cs::Reference<const cs::SolverCore> solver) {
     blockchain_ = blockchain;
@@ -35,8 +45,17 @@ cs::ExecutorSettings::Types cs::ExecutorSettings::get() {
 void cs::Executor::executeByteCode(executor::ExecuteByteCodeResult& resp, const std::string& address, const std::string& smart_address,
                                    const std::vector<general::ByteCodeObject>& code, const std::string& state,
                                    std::vector<executor::MethodHeader>& methodHeader, bool isGetter, cs::Sequence sequence) {
-    static std::mutex mutex;
-    std::lock_guard lock(mutex);  // temporary solution
+    // Per-contract serialisation when parallel mode is on; otherwise the
+    // historical global mutex (preserves previous behaviour by default).
+    static std::mutex globalMutex;
+    std::unique_lock<std::mutex> globalLock;
+    std::optional<ContractCallLockGuard> perContractLock;
+    if (parallelContractExecutionEnabled()) {
+        perContractLock.emplace(contractCallLockManager_, smart_address);
+    }
+    else {
+        globalLock = std::unique_lock<std::mutex>(globalMutex);
+    }
 
     if (!code.empty()) {
         executor::SmartContractBinary smartContractBinary;
@@ -936,7 +955,14 @@ std::optional<cs::Executor::OriginExecuteResult> cs::Executor::execute(const std
 
     try {
         std::shared_lock sharedLock(sharedErrorMutex_);
-        std::lock_guard lock(callExecutorLock_);
+        std::unique_lock<std::mutex> callLock;
+        std::optional<ContractCallLockGuard> perContractLock;
+        if (parallelContractExecutionEnabled()) {
+            perContractLock.emplace(contractCallLockManager_, address);
+        }
+        else {
+            callLock = std::unique_lock<std::mutex>(callExecutorLock_);
+        }
         origExecutor_->executeByteCode(originExecuteRes.resp, static_cast<general::AccessID>(accessId), address, smartContractBinary, methodHeader, EXECUTION_TIME, EXECUTOR_VERSION);
     }
     catch (::apache::thrift::transport::TTransportException& x) {
