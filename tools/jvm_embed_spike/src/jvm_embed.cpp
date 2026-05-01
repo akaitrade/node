@@ -519,17 +519,17 @@ std::optional<int32_t> Vm::callStaticIntTwoIntsCached(const StaticMethodHandle& 
 // result objects (ExecuteByteCodeResult etc.).
 
 std::optional<Vm::ExecutorBuildVersionResult>
-Vm::callGetExecutorBuildVersion(int16_t version) {
+Vm::callGetExecutorBuildVersion(int16_t version, const std::string& className) {
     if (!impl_->started) { impl_->lastError = "VM not started"; return std::nullopt; }
     ThreadGuard guard(*this);
     if (!guard.ok()) { impl_->lastError = "thread attach failed"; return std::nullopt; }
     JNIEnv* env = guard.env();
 
-    jclass execCls = findClassChecked(env, "StubExecutor", impl_->lastError);
+    jclass execCls = findClassChecked(env, className, impl_->lastError);
     if (!execCls) return std::nullopt;
+    const std::string sig = "(S)L" + className + "$BuildVersionResult;";
     jmethodID mid = findStaticMethodChecked(env, execCls, "getExecutorBuildVersion",
-                                            "(S)LStubExecutor$BuildVersionResult;",
-                                            impl_->lastError);
+                                            sig, impl_->lastError);
     if (!mid) { env->DeleteLocalRef(execCls); return std::nullopt; }
 
     jobject result = env->CallStaticObjectMethod(execCls, mid, static_cast<jshort>(version));

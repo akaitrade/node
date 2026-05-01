@@ -42,7 +42,29 @@ set(_java_sources
     "${CMAKE_CURRENT_SOURCE_DIR}/java/HelloEmbed.java"
     "${CMAKE_CURRENT_SOURCE_DIR}/java/StubExecutor.java"
 )
+set(_bridge_src "${CMAKE_CURRENT_SOURCE_DIR}/java/EmbeddedExecutorBridge.java")
 set(_stamp_file "${_class_out_dir}/.javac.stamp")
+
+# Path to the real CREDITS contract-executor.jar. If present, we compile
+# EmbeddedExecutorBridge against it so the spike can call into the actual
+# executor implementation, not just the stub. Default points at the user's
+# csnode_Default install; override on the cmake command line if needed.
+set(JVM_EMBED_EXECUTOR_JAR "C:/csnode_Default/contract-executor.jar"
+    CACHE FILEPATH "Path to contract-executor.jar for the JVM-embed bridge")
+# The directory containing settings.properties (loaded as a classpath
+# resource by ApplicationProperties).
+set(JVM_EMBED_EXECUTOR_INSTALL_DIR "C:/csnode_Default"
+    CACHE PATH "Directory containing settings.properties for the executor")
+set(_bridge_compiled FALSE)
+if(EXISTS "${JVM_EMBED_EXECUTOR_JAR}")
+    list(APPEND _java_sources "${_bridge_src}")
+    set(_javac_classpath "-cp" "${JVM_EMBED_EXECUTOR_JAR}")
+    set(_bridge_compiled TRUE)
+    message(STATUS "jvm_embed_spike: building EmbeddedExecutorBridge against ${JVM_EMBED_EXECUTOR_JAR}")
+else()
+    set(_javac_classpath "")
+    message(STATUS "jvm_embed_spike: contract-executor.jar not found at ${JVM_EMBED_EXECUTOR_JAR} — bridge not compiled (stub-only)")
+endif()
 
 # --release 11 keeps the bytecode compatible with the JDK we load at runtime
 # (jvm.dll is JDK 11). Without this, a newer javac (e.g. Android Studio JBR's)
@@ -50,7 +72,7 @@ set(_stamp_file "${_class_out_dir}/.javac.stamp")
 add_custom_command(
     OUTPUT  "${_stamp_file}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_class_out_dir}"
-    COMMAND ${Java_JAVAC_EXECUTABLE} --release 11 -d "${_class_out_dir}" ${_java_sources}
+    COMMAND ${Java_JAVAC_EXECUTABLE} --release 11 ${_javac_classpath} -d "${_class_out_dir}" ${_java_sources}
     COMMAND ${CMAKE_COMMAND} -E touch "${_stamp_file}"
     DEPENDS ${_java_sources}
     VERBATIM
@@ -68,6 +90,13 @@ add_dependencies(jvm_embed_spike jvm_embed_spike_java)
 
 set_property(TARGET jvm_embed_spike PROPERTY CXX_STANDARD 17)
 set_property(TARGET jvm_embed_spike PROPERTY CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(_bridge_compiled)
+    target_compile_definitions(jvm_embed_spike PRIVATE
+        JVM_EMBED_EXECUTOR_JAR="${JVM_EMBED_EXECUTOR_JAR}"
+        JVM_EMBED_EXECUTOR_INSTALL_DIR="${JVM_EMBED_EXECUTOR_INSTALL_DIR}"
+        JVM_EMBED_BRIDGE_AVAILABLE=1)
+endif()
 
 # Stage the compiled .class next to the binary so running with no args works.
 add_custom_command(TARGET jvm_embed_spike POST_BUILD

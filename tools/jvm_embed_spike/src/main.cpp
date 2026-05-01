@@ -56,6 +56,16 @@ int main(int argc, char** argv) {
 
     jvm_embed::InitOptions opts;
     opts.classpath = { classpathDir };
+#ifdef JVM_EMBED_EXECUTOR_JAR
+    // Real bridge requires the executor JAR on the classpath alongside our
+    // compiled .class directory.
+    opts.classpath.emplace_back(JVM_EMBED_EXECUTOR_JAR);
+#endif
+#ifdef JVM_EMBED_EXECUTOR_INSTALL_DIR
+    // Install dir contains settings.properties, which the executor's
+    // ApplicationProperties() constructor loads as a classpath resource.
+    opts.classpath.emplace_back(JVM_EMBED_EXECUTOR_INSTALL_DIR);
+#endif
     opts.javaHomeOverride = javaHome;
     opts.jvmOptions = jvmOptions;
     // -Xcheck:jni catches reference and threading bugs early. Worth running with
@@ -209,7 +219,48 @@ int main(int argc, char** argv) {
                   << std::endl;
     }
 
-    // Test 7: multi-threaded call from non-JVM-created threads.
+#ifdef JVM_EMBED_BRIDGE_AVAILABLE
+    // Test 7: REAL bridge — JNI through to the actual contract-executor.jar's
+    // ContractExecutorHandler.getExecutorBuildVersion. Same C++ wrapper as
+    // Test 6, just pointed at EmbeddedExecutorBridge instead of StubExecutor.
+    {
+        auto r = vm.callGetExecutorBuildVersion(/*version=*/4, "EmbeddedExecutorBridge");
+        if (!r) {
+            std::cerr << "[fail] real bridge getExecutorBuildVersion: " << vm.lastError() << "\n";
+            return 1;
+        }
+        // The real handler returns success on version=4 (validateVersion accepts only 4).
+        // commitNumber/commitHash come from settings.properties or git.properties at
+        // runtime — may be 0/empty when those resources aren't on classpath, but the
+        // CALL succeeding (code==0) is what the spike is validating.
+        std::cout << "[ok] EmbeddedExecutorBridge.getExecutorBuildVersion(4) ->"
+                  << " code=" << int(r->code)
+                  << " msg=\"" << r->message << "\""
+                  << " n=" << r->commitNumber
+                  << " hash=\"" << r->commitHash << "\""
+                  << std::endl;
+        if (r->code != 0) {
+            std::cerr << "[fail] real bridge returned non-zero code\n";
+            return 1;
+        }
+
+        // Negative path: version != 4 must throw ContractExecutorUtils
+        // .validateVersion's IncompatibleVersionException, which the bridge
+        // catches and surfaces as code != 0.
+        auto bad = vm.callGetExecutorBuildVersion(/*version=*/99, "EmbeddedExecutorBridge");
+        if (!bad || bad->code == 0) {
+            std::cerr << "[fail] real bridge accepted invalid version=99 (code="
+                      << (bad ? int(bad->code) : -99) << ")\n";
+            return 1;
+        }
+        std::cout << "[ok] real bridge correctly rejected version=99: code="
+                  << int(bad->code) << " msg=\"" << bad->message << "\"" << std::endl;
+    }
+#else
+    std::cout << "[skip] real bridge test (contract-executor.jar not configured)" << std::endl;
+#endif
+
+    // Test 8: multi-threaded call from non-JVM-created threads.
     // Each worker calls a JVM method N times; we verify total call count and
     // result correctness. Validates ThreadGuard's attach-as-daemon + detach.
     {

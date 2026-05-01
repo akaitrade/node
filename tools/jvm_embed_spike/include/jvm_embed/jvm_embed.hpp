@@ -109,8 +109,14 @@ public:
         std::string commitHash;
     };
 
+    // The Java side must expose:
+    //   public static <ClassName>$BuildVersionResult getExecutorBuildVersion(short version)
+    // where BuildVersionResult has public final fields:
+    //   byte code; String message; int commitNumber; String commitHash
+    // Both StubExecutor (test) and EmbeddedExecutorBridge (real) match this shape.
     std::optional<ExecutorBuildVersionResult>
-    callGetExecutorBuildVersion(int16_t version);
+    callGetExecutorBuildVersion(int16_t version,
+                                const std::string& className = "StubExecutor");
 
     // Most recent error message produced by start() or any call. Empty when no
     // error has occurred since the last successful operation.
