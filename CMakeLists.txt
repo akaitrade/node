@@ -37,6 +37,14 @@ if(CSDB_BUILD_MIGRATE)
     message(STATUS "csdb migrate tool: enabled (both backends will be compiled)")
 endif()
 
+# Embed JVM spike: builds tools/jvm_embed_spike/. Self-contained smoke test
+# that loads libjvm and invokes a Java method via JNI. No production code
+# touched. Requires a JDK to be discoverable (JAVA_HOME).
+option(BUILD_JVM_EMBED_SPIKE "Build the JNI-embed JVM spike (tools/jvm_embed_spike)" OFF)
+if(BUILD_JVM_EMBED_SPIKE)
+    message(STATUS "jvm_embed_spike: enabled")
+endif()
+
 IF(DBSQL)
     ADD_DEFINITIONS(-DDBSQL)
 ENDIF(DBSQL)
@@ -251,6 +259,10 @@ add_subdirectory(lmdbxx)
 
 if(CSDB_BUILD_MIGRATE)
     add_subdirectory(tools/csdb_migrate)
+endif()
+
+if(BUILD_JVM_EMBED_SPIKE)
+    add_subdirectory(tools/jvm_embed_spike)
 endif()
 
 if(NOT ${SKIP_SAMPLES})
