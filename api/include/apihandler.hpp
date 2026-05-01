@@ -3,6 +3,7 @@
 
 #include <csstats.hpp>
 
+#include <atomic>
 #include <deque>
 #include <queue>
 #include <tuple>
@@ -329,7 +330,7 @@ private:
     std::mutex wbLock_;
     std::unordered_map<uint64_t, api::TransactionsListFlowResult> trxLists_;
     std::mutex tlMutex_;
-    uint64_t requestId_ = 0;
+    std::atomic<uint64_t> requestId_{0};
 
 private slots:
     void updateSmartCachesPool(const csdb::Pool& pool);

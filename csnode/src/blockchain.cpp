@@ -377,7 +377,9 @@ void BlockChain::applyToWallet(const csdb::Address& addr, const std::function<vo
     auto pub = getAddressByType(addr, BlockChain::AddressType::PublicKey);
     auto wd = walletsCacheUpdater_->findWallet(pub.public_key());
 
-    func(*wd);
+    if (wd) {
+        func(*wd);
+    }
 }
 #endif
 

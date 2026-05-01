@@ -1114,14 +1114,15 @@ void APIHandler::TransactionSend(api::SendTransactionResult& _return, const Tran
         return;
     }
 
-    _return.requestId = ++requestId_;
+    const uint64_t myId = ++requestId_;
+    _return.requestId = myId;
     if (!transaction.__isset.smartContract && !solver_.smart_contracts().is_payable_call(transactionToSend)) {
-        std::thread t1(&APIHandler::processTransaction, this, transactionToSend, requestId_);
+        std::thread t1(&APIHandler::processTransaction, this, transactionToSend, myId);
         t1.detach();
     }
 
     else {
-        std::thread t2(&APIHandler::processSmartTransaction, this, transaction, transactionToSend, requestId_);
+        std::thread t2(&APIHandler::processSmartTransaction, this, transaction, transactionToSend, myId);
         t2.detach();
     }
     //csinfo() << "State transaction: seq = " << _return.stateId.poolSeq << ", index = " << _return.stateId.index;
@@ -1359,9 +1360,10 @@ void APIHandler::TransactionFlow(api::TransactionFlowResult& _return, const Tran
 }
 
 void APIHandler::WalletsListBalancesGet(api::AcceptedRequestId& _return, const api::Addresses& walletAddresses) {
-    _return.ids = ++requestId_;
+    const uint64_t myId = ++requestId_;
+    _return.ids = myId;
 
-    std::thread t(&APIHandler::processBalancesRequest, this, walletAddresses, requestId_);
+    std::thread t(&APIHandler::processBalancesRequest, this, walletAddresses, myId);
     t.detach();
 
     //csinfo() << "State transaction: seq = " << _return.stateId.poolSeq << ", index = " << _return.stateId.index;
@@ -1431,9 +1433,10 @@ void APIHandler::FilteredTrxsListGet(api::AcceptedRequestId& _return, const api:
     return;
 #endif
     cslog() << __func__;
-    _return.ids = ++requestId_;
+    const uint64_t myId = ++requestId_;
+    _return.ids = myId;
 
-    std::thread t(&APIHandler::filteredTrxsProcess, this, generalQuery, requestId_);
+    std::thread t(&APIHandler::filteredTrxsProcess, this, generalQuery, myId);
     t.detach();
 
     SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
@@ -1474,14 +1477,15 @@ void APIHandler::TransactionsListSend(api::SendTransactionResult& _return, const
             return;
         }
 
-        _return.requestId = ++requestId_;
+        const uint64_t myId = ++requestId_;
+        _return.requestId = myId;
         if (!transaction.__isset.smartContract && !solver_.smart_contracts().is_payable_call(transactionToSend)) {
-            std::thread t1(&APIHandler::processTransaction, this, transactionToSend, requestId_);
+            std::thread t1(&APIHandler::processTransaction, this, transactionToSend, myId);
             t1.detach();
         }
 
         else {
-            std::thread t2(&APIHandler::processSmartTransaction, this, transaction, transactionToSend, requestId_);
+            std::thread t2(&APIHandler::processSmartTransaction, this, transaction, transactionToSend, myId);
             t2.detach();
         }
         //csinfo() << "State transaction: seq = " << _return.stateId.poolSeq << ", index = " << _return.stateId.index;

@@ -188,8 +188,11 @@ void connector::run() {
                 cslog() << "AJAX service is trying to stop";
                 continue;
             }
+            catch (const std::exception& e) {
+                cserror() << "AJAX service stopped unexpectedly: " << e.what();
+            }
             catch (...) {
-                cserror() << "AJAX service stopped unexpectedly";
+                cserror() << "AJAX service stopped unexpectedly (non-std exception)";
             }
             // wait before restarting server
             std::this_thread::sleep_for(std::chrono::milliseconds(kRestartThriftPause_ms));

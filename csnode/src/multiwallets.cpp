@@ -21,14 +21,16 @@ csdb::Amount cs::MultiWallets::balance(const cs::PublicKey& key) const {
     cs::Lock lock(mutex_);
 
     auto& keys = indexes_.get<Tags::ByPublicKey>();
-    return keys.find(key)->balance_;
+    auto it = keys.find(key);
+    return it == keys.end() ? csdb::Amount(0) : it->balance_;
 }
 
 uint64_t cs::MultiWallets::transactionsCount(const cs::PublicKey& key) const {
     cs::Lock lock(mutex_);
 
     auto& keys = indexes_.get<Tags::ByPublicKey>();
-    return keys.find(key)->transNum_;
+    auto it = keys.find(key);
+    return it == keys.end() ? 0 : it->transNum_;
 }
 
 #ifdef MONITOR_NODE
@@ -36,7 +38,8 @@ uint64_t cs::MultiWallets::createTime(const cs::PublicKey& key) const {
     cs::Lock lock(mutex_);
 
     auto& keys = indexes_.get<Tags::ByPublicKey>();
-    return keys.find(key)->createTime_;
+    auto it = keys.find(key);
+    return it == keys.end() ? 0 : it->createTime_;
 }
 #endif
 

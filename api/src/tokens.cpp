@@ -159,8 +159,19 @@ void executeAndCall(api::APIHandler* p_api, const general::Address& addr, const 
     }
     p_api->getExecutor().executeByteCode(result, addr, addr_smart, byteCodeObjects, state, methodHeader, true /*isGetter*/, cs::Executor::kUseLastSequence);
 
-    if (!result.status.code && !result.results.empty())
-        handler(getVariantAs<RetType>(result.results[0].ret_val));
+    if (!result.status.code && !result.results.empty()) {
+        try {
+            handler(getVariantAs<RetType>(result.results[0].ret_val));
+        }
+        catch (const std::exception& e) {
+            cswarning() << "TokensMaster: getVariantAs failed for " << method
+                        << " on " << addr_smart << ": " << e.what();
+        }
+        catch (...) {
+            cswarning() << "TokensMaster: getVariantAs failed for " << method
+                        << " on " << addr_smart << " (non-std exception)";
+        }
+    }
 }
 
 void TokensMaster::refreshTokenState(const csdb::Address& token, const std::string& newState, bool checkBalance) {
@@ -169,7 +180,14 @@ void TokensMaster::refreshTokenState(const csdb::Address& token, const std::stri
     if (!present || byteCodeObjects.empty()) return;
 
     std::string name, symbol, totalSupply;
-    csdb::Address deployer = tokens_[token].owner;
+    csdb::Address deployer;
+    {
+        auto it = tokens_.find(token);
+        if (it == tokens_.end()) {
+            return;
+        }
+        deployer = it->second.owner;
+    }
 
     general::Address addr   = std::string((char*)token.public_key().data(), token.public_key().size());
     general::Address dpAddr = std::string((char*)deployer.public_key().data(), deployer.public_key().size());
@@ -189,7 +207,11 @@ void TokensMaster::refreshTokenState(const csdb::Address& token, const std::stri
             }
         });  
 
-    auto& t       = tokens_[token];
+    auto itToken = tokens_.find(token);
+    if (itToken == tokens_.end()) {
+        return;
+    }
+    auto& t       = itToken->second;
     t.name        = name;
     t.symbol      = symbol;
     t.totalSupply = totalSupply;
