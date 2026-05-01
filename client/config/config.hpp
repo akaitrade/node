@@ -92,6 +92,17 @@ struct ApiData {
     int executorCommitMin = 1506;   // first commit with support of checking
     int executorCommitMax{-1};      // unlimited range on the right
     std::string jpsCmdLine = "jps";
+
+    // Embedded-JVM cutover. When true, cs::Executor loads the contract
+    // executor JAR in-process via JNI instead of talking to a separate
+    // executor process over Thrift. See EMBED_JVM_PLAN.md / Phase 4.
+    // Default false — opt-in for the first release.
+    bool useEmbeddedJvm = false;
+    std::string embeddedJvmJavaHome;        // empty = JAVA_HOME env var
+    std::string embeddedJvmExecutorJar;     // path to contract-executor.jar
+    std::string embeddedJvmInstallDir;      // dir containing settings.properties
+    std::string embeddedJvmScapiJar;        // optional path to sc-api-support.jar
+    std::vector<std::string> embeddedJvmOptions;   // extra JVM args (-Xmx etc.)
 };
 
 struct ConveyerData {

@@ -45,6 +45,17 @@ if(BUILD_JVM_EMBED_SPIKE)
     message(STATUS "jvm_embed_spike: enabled")
 endif()
 
+# Wire the JNI-embedded JVM into the production node build (api/cs::Executor).
+# When ON, the api target links jvm_embed and gets a compile-time switch that
+# routes Thrift calls to JNI when the runtime config flag use_embedded_jvm
+# is true. Default OFF so existing builds are unaffected.
+option(USE_EMBEDDED_JVM_NODE "Build node.exe with JNI-embedded JVM support (Phase 4 cutover)" OFF)
+if(USE_EMBEDDED_JVM_NODE)
+    message(STATUS "USE_EMBEDDED_JVM_NODE: enabled — api will link jvm_embed library")
+    # Implies BUILD_JVM_EMBED_SPIKE so the jvm_embed CMake target exists.
+    set(BUILD_JVM_EMBED_SPIKE ON CACHE BOOL "Forced ON by USE_EMBEDDED_JVM_NODE" FORCE)
+endif()
+
 IF(DBSQL)
     ADD_DEFINITIONS(-DDBSQL)
 ENDIF(DBSQL)

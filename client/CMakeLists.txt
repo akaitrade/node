@@ -61,6 +61,18 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CMAKE_CXX_STANDARD_REQUIRED ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY OUTPUT_NAME node)
 
+# When the embedded JVM cutover is on, stage the compiled bridge classes
+# (EmbeddedExecutorBridge etc.) next to node.exe so cs::Executor can find
+# them on the JVM classpath at runtime.
+if(USE_EMBEDDED_JVM_NODE)
+    add_dependencies(client jvm_embed_spike_java)
+    add_custom_command(TARGET client POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_BINARY_DIR}/tools/jvm_embed_spike/java"
+                "$<TARGET_FILE_DIR:client>/jvm_bridge"
+        COMMENT "Staging embedded JVM bridge classes for node.exe")
+endif()
+
 suppress_boost_cmake_warnings()
 configure_msvc_flags()
 

@@ -1002,6 +1002,35 @@ void Config::readApiData(const boost::property_tree::ptree& config) {
     if (data.count(PARAM_NAME_JPS_COMMAND_LINE)) {
         apiData_.jpsCmdLine = data.get<std::string>(PARAM_NAME_JPS_COMMAND_LINE);
     }
+
+    // Embedded-JVM cutover (Phase 4). All keys optional; defaults preserve
+    // legacy behaviour (separate executor process via Thrift).
+    static const std::string PARAM_NAME_USE_EMBEDDED_JVM       = "use_embedded_jvm";
+    static const std::string PARAM_NAME_EMBEDDED_JVM_JAVA_HOME = "embedded_jvm_java_home";
+    static const std::string PARAM_NAME_EMBEDDED_JVM_EXEC_JAR  = "embedded_jvm_executor_jar";
+    static const std::string PARAM_NAME_EMBEDDED_JVM_INSTALL   = "embedded_jvm_install_dir";
+    static const std::string PARAM_NAME_EMBEDDED_JVM_SCAPI_JAR = "embedded_jvm_scapi_jar";
+    static const std::string PARAM_NAME_EMBEDDED_JVM_OPTS      = "embedded_jvm_options";
+    checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_USE_EMBEDDED_JVM, apiData_.useEmbeddedJvm);
+    if (data.count(PARAM_NAME_EMBEDDED_JVM_JAVA_HOME)) apiData_.embeddedJvmJavaHome    = data.get<std::string>(PARAM_NAME_EMBEDDED_JVM_JAVA_HOME);
+    if (data.count(PARAM_NAME_EMBEDDED_JVM_EXEC_JAR))  apiData_.embeddedJvmExecutorJar = data.get<std::string>(PARAM_NAME_EMBEDDED_JVM_EXEC_JAR);
+    if (data.count(PARAM_NAME_EMBEDDED_JVM_INSTALL))   apiData_.embeddedJvmInstallDir  = data.get<std::string>(PARAM_NAME_EMBEDDED_JVM_INSTALL);
+    if (data.count(PARAM_NAME_EMBEDDED_JVM_SCAPI_JAR)) apiData_.embeddedJvmScapiJar    = data.get<std::string>(PARAM_NAME_EMBEDDED_JVM_SCAPI_JAR);
+    if (data.count(PARAM_NAME_EMBEDDED_JVM_OPTS)) {
+        std::string opts = data.get<std::string>(PARAM_NAME_EMBEDDED_JVM_OPTS);
+        // semicolon-separated list, e.g. "-Xmx2g;-Xss512k;-XX:+UseG1GC"
+        size_t start = 0;
+        while (start < opts.size()) {
+            size_t end = opts.find(';', start);
+            if (end == std::string::npos) end = opts.size();
+            std::string opt = opts.substr(start, end - start);
+            if (!opt.empty()) apiData_.embeddedJvmOptions.push_back(opt);
+            start = end + 1;
+        }
+    }
+    if (apiData_.useEmbeddedJvm) {
+        cslog() << "[configInfo]: embedded JVM enabled (executor JAR: " << apiData_.embeddedJvmExecutorJar << ")";
+    }
 }
 
 void Config::readConveyerData(const boost::property_tree::ptree& config) {
@@ -1128,6 +1157,12 @@ bool operator==(const ApiData& lhs, const ApiData& rhs) {
            lhs.executorRunDelay == rhs.executorRunDelay &&
            lhs.executorBackgroundThreadDelay == rhs.executorBackgroundThreadDelay &&
            lhs.executorCheckVersionDelay == rhs.executorCheckVersionDelay &&
+           lhs.useEmbeddedJvm == rhs.useEmbeddedJvm &&
+           lhs.embeddedJvmJavaHome == rhs.embeddedJvmJavaHome &&
+           lhs.embeddedJvmExecutorJar == rhs.embeddedJvmExecutorJar &&
+           lhs.embeddedJvmInstallDir == rhs.embeddedJvmInstallDir &&
+           lhs.embeddedJvmScapiJar == rhs.embeddedJvmScapiJar &&
+           lhs.embeddedJvmOptions == rhs.embeddedJvmOptions &&
            lhs.executorMultiInstance == rhs.executorMultiInstance &&
            lhs.executorCommitMin == rhs.executorCommitMin &&
            lhs.executorCommitMax == rhs.executorCommitMax &&

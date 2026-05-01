@@ -17,6 +17,113 @@
 #include <solver/solvercore.hpp>
 #include <solver/smartcontracts.hpp>
 
+#ifdef USE_EMBEDDED_JVM
+#include <cstdlib>
+#include <thrift/transport/TBufferTransports.h>
+#include <thrift/protocol/TBinaryProtocol.h>
+#include <jvm_embed/jvm_embed.hpp>
+
+namespace {
+// Translate a TaggedVariant back into a Thrift Variant. Returns false only
+// for VTAG_OTHER (toString-only fallback) — every other case round-trips.
+bool taggedToThriftVariant(const jvm_embed::Vm::Variant& src, ::general::Variant& out) {
+    switch (src.tag) {
+        case jvm_embed::Vm::VTAG_BOOL:    out.__set_v_boolean(src.boolVal); return true;
+        case jvm_embed::Vm::VTAG_LONG:    out.__set_v_long(src.longVal); return true;
+        case jvm_embed::Vm::VTAG_DOUBLE:  out.__set_v_double(src.doubleVal); return true;
+        case jvm_embed::Vm::VTAG_STRING:  out.__set_v_string(src.stringVal); return true;
+        case jvm_embed::Vm::VTAG_BYTES:   out.__set_v_byte_array(std::string(src.bytesVal.begin(), src.bytesVal.end())); return true;
+        case jvm_embed::Vm::VTAG_VOID:    out.__set_v_void(0); return true;
+        case jvm_embed::Vm::VTAG_NULL:    out.__set_v_null(""); return true;
+        case jvm_embed::Vm::VTAG_AMOUNT: {
+            ::general::Amount amt;
+            amt.integral = static_cast<int32_t>(src.longVal);
+            int64_t frac = 0;
+            if (src.bytesVal.size() == 8) {
+                for (size_t i = 0; i < 8; ++i) frac = (frac << 8) | int64_t(src.bytesVal[i]);
+            }
+            amt.fraction = frac;
+            out.__set_v_amount(amt);
+            return true;
+        }
+        case jvm_embed::Vm::VTAG_THRIFT_BINARY: {
+            // Recursive Variant cases (V_LIST/V_MAP/V_SET/V_ARRAY/V_OBJECT)
+            // are transported as a Thrift binary blob; deserialize back into
+            // a real Variant on this side.
+            if (src.bytesVal.empty()) return true;
+            try {
+                auto buf = ::apache::thrift::stdcxx::shared_ptr<::apache::thrift::transport::TMemoryBuffer>(
+                    new ::apache::thrift::transport::TMemoryBuffer(
+                        const_cast<uint8_t*>(src.bytesVal.data()),
+                        static_cast<uint32_t>(src.bytesVal.size())));
+                ::apache::thrift::stdcxx::shared_ptr<::apache::thrift::protocol::TProtocol> proto(
+                    new ::apache::thrift::protocol::TBinaryProtocol(buf));
+                out.read(proto.get());
+                return true;
+            } catch (...) {
+                return false;
+            }
+        }
+        case jvm_embed::Vm::VTAG_OTHER:
+        default:
+            return false;
+    }
+}
+
+// Reverse direction: pull tag + value out of a Thrift Variant. Returns false
+// if the Variant uses a structural case the bridge can't reconstruct.
+bool thriftVariantToTagged(const ::general::Variant& v,
+                           int32_t& tag, bool& b, int64_t& l, double& d,
+                           std::string& s, std::vector<uint8_t>& by) {
+    if      (v.__isset.v_boolean)     { tag = jvm_embed::Vm::VTAG_BOOL;   b = v.v_boolean; }
+    else if (v.__isset.v_boolean_box) { tag = jvm_embed::Vm::VTAG_BOOL;   b = v.v_boolean_box; }
+    else if (v.__isset.v_byte)        { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_byte; }
+    else if (v.__isset.v_byte_box)    { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_byte_box; }
+    else if (v.__isset.v_short)       { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_short; }
+    else if (v.__isset.v_short_box)   { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_short_box; }
+    else if (v.__isset.v_int)         { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_int; }
+    else if (v.__isset.v_int_box)     { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_int_box; }
+    else if (v.__isset.v_long)        { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_long; }
+    else if (v.__isset.v_long_box)    { tag = jvm_embed::Vm::VTAG_LONG;   l = v.v_long_box; }
+    else if (v.__isset.v_float)       { tag = jvm_embed::Vm::VTAG_DOUBLE; d = v.v_float; }
+    else if (v.__isset.v_float_box)   { tag = jvm_embed::Vm::VTAG_DOUBLE; d = v.v_float_box; }
+    else if (v.__isset.v_double)      { tag = jvm_embed::Vm::VTAG_DOUBLE; d = v.v_double; }
+    else if (v.__isset.v_double_box)  { tag = jvm_embed::Vm::VTAG_DOUBLE; d = v.v_double_box; }
+    else if (v.__isset.v_string)      { tag = jvm_embed::Vm::VTAG_STRING; s = v.v_string; }
+    else if (v.__isset.v_big_decimal) { tag = jvm_embed::Vm::VTAG_STRING; s = v.v_big_decimal; }
+    else if (v.__isset.v_byte_array)  { tag = jvm_embed::Vm::VTAG_BYTES;  by.assign(v.v_byte_array.begin(), v.v_byte_array.end()); }
+    else if (v.__isset.v_null)        { tag = jvm_embed::Vm::VTAG_NULL; }
+    else if (v.__isset.v_void)        { tag = jvm_embed::Vm::VTAG_VOID; }
+    else if (v.__isset.v_amount)      {
+        tag = jvm_embed::Vm::VTAG_AMOUNT;
+        l = v.v_amount.integral;
+        int64_t frac = v.v_amount.fraction;
+        by.resize(8);
+        for (int i = 7; i >= 0; --i) { by[i] = static_cast<uint8_t>(frac & 0xFF); frac >>= 8; }
+    }
+    else {
+        // Recursive / structural cases (V_LIST/V_MAP/V_SET/V_ARRAY/V_OBJECT).
+        // Serialize the whole Variant via Thrift binary and ship as bytes;
+        // bridge deserializes back into a real Variant on the other side.
+        try {
+            auto buf = ::apache::thrift::stdcxx::shared_ptr<::apache::thrift::transport::TMemoryBuffer>(
+                new ::apache::thrift::transport::TMemoryBuffer());
+            ::apache::thrift::stdcxx::shared_ptr<::apache::thrift::protocol::TProtocol> proto(
+                new ::apache::thrift::protocol::TBinaryProtocol(buf));
+            const_cast<::general::Variant&>(v).write(proto.get());
+            uint8_t* ptr = nullptr; uint32_t sz = 0;
+            buf->getBuffer(&ptr, &sz);
+            tag = jvm_embed::Vm::VTAG_THRIFT_BINARY;
+            by.assign(ptr, ptr + sz);
+        } catch (...) {
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
+#endif
+
 void cs::ExecutorSettings::set(cs::Reference<const BlockChain> blockchain, cs::Reference<const cs::SolverCore> solver) {
     blockchain_ = blockchain;
     solver_ = solver;
@@ -54,6 +161,86 @@ void cs::Executor::executeByteCode(executor::ExecuteByteCodeResult& resp, const 
 void cs::Executor::executeByteCodeMultiple(executor::ExecuteByteCodeMultipleResult& _return, const general::Address& initiatorAddress,
                                            const executor::SmartContractBinary& invokedContract, const std::string& method,
                                            const std::vector<std::vector<general::Variant>>& params, const int64_t executionTime, cs::Sequence sequence) {
+    const auto accessId = generateAccessId(sequence);
+
+#ifdef USE_EMBEDDED_JVM
+    if (embeddedVm_) {
+        // Flatten the param matrix and verify every Variant uses a known case.
+        std::vector<int32_t> groupSizes;
+        groupSizes.reserve(params.size());
+        jvm_embed::Vm::VariantInputs flat;
+        bool variantsOk = true;
+        for (const auto& callParams : params) {
+            groupSizes.push_back(static_cast<int32_t>(callParams.size()));
+            for (const auto& v : callParams) {
+                int32_t tag = jvm_embed::Vm::VTAG_NULL;
+                bool b = false; int64_t l = 0; double d = 0.0;
+                std::string s; std::vector<uint8_t> by;
+                if (!thriftVariantToTagged(v, tag, b, l, d, s, by)) { variantsOk = false; break; }
+                flat.tags.push_back(tag);
+                flat.bools.push_back(b);
+                flat.longs.push_back(l);
+                flat.doubles.push_back(d);
+                flat.strings.push_back(std::move(s));
+                flat.bytes.push_back(std::move(by));
+            }
+            if (!variantsOk) break;
+        }
+        if (variantsOk) {
+            std::vector<std::string> classNames;
+            std::vector<std::vector<uint8_t>> byteCodes;
+            for (const auto& bo : invokedContract.object.byteCodeObjects) {
+                classNames.push_back(bo.name);
+                byteCodes.emplace_back(bo.byteCode.begin(), bo.byteCode.end());
+            }
+            std::vector<uint8_t> initiator(initiatorAddress.begin(), initiatorAddress.end());
+            std::vector<uint8_t> ctrAddr(invokedContract.contractAddress.begin(),
+                                        invokedContract.contractAddress.end());
+            std::vector<uint8_t> instance(invokedContract.object.instance.begin(),
+                                          invokedContract.object.instance.end());
+
+            ++execCount_;
+            auto r = embeddedVm_->callExecuteByteCodeMultipleFull(
+                static_cast<int64_t>(accessId),
+                initiator, ctrAddr,
+                classNames, byteCodes,
+                instance, invokedContract.stateCanModify,
+                method,
+                groupSizes, flat,
+                static_cast<int64_t>(executionTime),
+                EXECUTOR_VERSION);
+
+            if (r) {
+                bool allRetValsKnown = true;
+                _return.results.clear();
+                _return.results.reserve(r->results.size());
+                for (const auto& sr : r->results) {
+                    executor::GetterMethodResult gmr;
+                    gmr.status.code    = sr.code;
+                    gmr.status.message = sr.message;
+                    if (!taggedToThriftVariant(sr.retVal, gmr.ret_val)) { allRetValsKnown = false; break; }
+                    gmr.__isset.status  = true;
+                    gmr.__isset.ret_val = true;
+                    _return.results.push_back(std::move(gmr));
+                }
+                if (allRetValsKnown) {
+                    _return.status.code    = r->code;
+                    _return.status.message = r->message;
+                    _return.__isset.status  = true;
+                    _return.__isset.results = !_return.results.empty();
+                    --execCount_;
+                    return;
+                }
+                csinfo() << "Executor: embedded executeByteCodeMultiple had structural Variant ret_val — falling back to Thrift";
+            } else {
+                cswarning() << "Executor: embedded executeByteCodeMultiple failed: "
+                            << embeddedVm_->lastError() << " — falling back to Thrift";
+            }
+            --execCount_;
+        }
+    }
+#endif
+
     if (!isConnected()) {
         _return.status.code = 1;
         _return.status.message = "No executor connection!";
@@ -62,7 +249,6 @@ void cs::Executor::executeByteCodeMultiple(executor::ExecuteByteCodeMultipleResu
         return;
     }
 
-    const auto accessId = generateAccessId(sequence);
     ++execCount_;
 
     try {
@@ -92,6 +278,67 @@ void cs::Executor::executeByteCodeMultiple(executor::ExecuteByteCodeMultipleResu
 }
 
 void cs::Executor::getContractMethods(executor::GetContractMethodsResult& _return, const std::vector<general::ByteCodeObject>& byteCodeObjects) {
+#ifdef USE_EMBEDDED_JVM
+    if (embeddedVm_) {
+        std::vector<std::string> names;
+        std::vector<std::vector<uint8_t>> bytes;
+        names.reserve(byteCodeObjects.size());
+        bytes.reserve(byteCodeObjects.size());
+        for (const auto& obj : byteCodeObjects) {
+            names.push_back(obj.name);
+            bytes.emplace_back(obj.byteCode.begin(), obj.byteCode.end());
+        }
+        auto r = embeddedVm_->callGetContractMethods(names, bytes, EXECUTOR_VERSION);
+        if (r) {
+            // The executor returns code=1 for legacy contracts that reference
+            // unpackaged base classes (e.g. top-level "SmartContract") which
+            // don't exist anywhere on the classpath. The legacy executor
+            // process fails identically; it just logged the error to its own
+            // file. Surface as the same Thrift response shape and don't
+            // log-spam at warning level.
+            _return.status.code    = r->code;
+            _return.status.message = r->message;
+            _return.methods.clear();
+            _return.methods.reserve(r->methods.size());
+            for (const auto& mi : r->methods) {
+                general::MethodDescription md;
+                md.name       = mi.name;
+                md.returnType = mi.returnType;
+                md.arguments.reserve(mi.arguments.size());
+                for (const auto& mai : mi.arguments) {
+                    general::MethodArgument tma;
+                    tma.type = mai.type;
+                    tma.name = mai.name;
+                    tma.annotations.reserve(mai.annotations.size());
+                    for (const auto& ai : mai.annotations) {
+                        general::Annotation ta;
+                        ta.name = ai.name;
+                        for (const auto& kv : ai.arguments) ta.arguments[kv.first] = kv.second;
+                        ta.__isset.arguments = !ta.arguments.empty();
+                        tma.annotations.push_back(std::move(ta));
+                    }
+                    tma.__isset.annotations = !tma.annotations.empty();
+                    md.arguments.push_back(std::move(tma));
+                }
+                md.annotations.reserve(mi.annotations.size());
+                for (const auto& ai : mi.annotations) {
+                    general::Annotation ta;
+                    ta.name = ai.name;
+                    for (const auto& kv : ai.arguments) ta.arguments[kv.first] = kv.second;
+                    ta.__isset.arguments = !ta.arguments.empty();
+                    md.annotations.push_back(std::move(ta));
+                }
+                md.__isset.arguments   = !md.arguments.empty();
+                md.__isset.annotations = !md.annotations.empty();
+                _return.methods.push_back(std::move(md));
+            }
+            _return.__isset.methods = !_return.methods.empty();
+            return;
+        }
+        cswarning() << "Executor: embedded getContractMethods failed: "
+                    << embeddedVm_->lastError() << " — falling back to Thrift";
+    }
+#endif
     try {
         std::shared_lock lock(sharedErrorMutex_);
         origExecutor_->getContractMethods(_return, byteCodeObjects, EXECUTOR_VERSION);
@@ -116,6 +363,44 @@ void cs::Executor::getContractMethods(executor::GetContractMethodsResult& _retur
 }
 
 void cs::Executor::getContractVariables(executor::GetContractVariablesResult& _return, const std::vector<general::ByteCodeObject>& byteCodeObjects, const std::string& contractState) {
+#ifdef USE_EMBEDDED_JVM
+    if (embeddedVm_) {
+        std::vector<std::string> names;
+        std::vector<std::vector<uint8_t>> bytes;
+        names.reserve(byteCodeObjects.size());
+        bytes.reserve(byteCodeObjects.size());
+        for (const auto& obj : byteCodeObjects) {
+            names.push_back(obj.name);
+            bytes.emplace_back(obj.byteCode.begin(), obj.byteCode.end());
+        }
+        std::vector<uint8_t> state(contractState.begin(), contractState.end());
+
+        auto r = embeddedVm_->callGetContractVariables(names, bytes, state, EXECUTOR_VERSION);
+        if (r) {
+            // Convert each TaggedVariant back to Thrift Variant. Fall back
+            // to Thrift if any variable is structural (VTAG_OTHER) — losing
+            // a Map/List/Object value would silently misreport state.
+            bool allKnown = true;
+            std::map<std::string, ::general::Variant> rebuilt;
+            for (const auto& kv : r->variables) {
+                ::general::Variant tv;
+                if (!taggedToThriftVariant(kv.second, tv)) { allKnown = false; break; }
+                rebuilt[kv.first] = std::move(tv);
+            }
+            if (allKnown) {
+                _return.status.code    = r->code;
+                _return.status.message = r->message;
+                _return.contractVariables = std::move(rebuilt);
+                _return.__isset.contractVariables = !_return.contractVariables.empty();
+                return;
+            }
+            csinfo() << "Executor: embedded getContractVariables had structural Variant — falling back to Thrift";
+        } else {
+            cswarning() << "Executor: embedded getContractVariables failed: "
+                        << embeddedVm_->lastError() << " — falling back to Thrift";
+        }
+    }
+#endif
     try {
         std::shared_lock lock(sharedErrorMutex_);
         origExecutor_->getContractVariables(_return, byteCodeObjects, contractState, EXECUTOR_VERSION);
@@ -140,6 +425,27 @@ void cs::Executor::getContractVariables(executor::GetContractVariablesResult& _r
 }
 
 void cs::Executor::compileSourceCode(executor::CompileSourceCodeResult& _return, const std::string& sourceCode) {
+#ifdef USE_EMBEDDED_JVM
+    if (embeddedVm_) {
+        auto r = embeddedVm_->callCompileSourceCode(sourceCode, EXECUTOR_VERSION);
+        if (r) {
+            _return.status.code    = r->code;
+            _return.status.message = r->message;
+            _return.byteCodeObjects.clear();
+            _return.byteCodeObjects.reserve(r->classes.size());
+            for (const auto& cls : r->classes) {
+                general::ByteCodeObject bo;
+                bo.name = cls.name;
+                bo.byteCode.assign(reinterpret_cast<const char*>(cls.byteCode.data()),
+                                   cls.byteCode.size());
+                _return.byteCodeObjects.push_back(std::move(bo));
+            }
+            return;
+        }
+        cswarning() << "Executor: embedded compileSourceCode failed: "
+                    << embeddedVm_->lastError() << " — falling back to Thrift";
+    }
+#endif
     try {
         std::shared_lock slk(sharedErrorMutex_);
         origExecutor_->compileSourceCode(_return, sourceCode, EXECUTOR_VERSION);
@@ -164,6 +470,23 @@ void cs::Executor::compileSourceCode(executor::CompileSourceCodeResult& _return,
 }
 
 void cs::Executor::getExecutorBuildVersion(executor::ExecutorBuildVersionResult& _return) {
+#ifdef USE_EMBEDDED_JVM
+    if (embeddedVm_) {
+        // Phase 4 cutover: dispatch to the in-process JVM via the bridge.
+        // Mirrors the same EmbeddedExecutorBridge call the spike uses.
+        auto r = embeddedVm_->callGetExecutorBuildVersion(EXECUTOR_VERSION, "EmbeddedExecutorBridge");
+        if (r) {
+            _return.status.code     = r->code;
+            _return.status.message  = r->message;
+            _return.commitNumber    = r->commitNumber;
+            _return.commitHash      = r->commitHash;
+            return;
+        }
+        // JVM dispatch failed somehow — log and fall through to Thrift below.
+        cswarning() << "Executor: embedded getExecutorBuildVersion failed: "
+                    << embeddedVm_->lastError() << " — falling back to Thrift";
+    }
+#endif
     try {
         std::shared_lock slk(sharedErrorMutex_);
         origExecutor_->getExecutorBuildVersion(_return, EXECUTOR_VERSION);
@@ -198,6 +521,19 @@ bool cs::Executor::isConnected() const {
 
 void cs::Executor::stop() {
     requestStop_ = true;
+
+#ifdef USE_EMBEDDED_JVM
+    // Release the embedded VM early so any dispatcher entering after this
+    // point sees it as null and falls through to Thrift (which may itself
+    // be torn down — but that's just a logged warning, not a crash). The
+    // Vm destructor doesn't call DestroyJavaVM (HotSpot doesn't allow VM
+    // recreation in-process anyway); libjvm stays loaded for the rest of
+    // the process lifetime, but our wrapper is gone before main() returns.
+    if (embeddedVm_) {
+        cslog() << "Executor: releasing embedded JVM wrapper";
+        embeddedVm_.reset();
+    }
+#endif
 
     while (isWatcherRunning_.load(std::memory_order_acquire)) {
         notifyError(); // wake up watching thread if it sleeps
@@ -802,6 +1138,91 @@ cs::Executor::Executor(const cs::ExecutorSettings::Types& types)
     commitMin_ = cs::ConfigHolder::instance().config()->getApiSettings().executorCommitMin;
     commitMax_ = cs::ConfigHolder::instance().config()->getApiSettings().executorCommitMax;
 
+#ifdef USE_EMBEDDED_JVM
+    // Phase 4 cutover: spin up the in-process JVM if the config asks for it.
+    // On any failure we leave embeddedVm_ null and fall back to the Thrift
+    // path — non-fatal so an operator with a misconfigured embedded mode
+    // still gets a working node via the legacy executor process.
+    {
+        const auto& api = cs::ConfigHolder::instance().config()->getApiSettings();
+        if (api.useEmbeddedJvm) {
+            // Resolve the JDK path explicitly so the operator can see exactly
+            // which JVM is being loaded. Fall back to JAVA_HOME env var with a
+            // warning — this is a footgun (e.g. Android Studio's bundled JBR
+            // is JDK 17 but our contract-executor.jar is built for JDK 11,
+            // and the version mismatch crashes inside jimage.dll on startup).
+            std::string resolvedJavaHome = api.embeddedJvmJavaHome;
+            const char* envJavaHome = std::getenv("JAVA_HOME");
+            if (resolvedJavaHome.empty()) {
+                if (envJavaHome && *envJavaHome) {
+                    resolvedJavaHome = envJavaHome;
+                    cswarning() << "Executor: embedded_jvm_java_home not set; "
+                                << "using JAVA_HOME='" << resolvedJavaHome
+                                << "' — explicit setting in config.ini is recommended.";
+                } else {
+                    cserror() << "Executor: cannot start embedded JVM: neither "
+                              << "embedded_jvm_java_home (config) nor JAVA_HOME (env) is set";
+                }
+            }
+            cslog() << "Executor: starting embedded JVM"
+                    << " (java_home=" << (resolvedJavaHome.empty() ? "<unset>" : resolvedJavaHome)
+                    << ", executor_jar=" << api.embeddedJvmExecutorJar << ")";
+
+            auto vm = std::make_unique<jvm_embed::Vm>();
+            jvm_embed::InitOptions opts;
+            opts.javaHomeOverride = resolvedJavaHome;
+            // Bridge classes are staged next to node.exe at build time.
+            opts.classpath.emplace_back("./jvm_bridge");
+            if (!api.embeddedJvmExecutorJar.empty())
+                opts.classpath.push_back(api.embeddedJvmExecutorJar);
+            if (!api.embeddedJvmInstallDir.empty())
+                opts.classpath.push_back(api.embeddedJvmInstallDir);
+            if (!api.embeddedJvmScapiJar.empty())
+                opts.classpath.push_back(api.embeddedJvmScapiJar);
+            // -Xrs tells the JVM not to install its own SIGINT/SIGTERM handlers.
+            // Without this, the JVM's handler races the C runtime's on Ctrl-C
+            // and the process crashes during teardown. The host (node.exe) keeps
+            // ownership of console signals.
+            opts.jvmOptions.emplace_back("-Xrs");
+            for (const auto& opt : api.embeddedJvmOptions) {
+                opts.jvmOptions.push_back(opt);
+            }
+            if (vm->start(opts)) {
+                cslog() << "Executor: embedded JVM started successfully";
+
+                // Run the Variant marshalling self-test. This catches missing
+                // flattenVariant cases, stale tag-clamps, and per-case
+                // marshalling bugs at startup — before they show up as a
+                // flood of fallback warnings on the live chain.
+                auto report = vm->runVariantSelfTest();
+                if (!report) {
+                    cswarning() << "Executor: Variant self-test could not run: "
+                                << vm->lastError() << " — disabling embedded path";
+                } else if (!report->allOk()) {
+                    cswarning() << "Executor: Variant self-test FAILED ("
+                                << report->fails << " of " << report->cases.size()
+                                << " cases) — disabling embedded path:";
+                    for (const auto& c : report->cases) {
+                        if (!c.ok) {
+                            cswarning() << "  case '" << c.name
+                                        << "' expected tag=" << c.expectedTag
+                                        << " but got tag=" << c.actualTag;
+                        }
+                    }
+                } else {
+                    cslog() << "Executor: Variant self-test passed ("
+                            << report->passes << " of " << report->cases.size()
+                            << " cases)";
+                    embeddedVm_ = std::move(vm);
+                }
+            } else {
+                cswarning() << "Executor: embedded JVM start failed: " << vm->lastError()
+                            << " — falling back to Thrift executor process";
+            }
+        }
+    }
+#endif
+
     if (cs::ConfigHolder::instance().config()->getApiSettings().executorCmdLine.empty()) {
         cswarning() << "Executor command line args are empty, process would not be created";
         return;
@@ -933,6 +1354,161 @@ std::optional<cs::Executor::OriginExecuteResult> cs::Executor::execute(const std
     ++execCount_;
 
     const auto timeBeg = std::chrono::steady_clock::now();
+
+#ifdef USE_EMBEDDED_JVM
+    // Dispatch through the embedded JVM when:
+    //   1. Embedded VM is up.
+    //   2. Every parameter Variant uses a case the bridge recognises.
+    //      Unknown-case fall-back protects against silently dropping a value.
+    // Multi-method headers are now supported (one MethodHeader per entry).
+    bool embeddedHandled = false;
+    if (embeddedVm_ && !methodHeader.empty()) {
+        std::vector<std::string> methodNames;
+        std::vector<int32_t>     paramGroupSizes;
+        methodNames.reserve(methodHeader.size());
+        paramGroupSizes.reserve(methodHeader.size());
+
+        jvm_embed::Vm::VariantInputs vparams;
+        bool variantsOk = true;
+        for (const auto& header : methodHeader) {
+            methodNames.push_back(header.methodName);
+            paramGroupSizes.push_back(static_cast<int32_t>(header.params.size()));
+            for (const auto& v : header.params) {
+                int32_t tag = jvm_embed::Vm::VTAG_NULL;
+                bool b = false; int64_t l = 0; double d = 0.0;
+                std::string s; std::vector<uint8_t> by;
+                if (!thriftVariantToTagged(v, tag, b, l, d, s, by)) { variantsOk = false; break; }
+                vparams.tags.push_back(tag);
+                vparams.bools.push_back(b);
+                vparams.longs.push_back(l);
+                vparams.doubles.push_back(d);
+                vparams.strings.push_back(std::move(s));
+                vparams.bytes.push_back(std::move(by));
+            }
+            if (!variantsOk) break;
+        }
+        if (variantsOk) {
+            // Flatten SmartContractBinary's class list to plain parallel arrays.
+            std::vector<std::string> classNames;
+            std::vector<std::vector<uint8_t>> byteCodes;
+            classNames.reserve(smartContractBinary.object.byteCodeObjects.size());
+            byteCodes.reserve(smartContractBinary.object.byteCodeObjects.size());
+            for (const auto& bo : smartContractBinary.object.byteCodeObjects) {
+                classNames.push_back(bo.name);
+                byteCodes.emplace_back(bo.byteCode.begin(), bo.byteCode.end());
+            }
+            std::vector<uint8_t> initiator(address.begin(), address.end());
+            std::vector<uint8_t> ctrAddr(smartContractBinary.contractAddress.begin(),
+                                        smartContractBinary.contractAddress.end());
+            std::vector<uint8_t> instance(smartContractBinary.object.instance.begin(),
+                                          smartContractBinary.object.instance.end());
+
+            auto r = embeddedVm_->callExecuteByteCodeFull(
+                static_cast<int64_t>(accessId),
+                initiator, ctrAddr,
+                classNames, byteCodes,
+                instance, smartContractBinary.stateCanModify,
+                methodNames, paramGroupSizes, vparams,
+                static_cast<int64_t>(EXECUTION_TIME),
+                EXECUTOR_VERSION);
+
+            if (r) {
+                // Populate Thrift result with full fidelity.
+                auto& resp = originExecuteRes.resp;
+                resp.status.code    = r->code;
+                resp.status.message = r->message;
+                resp.results.clear();
+                resp.results.reserve(r->results.size());
+                for (const auto& sr : r->results) {
+                    executor::SetterMethodResult tsr;
+                    tsr.status.code    = sr.code;
+                    tsr.status.message = sr.message;
+                    tsr.executionCost  = sr.executionCost;
+
+                    // ret_val: tagged variant -> Thrift Variant.
+                    switch (sr.retVal.tag) {
+                        case jvm_embed::Vm::VTAG_BOOL:    tsr.ret_val.__set_v_boolean(sr.retVal.boolVal); break;
+                        case jvm_embed::Vm::VTAG_LONG:    tsr.ret_val.__set_v_long(sr.retVal.longVal); break;
+                        case jvm_embed::Vm::VTAG_DOUBLE:  tsr.ret_val.__set_v_double(sr.retVal.doubleVal); break;
+                        case jvm_embed::Vm::VTAG_STRING:  tsr.ret_val.__set_v_string(sr.retVal.stringVal); break;
+                        case jvm_embed::Vm::VTAG_BYTES:   tsr.ret_val.__set_v_byte_array(std::string(sr.retVal.bytesVal.begin(), sr.retVal.bytesVal.end())); break;
+                        case jvm_embed::Vm::VTAG_VOID:    tsr.ret_val.__set_v_void(0); break;
+                        case jvm_embed::Vm::VTAG_NULL:    tsr.ret_val.__set_v_null(""); break;
+                        case jvm_embed::Vm::VTAG_AMOUNT: {
+                            general::Amount amt;
+                            amt.integral = static_cast<int32_t>(sr.retVal.longVal);
+                            int64_t frac = 0;
+                            if (sr.retVal.bytesVal.size() == 8) {
+                                for (size_t i = 0; i < 8; ++i) frac = (frac << 8) | int64_t(sr.retVal.bytesVal[i]);
+                            }
+                            amt.fraction = frac;
+                            tsr.ret_val.__set_v_amount(amt);
+                            break;
+                        }
+                        case jvm_embed::Vm::VTAG_OTHER:
+                        default:
+                            // V_LIST/V_MAP/V_OBJECT/V_AMOUNT/V_ARRAY — bridge can't
+                            // reconstruct these recursive cases. Fall back to Thrift
+                            // so the chain doesn't see a wrong ret_val. Logged at
+                            // info level (not warning) since some methods legitimately
+                            // return these and this is expected behaviour.
+                            embeddedHandled = false;
+                            csinfo() << "Executor: embedded execute returned VTAG_OTHER ret_val "
+                                     << "(repr=\"" << sr.retVal.repr.substr(0, 60)
+                                     << "\") — falling back to Thrift to preserve fidelity";
+                            goto fallback_to_thrift;
+                    }
+
+                    // contractsState: vector of (address, state) -> map.
+                    for (const auto& se : sr.contractsState) {
+                        std::string addrStr(se.address.begin(), se.address.end());
+                        std::string stateStr(se.state.begin(),   se.state.end());
+                        tsr.contractsState[addrStr] = std::move(stateStr);
+                    }
+                    tsr.__isset.contractsState = !tsr.contractsState.empty();
+
+                    // emittedTransactions.
+                    tsr.emittedTransactions.reserve(sr.emittedTransactions.size());
+                    for (const auto& et : sr.emittedTransactions) {
+                        executor::EmittedTransaction tet;
+                        tet.source   = std::string(et.source.begin(), et.source.end());
+                        tet.target   = std::string(et.target.begin(), et.target.end());
+                        tet.amount.integral = et.amountIntegral;
+                        tet.amount.fraction = et.amountFraction;
+                        tet.userData = std::string(et.userData.begin(), et.userData.end());
+                        tet.__isset.amount = true;
+                        tet.__isset.userData = !tet.userData.empty();
+                        tsr.emittedTransactions.push_back(std::move(tet));
+                    }
+                    tsr.__isset.emittedTransactions = !tsr.emittedTransactions.empty();
+
+                    tsr.__isset.status = true;
+                    tsr.__isset.ret_val = true;
+                    tsr.__isset.executionCost = true;
+                    resp.results.push_back(std::move(tsr));
+                }
+                resp.__isset.status = true;
+                resp.__isset.results = !resp.results.empty();
+                embeddedHandled = true;
+            } else {
+                cswarning() << "Executor: embedded executeByteCode failed: "
+                            << embeddedVm_->lastError() << " — falling back to Thrift";
+            }
+        }
+    }
+fallback_to_thrift:
+    if (embeddedHandled) {
+        // Embedded path succeeded. Skip the Thrift call. Mirror the same
+        // bookkeeping the Thrift path does at function tail.
+        originExecuteRes.timeExecute = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timeBeg).count();
+        --execCount_;
+        if (!isGetter) {
+            deleteAccessId(static_cast<general::AccessID>(accessId));
+        }
+        originExecuteRes.acceessId = static_cast<general::AccessID>(accessId);
+        return std::make_optional(std::move(originExecuteRes));
+    }
+#endif
 
     try {
         std::shared_lock sharedLock(sharedErrorMutex_);

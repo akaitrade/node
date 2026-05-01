@@ -40,6 +40,15 @@ add_library(csconnector
 
 target_link_libraries (csconnector PUBLIC csdb csnode lib csconnector_gen csconnector_executor_gen variant_gen)
 
+# Phase 4 cutover: when enabled, link the in-process JVM library and define
+# USE_EMBEDDED_JVM so cs::Executor's compile-time gate compiles in the JNI
+# dispatch path. The runtime config flag use_embedded_jvm decides per-process
+# whether the path is taken.
+if(USE_EMBEDDED_JVM_NODE)
+    target_link_libraries(csconnector PRIVATE jvm_embed)
+    target_compile_definitions(csconnector PRIVATE USE_EMBEDDED_JVM=1)
+endif()
+
 # INCLUDE DIRECTORIES it's better not to set globally but for each project.
 # INCLUDE DIRECTORIES consists of include libraries (in this case thrift and csdb)
 # and should not be set. Those are included into INTERFACE libs and will be included automatically

@@ -8,6 +8,13 @@ project(jvm_embed_spike LANGUAGES CXX)
 find_package(JNI REQUIRED)
 message(STATUS "JNI include dirs: ${JNI_INCLUDE_DIRS}")
 
+# Two ways this directory gets pulled in:
+#  1. BUILD_JVM_EMBED_SPIKE alone -> standalone validation tool.
+#  2. USE_EMBEDDED_JVM_NODE       -> production node links jvm_embed library
+#     and needs EmbeddedExecutorBridge.class staged alongside node.exe at
+#     runtime so cs::Executor can invoke methods on it via JNI.
+# Either way the build is the same — both spike binary and library.
+
 add_library(jvm_embed STATIC
     src/jvm_embed.cpp
     include/jvm_embed/jvm_embed.hpp
@@ -55,6 +62,10 @@ set(JVM_EMBED_EXECUTOR_JAR "C:/csnode_Default/contract-executor.jar"
 # resource by ApplicationProperties).
 set(JVM_EMBED_EXECUTOR_INSTALL_DIR "C:/csnode_Default"
     CACHE PATH "Directory containing settings.properties for the executor")
+# sc-api-support.jar — needed so the executor's compile path can resolve
+# com.credits.scapi.* classes when compiling a user contract.
+set(JVM_EMBED_SCAPI_JAR "C:/csnode_Default/sc-api-support.jar"
+    CACHE FILEPATH "Path to sc-api-support.jar")
 set(_bridge_compiled FALSE)
 if(EXISTS "${JVM_EMBED_EXECUTOR_JAR}")
     list(APPEND _java_sources "${_bridge_src}")
@@ -96,6 +107,10 @@ if(_bridge_compiled)
         JVM_EMBED_EXECUTOR_JAR="${JVM_EMBED_EXECUTOR_JAR}"
         JVM_EMBED_EXECUTOR_INSTALL_DIR="${JVM_EMBED_EXECUTOR_INSTALL_DIR}"
         JVM_EMBED_BRIDGE_AVAILABLE=1)
+    if(EXISTS "${JVM_EMBED_SCAPI_JAR}")
+        target_compile_definitions(jvm_embed_spike PRIVATE
+            JVM_EMBED_SCAPI_JAR="${JVM_EMBED_SCAPI_JAR}")
+    endif()
 endif()
 
 # Stage the compiled .class next to the binary so running with no args works.

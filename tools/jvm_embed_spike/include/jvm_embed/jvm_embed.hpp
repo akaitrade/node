@@ -118,6 +118,221 @@ public:
     callGetExecutorBuildVersion(int16_t version,
                                 const std::string& className = "StubExecutor");
 
+    // ----- compileSourceCode wrapper -----------------------------------
+    // Mirrors the Thrift CompileSourceCodeResult flattened into a struct
+    // with parallel arrays (one entry per output class). Targets
+    // EmbeddedExecutorBridge.compileSourceCode in Java.
+    struct CompiledClass {
+        std::string          name;
+        std::vector<uint8_t> byteCode;
+    };
+    struct CompileSourceCodeResult {
+        int8_t                     code = 0;
+        std::string                message;
+        std::vector<CompiledClass> classes;
+    };
+
+    std::optional<CompileSourceCodeResult>
+    callCompileSourceCode(const std::string& source, int16_t version);
+
+    // ----- getContractMethods wrapper ----------------------------------
+    // Input: parallel arrays — one entry per class file (name + bytecode).
+    // Output: flattened method introspection results.
+    struct AnnotationInfo {
+        std::string name;
+        std::vector<std::pair<std::string, std::string>> arguments;
+    };
+    struct MethodArgumentInfo {
+        std::string                  type;
+        std::string                  name;
+        std::vector<AnnotationInfo>  annotations;
+    };
+    struct MethodInfo {
+        std::string                       name;
+        std::string                       returnType;
+        std::vector<MethodArgumentInfo>   arguments;
+        std::vector<AnnotationInfo>       annotations;
+    };
+    struct GetContractMethodsResult {
+        int8_t                  code = 0;
+        std::string             message;
+        std::vector<MethodInfo> methods;
+    };
+
+    std::optional<GetContractMethodsResult>
+    callGetContractMethods(const std::vector<std::string>&             classNames,
+                           const std::vector<std::vector<uint8_t>>&    byteCodes,
+                           int16_t                                     version);
+
+    // ----- Variant tagged-value (mirrors EmbeddedExecutorBridge.TaggedVariant)
+    // The Java side flattens Thrift's 25-case Variant union to one of six
+    // tagged shapes. Recursive cases (V_LIST, V_MAP, V_OBJECT etc.) come
+    // back as VTAG_OTHER with their toString() in `repr` — sufficient for
+    // most contracts; production users that need structured access to
+    // collection-shaped variants can extend the bridge later.
+    enum VariantTag : uint8_t {
+        VTAG_NULL          = 0,
+        VTAG_BOOL          = 1,
+        VTAG_LONG          = 2,
+        VTAG_DOUBLE        = 3,
+        VTAG_STRING        = 4,
+        VTAG_BYTES         = 5,
+        VTAG_OTHER         = 6,
+        VTAG_VOID          = 7,
+        VTAG_AMOUNT        = 8,
+        VTAG_THRIFT_BINARY = 9,   // recursive Variant cases via TBinaryProtocol blob
+    };
+    struct Variant {
+        VariantTag           tag = VTAG_NULL;
+        bool                 boolVal   = false;
+        int64_t              longVal   = 0;
+        double               doubleVal = 0.0;
+        std::string          stringVal;
+        std::vector<uint8_t> bytesVal;
+        std::string          repr;
+    };
+
+    // ----- getContractVariables wrapper --------------------------------
+    struct GetContractVariablesResult {
+        int8_t                              code = 0;
+        std::string                         message;
+        std::vector<std::pair<std::string, Variant>> variables;
+    };
+
+    std::optional<GetContractVariablesResult>
+    callGetContractVariables(const std::vector<std::string>&          classNames,
+                             const std::vector<std::vector<uint8_t>>& byteCodes,
+                             const std::vector<uint8_t>&              state,
+                             int16_t                                  version);
+
+    // Synthetic round-trip of Variants of every tag. Used to validate the
+    // unwrapping pipeline without requiring real contract state.
+    std::optional<std::vector<Variant>> callMakeVariantSamples();
+
+    // Variant marshalling self-test. Constructs every Thrift Variant case
+    // on the Java side, flattens it, and reports the actual tag against
+    // the expected tag. Run at startup to catch bugs (missing flatten case,
+    // stale tag clamp, marshalling errors) before they reach a live chain.
+    struct VariantSelfTestCase {
+        std::string name;
+        int32_t     expectedTag = 0;
+        int32_t     actualTag   = 0;
+        bool        ok          = false;
+    };
+    struct VariantSelfTestReport {
+        std::vector<VariantSelfTestCase> cases;
+        size_t passes  = 0;
+        size_t fails   = 0;
+        bool   allOk() const noexcept { return fails == 0 && !cases.empty(); }
+    };
+    std::optional<VariantSelfTestReport> runVariantSelfTest();
+
+    // ----- executeByteCode wrapper -------------------------------------
+    // Runs a single method on a freshly-deployed contract (or one with the
+    // given instance state). Returns the first method's status, return
+    // Variant, execution cost, and new contract state.
+    struct ExecuteResult {
+        int8_t               code           = 0;     // overall executor status
+        std::string          message;
+        int8_t               methodCode     = 0;     // first method's status
+        std::string          methodMessage;
+        Variant              retVal;
+        int64_t              executionCost  = 0;
+        std::vector<uint8_t> newState;
+    };
+
+    std::optional<ExecuteResult>
+    callExecuteByteCode(int64_t                                  accessId,
+                        const std::vector<uint8_t>&              initiatorAddress,
+                        const std::vector<uint8_t>&              contractAddress,
+                        const std::vector<std::string>&          classNames,
+                        const std::vector<std::vector<uint8_t>>& byteCodes,
+                        const std::vector<uint8_t>&              instance,
+                        bool                                     stateCanModify,
+                        const std::string&                       methodName,
+                        int64_t                                  executionTimeoutMs,
+                        int16_t                                  version);
+
+    // ----- Full-fidelity executeByteCode -------------------------------
+    // Returns the COMPLETE result: every SetterMethodResult, full
+    // contractsState map (one entry per affected contract), and emitted
+    // transaction list. cs::Executor uses this when wiring the Thrift
+    // executeByteCode path through the embedded JVM — chain integrity
+    // depends on no field being dropped.
+    struct FullStateEntry {
+        std::vector<uint8_t> address;
+        std::vector<uint8_t> state;
+    };
+    struct FullEmittedTxn {
+        std::vector<uint8_t> source;
+        std::vector<uint8_t> target;
+        int32_t              amountIntegral = 0;
+        int64_t              amountFraction = 0;
+        std::vector<uint8_t> userData;
+    };
+    struct FullSetterResult {
+        int8_t                       code = 0;
+        std::string                  message;
+        Variant                      retVal;
+        std::vector<FullStateEntry>  contractsState;
+        std::vector<FullEmittedTxn>  emittedTransactions;
+        int64_t                      executionCost = 0;
+    };
+    struct FullExecuteResult {
+        int8_t                          code = 0;
+        std::string                     message;
+        std::vector<FullSetterResult>   results;
+    };
+
+    // Parallel arrays describing a single MethodHeader's params, in the
+    // order they appear in the call. paramTags must have exactly one entry
+    // per parameter; the other arrays are read at the same index when the
+    // tag selects them. (Each call site fills one of bools/longs/doubles/
+    // strings/bytes per param; the unused arrays may be empty.)
+    struct VariantInputs {
+        std::vector<int32_t>              tags;
+        std::vector<bool>                 bools;
+        std::vector<int64_t>              longs;
+        std::vector<double>               doubles;
+        std::vector<std::string>          strings;
+        std::vector<std::vector<uint8_t>> bytes;
+    };
+
+    // Multi-method shape: methodNames.size() MethodHeaders, each with its
+    // own param sublist sliced from paramsFlat using paramGroupSizes.
+    // sum(paramGroupSizes) == paramsFlat.tags.size().
+    std::optional<FullExecuteResult>
+    callExecuteByteCodeFull(int64_t                                  accessId,
+                            const std::vector<uint8_t>&              initiatorAddress,
+                            const std::vector<uint8_t>&              contractAddress,
+                            const std::vector<std::string>&          classNames,
+                            const std::vector<std::vector<uint8_t>>& byteCodes,
+                            const std::vector<uint8_t>&              instance,
+                            bool                                     stateCanModify,
+                            const std::vector<std::string>&          methodNames,
+                            const std::vector<int32_t>&              paramGroupSizes,
+                            const VariantInputs&                     paramsFlat,
+                            int64_t                                  executionTimeoutMs,
+                            int16_t                                  version);
+
+    // Multi-call form: same method invoked N times with N param sets.
+    // paramGroupSizes[i] = number of params in call i;
+    // params (flat) is the concat of all calls' params, length =
+    // sum(paramGroupSizes).
+    std::optional<FullExecuteResult>
+    callExecuteByteCodeMultipleFull(int64_t                                  accessId,
+                                    const std::vector<uint8_t>&              initiatorAddress,
+                                    const std::vector<uint8_t>&              contractAddress,
+                                    const std::vector<std::string>&          classNames,
+                                    const std::vector<std::vector<uint8_t>>& byteCodes,
+                                    const std::vector<uint8_t>&              instance,
+                                    bool                                     stateCanModify,
+                                    const std::string&                       methodName,
+                                    const std::vector<int32_t>&              paramGroupSizes,
+                                    const VariantInputs&                     paramsFlat,
+                                    int64_t                                  executionTimeoutMs,
+                                    int16_t                                  version);
+
     // Most recent error message produced by start() or any call. Empty when no
     // error has occurred since the last successful operation.
     const std::string& lastError() const noexcept;

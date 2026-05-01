@@ -32,6 +32,10 @@
 
 #include "executormanager.hpp"
 
+#ifdef USE_EMBEDDED_JVM
+namespace jvm_embed { class Vm; }
+#endif
+
 class BlockChain;
 
 namespace cs {
@@ -270,6 +274,14 @@ private:
 
     cs::ExecutorManager manager_;
     ExecutorState state_;
+
+#ifdef USE_EMBEDDED_JVM
+    // Phase 4 cutover: when the runtime config flag use_embedded_jvm is on,
+    // this is non-null and the executor calls dispatch through it instead
+    // of the Thrift origExecutor_. Constructed lazily in the constructor;
+    // null on JVM init failure (in which case Thrift fallback is used).
+    std::unique_ptr<jvm_embed::Vm> embeddedVm_;
+#endif
 
     std::map<int, const char*> executorMessages_ = {
         { NoError, "Executor finished with no error code" },
