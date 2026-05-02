@@ -38,6 +38,7 @@ struct Args {
     bool bulk_load = true;   // RocksDB bulk-load mode + final compact
     bool cross_verify = false;  // walk src+dst in lockstep, compare per-block fields
     bool validate_only = false; // skip migration; just cross-verify existing src vs dst
+    bool use_stubs = true;      // write empty pools as compact stubs in dst
 };
 
 void print_usage() {
@@ -54,7 +55,8 @@ void print_usage() {
         "  --verify         Spot-check counts after migration\n"
         "  --no-bulk-load   Disable RocksDB bulk-load mode (default: enabled)\n"
         "  --cross-verify   After migration, walk src+dst in lockstep and compare hash/prev_hash/confidants/user_fields/tx-count per block\n"
-        "  --validate-only  Skip migration; just run --cross-verify against an existing dst (src and dst must both exist)\n";
+        "  --validate-only  Skip migration; just run --cross-verify against an existing dst (src and dst must both exist)\n"
+        "  --no-stubs       Write empty pools as full Pool::to_binary() instead of compact stubs (default: stubs enabled)\n";
 }
 
 bool parse_size(const char* s, size_t& out) {
@@ -81,6 +83,7 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (k == "--no-bulk-load") { a.bulk_load = false; }
         else if (k == "--cross-verify") { a.cross_verify = true; }
         else if (k == "--validate-only") { a.validate_only = true; a.cross_verify = true; }
+        else if (k == "--no-stubs") { a.use_stubs = false; }
         else if (k == "--help" || k == "-h") { print_usage(); return false; }
         else { std::cerr << "unknown argument: " << k << "\n"; print_usage(); return false; }
     }
@@ -315,6 +318,7 @@ int main(int argc, char** argv) {
     opt.startSequence = 0;
     opt.asyncWriteQueueMax = args.queue;
     opt.writeBatchSize = args.batch;
+    opt.useEmptyPoolStubs = args.use_stubs;
 
     csdb::Storage dst;
     if (!dst.open(opt)) {
@@ -331,6 +335,7 @@ int main(int argc, char** argv) {
               << "\n  queue: "    << args.queue
               << "\n  batch: "    << args.batch
               << "\n  progress: " << args.progress_every
+              << "\n  stubs: "    << (args.use_stubs ? "enabled" : "disabled (full pools)")
               << std::endl;
 
     csdb::Database& src_base = src_db;          // new_iterator is public on Database

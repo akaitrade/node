@@ -271,6 +271,7 @@ private:
     // Defaults overridable via Storage::open(...).
     size_t asyncWriteQueueMax_ = 5000;
     size_t writeBatchSize_ = 100;        // pools coalesced into one db->put_batch
+    bool useEmptyPoolStubs_ = true;      // gate compact empty-pool-stub writes
     std::deque<Pool> write_queue;
     std::mutex write_lock;
     std::condition_variable write_cond_var;     // queue non-empty
@@ -485,7 +486,7 @@ void Storage::priv::write_routine() {
             requests.push_back(Database::PendingWrite{
                 pool.hash().to_binary(),
                 static_cast<uint32_t>(pool.sequence()),
-                pool.transactions().empty() ? build_empty_pool_stub(pool) : pool.to_binary()
+                (useEmptyPoolStubs_ && pool.transactions().empty()) ? build_empty_pool_stub(pool) : pool.to_binary()
             });
         }
         db->put_batch(requests);
@@ -578,6 +579,7 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     if (opt.writeBatchSize > 0) {
         d->writeBatchSize_ = opt.writeBatchSize;
     }
+    d->useEmptyPoolStubs_ = opt.useEmptyPoolStubs;
 
     // Start async writer (idempotent: re-opens won't spawn a second thread).
     if (!d->write_thread.joinable()) {
@@ -659,7 +661,8 @@ bool Storage::open(
     cs::Sequence newBlockchainTop,
     cs::Sequence startReadFrom,
     size_t asyncWriteQueueMax,
-    size_t writeBatchSize
+    size_t writeBatchSize,
+    bool useEmptyPoolStubs
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
@@ -679,7 +682,9 @@ bool Storage::open(
     auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
 #endif
     db->open(path);
-    return open(OpenOptions{db, newBlockchainTop, startReadFrom}, callback);
+    OpenOptions opt{db, newBlockchainTop, startReadFrom};
+    opt.useEmptyPoolStubs = useEmptyPoolStubs;
+    return open(opt, callback);
 }
 
 void Storage::close() {

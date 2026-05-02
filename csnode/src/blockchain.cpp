@@ -163,7 +163,8 @@ bool BlockChain::init(
     const auto& storageCfg = cs::ConfigHolder::instance().config()->getStorageSettings();
 
     if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
-                       storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize)) {
+                       storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
+                       storageCfg.useStubs)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
     }

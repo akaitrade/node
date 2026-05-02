@@ -66,6 +66,7 @@ struct StorageData {
     size_t progressLogInterval = 1000;   // print "stored N blocks" every N applied during cache drain
     bool parallelContractExecution = false; // master switch for per-contract parallel execution
     size_t contractParallelWorkers = 4;     // cap on in-flight contract executions when enabled
+    bool useStubs = true;                   // write empty pools as compact stubs (read-side handles both)
 };
 
 struct ApiData {

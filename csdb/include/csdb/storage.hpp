@@ -102,6 +102,9 @@ public:
         // 0 = leave Storage defaults (5000 / 100) untouched.
         size_t asyncWriteQueueMax = 0;
         size_t writeBatchSize = 0;
+        // When true (default), empty pools are persisted via the compact
+        // empty-pool-stub format. Reads remain dual-format regardless.
+        bool useEmptyPoolStubs = true;
     };
 
     struct OpenProgress {
@@ -145,7 +148,8 @@ public:
               cs::Sequence newBlockchainTop = cs::kWrongSequence,
               cs::Sequence startReadFrom = 0,
               size_t asyncWriteQueueMax = 5000,
-              size_t writeBatchSize = 100);
+              size_t writeBatchSize = 100,
+              bool useEmptyPoolStubs = true);
 
     /**
      * @brief Creating the storage using the parameters set.
