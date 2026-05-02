@@ -26,5 +26,10 @@ target_link_libraries(csdb_migrate
   Boost::disable_autolinking
 )
 
+if(WIN32)
+  # BerkeleyDB on Windows references Winsock (replication manager); link it.
+  target_link_libraries(csdb_migrate ws2_32 iphlpapi)
+endif()
+
 set_property(TARGET csdb_migrate PROPERTY CXX_STANDARD 17)
 set_property(TARGET csdb_migrate PROPERTY CMAKE_CXX_STANDARD_REQUIRED ON)

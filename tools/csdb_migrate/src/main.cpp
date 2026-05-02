@@ -8,13 +8,17 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <boost/filesystem.hpp>
 
+#include <csdb/amount_commission.hpp>
 #include <csdb/database_berkeleydb.hpp>
 #include <csdb/database_rocksdb.hpp>
 #include <csdb/empty_pool_stub.hpp>
@@ -39,6 +43,8 @@ struct Args {
     bool cross_verify = false;  // walk src+dst in lockstep, compare per-block fields
     bool validate_only = false; // skip migration; just cross-verify existing src vs dst
     bool use_stubs = true;      // write empty pools as compact stubs in dst
+    bool verify_balances = false; // replay both DBs through simplified balance accounting
+    size_t mismatch_print_limit = 20; // first N mismatching wallets printed in detail
 };
 
 void print_usage() {
@@ -56,7 +62,8 @@ void print_usage() {
         "  --no-bulk-load   Disable RocksDB bulk-load mode (default: enabled)\n"
         "  --cross-verify   After migration, walk src+dst in lockstep and compare hash/prev_hash/confidants/user_fields/tx-count per block\n"
         "  --validate-only  Skip migration; just run --cross-verify against an existing dst (src and dst must both exist)\n"
-        "  --no-stubs       Write empty pools as full Pool::to_binary() instead of compact stubs (default: stubs enabled)\n";
+        "  --no-stubs       Write empty pools as full Pool::to_binary() instead of compact stubs (default: stubs enabled)\n"
+        "  --verify-balances Replay src and dst through simplified native-coin accounting and compare end-state wallet maps. Catches lossy on-disk format bugs that affect balances (e.g. dropped realTrusted_ in stubs). Skips smart-contract execution and delegation.\n";
 }
 
 bool parse_size(const char* s, size_t& out) {
@@ -84,6 +91,7 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (k == "--cross-verify") { a.cross_verify = true; }
         else if (k == "--validate-only") { a.validate_only = true; a.cross_verify = true; }
         else if (k == "--no-stubs") { a.use_stubs = false; }
+        else if (k == "--verify-balances") { a.verify_balances = true; }
         else if (k == "--help" || k == "-h") { print_usage(); return false; }
         else { std::cerr << "unknown argument: " << k << "\n"; print_usage(); return false; }
     }
@@ -189,6 +197,22 @@ bool validate_chain(csdb::Database& src, csdb::Database& dst, const Args& args) 
                       << "  dst.n=" << dst_pool.confidants().size() << "\n";
             return false;
         }
+        // numberTrusted_ and realTrusted_ feed bitsToMask() in reward
+        // distribution. v3 stubs lost both → block reward undercounting.
+        // v4 stubs preserve realTrusted; numberTrusted derives from confCount.
+        // Cross-verify catches any future format that silently drops them.
+        if (src_pool.numberTrusted() != dst_pool.numberTrusted()) {
+            std::cerr << "validate: numberTrusted mismatch at seq=" << src_seq
+                      << "  src=" << static_cast<int>(src_pool.numberTrusted())
+                      << "  dst=" << static_cast<int>(dst_pool.numberTrusted()) << "\n";
+            return false;
+        }
+        if (src_pool.realTrusted() != dst_pool.realTrusted()) {
+            std::cerr << "validate: realTrusted mismatch at seq=" << src_seq
+                      << "  src=" << src_pool.realTrusted()
+                      << "  dst=" << dst_pool.realTrusted() << "\n";
+            return false;
+        }
         if (src_pool.serialize_user_fields() != dst_pool.serialize_user_fields()) {
             std::cerr << "validate: user_fields mismatch at seq=" << src_seq << "\n";
             return false;
@@ -250,6 +274,255 @@ bool validate_chain(csdb::Database& src, csdb::Database& dst, const Args& args) 
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// --verify-balances: simplified native-coin balance reconstruction.
+//
+// What this catches: any difference between src and dst that affects native
+// coin balances. The realTrusted_-loss bug in v3 stubs is the canonical case:
+// dst's parsed Pool has realTrusted=0 → no fee/reward distribution → confidant
+// addresses end up with lower balances than on src.
+//
+// What this does NOT model: smart contract execution (new_state, emitted txns,
+// payable cost), delegation (sources/targets), inner-tx flows. The same
+// simplification applies to both src and dst, so identical input data yields
+// identical outputs — divergence is purely from on-disk format differences.
+//
+// Inspection cost: O(blocks) per side; ~5-15 min on a 173M-block chain.
+// ----------------------------------------------------------------------------
+
+constexpr csdb::user_field_id_t kFieldBlockReward = 3;   // mirrors BlockChain::kFieldBlockReward
+constexpr uint8_t kUntrustedMarker = 255;                // mirrors cs::kUntrustedMarker
+
+struct WalletState {
+    csdb::Amount balance{0};
+    uint64_t txCount = 0;
+};
+
+using WalletMap = std::map<cs::PublicKey, WalletState>;
+
+// Mirrors cs::Utils::bitsToMask(numberTrusted, realTrusted): returns a vector
+// of size numberTrusted whose entries are kUntrustedMarker for non-participants
+// and the trusted-position index (incrementing 0,1,2,...) for participants.
+std::vector<uint8_t> bits_to_mask(uint8_t numberTrusted, uint64_t realTrusted) {
+    std::vector<uint8_t> mask(numberTrusted, kUntrustedMarker);
+    uint8_t pos = 0;
+    for (uint8_t i = 0; i < numberTrusted; ++i) {
+        if (realTrusted & (1ULL << i)) {
+            mask[i] = pos++;
+        }
+    }
+    return mask;
+}
+
+std::string hex_pubkey(const cs::PublicKey& key) {
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(64);
+    for (auto b : key) {
+        out.push_back(digits[(b >> 4) & 0xF]);
+        out.push_back(digits[b & 0xF]);
+    }
+    return out;
+}
+
+WalletMap compute_balances(csdb::Database& db,
+                           cs::Sequence from, cs::Sequence to,
+                           const std::string& tag) {
+    WalletMap wallets;
+    auto it = db.new_iterator();
+    if (!it) {
+        std::cerr << "verify-balances[" << tag << "]: iterator unavailable\n";
+        return wallets;
+    }
+
+    if (from > 0) it->seek(static_cast<uint32_t>(from));
+    else it->seek_to_first();
+
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    auto last_log = t0;
+    size_t blocks = 0;
+    size_t skipped = 0;
+    size_t with_rewards = 0;
+
+    while (it->is_valid()) {
+        uint32_t seq = it->key();
+        if (static_cast<cs::Sequence>(seq) > to) break;
+
+        cs::Bytes raw = it->value();
+        csdb::Pool pool = csdb::is_empty_pool_stub(raw)
+            ? csdb::parse_empty_pool_stub(raw)
+            : csdb::Pool::from_binary(std::move(raw));
+
+        if (!pool.is_valid()) {
+            ++skipped;
+            it->next();
+            continue;
+        }
+
+        // 1) Per-transaction native-coin accounting.
+        csdb::Amount totalCountedFee{0};
+        for (const auto& tr : pool.transactions()) {
+            cs::PublicKey srcKey{}, dstKey{};
+            const auto& srcPk = tr.source().public_key();
+            const auto& dstPk = tr.target().public_key();
+            if (srcPk.size() == srcKey.size())
+                std::memcpy(srcKey.data(), srcPk.data(), srcKey.size());
+            if (dstPk.size() == dstKey.size())
+                std::memcpy(dstKey.data(), dstPk.data(), dstKey.size());
+
+            csdb::Amount amount = tr.amount();
+            csdb::Amount maxFee(tr.max_fee().to_double());
+            csdb::Amount countedFee(tr.counted_fee().to_double());
+
+            // Source: held max_fee + amount; refund the unused portion of max_fee.
+            wallets[srcKey].balance -= (amount + maxFee);
+            wallets[srcKey].balance += (maxFee - countedFee);
+            wallets[srcKey].txCount++;
+
+            wallets[dstKey].balance += amount;
+            wallets[dstKey].txCount++;
+
+            totalCountedFee += countedFee;
+        }
+
+        // 2) Fee + block-reward distribution to confidants based on realTrusted.
+        const auto& confidants = pool.confidants();
+        const uint8_t  nTrust       = pool.numberTrusted();
+        const uint64_t realTrusted  = pool.realTrusted();
+
+        if (nTrust > 0 && !confidants.empty() && realTrusted != 0) {
+            auto mask = bits_to_mask(nTrust, realTrusted);
+
+            int realCount = 0;
+            for (auto m : mask) if (m != kUntrustedMarker) ++realCount;
+
+            // 2a) Fees: split totalCountedFee evenly across real-trusted confidants.
+            if (realCount > 0 && totalCountedFee > csdb::Amount{0}) {
+                csdb::Amount perFee = totalCountedFee / realCount;
+                csdb::Amount distributed{0};
+                int paid = 0;
+                for (size_t i = 0; i < confidants.size() && i < mask.size(); ++i) {
+                    if (mask[i] == kUntrustedMarker) continue;
+                    csdb::Amount fee = (paid == realCount - 1)
+                        ? (totalCountedFee - distributed) : perFee;
+                    wallets[confidants[i]].balance += fee;
+                    distributed += fee;
+                    ++paid;
+                }
+            }
+
+            // 2b) Block reward: read kFieldBlockReward (mining era), one
+            // (int32 LE, uint64 LE) pair per mask entry.
+            auto fld = pool.user_field(kFieldBlockReward);
+            if (fld.is_valid()) {
+                std::string data = fld.value<std::string>();
+                size_t off = 0;
+                std::vector<csdb::Amount> rewards;
+                rewards.reserve(mask.size());
+                for (size_t k = 0; k < mask.size(); ++k) {
+                    if (off + 12 > data.size()) break;
+                    int32_t  integer  = 0;
+                    uint64_t fraction = 0;
+                    std::memcpy(&integer,  data.data() + off, 4); off += 4;
+                    std::memcpy(&fraction, data.data() + off, 8); off += 8;
+                    rewards.emplace_back(integer, fraction);
+                }
+
+                if (rewards.size() == mask.size()) {
+                    ++with_rewards;
+                    for (size_t i = 0; i < confidants.size() && i < mask.size(); ++i) {
+                        if (mask[i] == kUntrustedMarker) continue;
+                        csdb::Amount reward = rewards[i];
+                        if (reward < csdb::Amount{0}) reward = csdb::Amount{0};
+                        wallets[confidants[i]].balance += reward;
+                    }
+                }
+            }
+        }
+
+        ++blocks;
+        it->next();
+
+        if (blocks % 100000 == 0) {
+            const auto now = clock::now();
+            const auto since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+            const double rate = since_last > 0
+                ? (1000.0 * 100000.0 / static_cast<double>(since_last))
+                : 0.0;
+            std::cout << "  [" << tag << "] blocks=" << blocks
+                      << "  seq=" << seq
+                      << "  wallets=" << wallets.size()
+                      << "  rate=" << static_cast<uint64_t>(rate) << "/s"
+                      << "  elapsed=" << format_duration(elapsed)
+                      << std::endl;
+            last_log = now;
+        }
+    }
+
+    const auto total = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0);
+    std::cout << "verify-balances[" << tag << "]: blocks=" << blocks
+              << "  wallets=" << wallets.size()
+              << "  reward_blocks=" << with_rewards
+              << "  skipped=" << skipped
+              << "  elapsed=" << format_duration(total)
+              << std::endl;
+    return wallets;
+}
+
+bool verify_balances(csdb::Database& src, csdb::Database& dst, const Args& args) {
+    std::cout << "verify-balances: replaying src..." << std::endl;
+    auto srcMap = compute_balances(src, args.from, args.to, "src");
+
+    std::cout << "verify-balances: replaying dst..." << std::endl;
+    auto dstMap = compute_balances(dst, args.from, args.to, "dst");
+
+    size_t mismatches = 0;
+    size_t srcOnly = 0;
+    size_t dstOnly = 0;
+
+    for (const auto& [key, srcState] : srcMap) {
+        auto it = dstMap.find(key);
+        if (it == dstMap.end()) {
+            ++srcOnly;
+            if (srcOnly <= args.mismatch_print_limit) {
+                std::cerr << "  SRC-ONLY  " << hex_pubkey(key)
+                          << "  bal=" << srcState.balance.to_string() << "\n";
+            }
+            continue;
+        }
+        if (srcState.balance != it->second.balance) {
+            if (mismatches < args.mismatch_print_limit) {
+                std::cerr << "  MISMATCH  " << hex_pubkey(key)
+                          << "  src=" << srcState.balance.to_string()
+                          << "  dst=" << it->second.balance.to_string()
+                          << "  diff=" << (srcState.balance - it->second.balance).to_string()
+                          << "\n";
+            }
+            ++mismatches;
+        }
+    }
+    for (const auto& [key, dstState] : dstMap) {
+        if (srcMap.find(key) == srcMap.end()) {
+            ++dstOnly;
+            if (dstOnly <= args.mismatch_print_limit) {
+                std::cerr << "  DST-ONLY  " << hex_pubkey(key)
+                          << "  bal=" << dstState.balance.to_string() << "\n";
+            }
+        }
+    }
+
+    std::cout << "verify-balances: mismatches=" << mismatches
+              << "  src_only=" << srcOnly
+              << "  dst_only=" << dstOnly
+              << "  src_wallets=" << srcMap.size()
+              << "  dst_wallets=" << dstMap.size()
+              << std::endl;
+
+    return mismatches == 0 && srcOnly == 0 && dstOnly == 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -286,7 +559,11 @@ int main(int argc, char** argv) {
         }
         csdb::Database& v_src_base = v_src;
         csdb::Database& v_dst_base = *v_dst;
-        return validate_chain(v_src_base, v_dst_base, args) ? 0 : 1;
+        bool ok = validate_chain(v_src_base, v_dst_base, args);
+        if (ok && args.verify_balances) {
+            ok = verify_balances(v_src_base, v_dst_base, args);
+        }
+        return ok ? 0 : 1;
     }
     if (!args.force && !dst_dir_empty(args.dst)) {
         std::cerr << "dst is not empty: " << args.dst
@@ -478,6 +755,15 @@ int main(int argc, char** argv) {
         csdb::Database& cv_src = src_db;
         csdb::Database& cv_dst = *dst_db;
         if (!validate_chain(cv_src, cv_dst, args)) {
+            return 1;
+        }
+    }
+
+    if (args.verify_balances) {
+        std::cout << "verify-balances: replaying both DBs through native-coin accounting ..." << std::endl;
+        csdb::Database& vb_src = src_db;
+        csdb::Database& vb_dst = *dst_db;
+        if (!verify_balances(vb_src, vb_dst, args)) {
             return 1;
         }
     }

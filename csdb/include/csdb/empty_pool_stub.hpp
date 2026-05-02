@@ -1,6 +1,10 @@
 // tinycs empty-block stub format helpers.
-// Layout v3 (tag 0xFD):
+// Layout v4 (tag 0xFC):
+//   [tag:1][seq:8 LE][prev_hash:32][hash:32][realTrusted:8 LE][n_conf:1][conf:n*32][uf_size:4 LE][uf_blob:size]
+// Layout v3 (tag 0xFD, legacy reads only):
 //   [tag:1][seq:8 LE][prev_hash:32][hash:32][n_conf:1][conf:n*32][uf_size:4 LE][uf_blob:size]
+// v3 lost numberTrusted_/realTrusted_ → block reward distribution undercounted.
+// v4 preserves realTrusted_; numberTrusted_ is derived from n_conf on parse.
 // Stubs replace the on-disk encoding of empty blocks (97%+ of CREDITS chain
 // today). Public so tools (e.g. csdb_migrate's cross-verify) can detect and
 // parse stubs without duplicating format constants.

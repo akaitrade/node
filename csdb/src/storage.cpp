@@ -58,22 +58,31 @@ namespace csdb {
 // user_fields blob is kept so mining reward (kFieldBlockReward) and any other
 // per-block extension fields survive into slow-start cache rebuild.
 namespace {
-constexpr uint8_t kEmptyStubTag       = 0xFD;   // v3 (was 0xFE = v2 sans user_fields)
-constexpr size_t  kPubKeySize         = 32;
-constexpr size_t  kEmptyStubHeaderSize = 1 + sizeof(uint64_t) + 32 + 32 + 1;  // 74
+// v4 (current): adds realTrusted_ (8 bytes) so block reward distribution survives.
+//   [tag=0xFC:1][seq:8][prev:32][hash:32][realTrusted:8][n_conf:1][conf:n*32][uf_size:4][uf]
+// v3 (legacy reads only): no realTrusted → reward distribution undercounts.
+//   [tag=0xFD:1][seq:8][prev:32][hash:32][n_conf:1][conf:n*32][uf_size:4][uf]
+// v2 (0xFE) is older still, predates user_fields. Not handled here.
+constexpr uint8_t kEmptyStubTagV4       = 0xFC;
+constexpr uint8_t kEmptyStubTagV3       = 0xFD;   // legacy
+constexpr size_t  kPubKeySize           = 32;
+constexpr size_t  kEmptyStubHeaderSizeV4 = 1 + sizeof(uint64_t) + 32 + 32 + sizeof(uint64_t) + 1;  // 82
+constexpr size_t  kEmptyStubHeaderSizeV3 = 1 + sizeof(uint64_t) + 32 + 32 + 1;                     // 74
 }  // namespace
 
 cs::Bytes build_empty_pool_stub(const Pool& pool) {
+    // Always write v4. Readers below accept v3 too for legacy DBs.
     const auto& confidants = pool.confidants();
     const size_t confCount = confidants.size();
     assert(confCount <= 0xFF);
 
     const cs::Bytes ufBlob = pool.serialize_user_fields();
     const uint32_t ufSize = static_cast<uint32_t>(ufBlob.size());
+    const uint64_t realTrusted = pool.realTrusted();
 
     cs::Bytes stub;
-    stub.reserve(kEmptyStubHeaderSize + confCount * kPubKeySize + 4 + ufBlob.size());
-    stub.push_back(kEmptyStubTag);
+    stub.reserve(kEmptyStubHeaderSizeV4 + confCount * kPubKeySize + 4 + ufBlob.size());
+    stub.push_back(kEmptyStubTagV4);
 
     const uint64_t seq = static_cast<uint64_t>(pool.sequence());
     for (int i = 0; i < 8; ++i) {
@@ -85,6 +94,11 @@ cs::Bytes build_empty_pool_stub(const Pool& pool) {
     assert(prev.size() == 32 && hash.size() == 32);
     stub.insert(stub.end(), prev.begin(), prev.end());
     stub.insert(stub.end(), hash.begin(), hash.end());
+
+    // realTrusted bitmask (LE)
+    for (int i = 0; i < 8; ++i) {
+        stub.push_back(static_cast<uint8_t>((realTrusted >> (i * 8)) & 0xFF));
+    }
 
     stub.push_back(static_cast<uint8_t>(confCount));
     for (const auto& pk : confidants) {
@@ -102,11 +116,15 @@ cs::Bytes build_empty_pool_stub(const Pool& pool) {
 }
 
 bool is_empty_pool_stub(const cs::Bytes& bytes) {
-    if (bytes.size() < kEmptyStubHeaderSize || bytes[0] != kEmptyStubTag) {
+    if (bytes.empty()) return false;
+    const uint8_t tag = bytes[0];
+    if (tag != kEmptyStubTagV4 && tag != kEmptyStubTagV3) {
         return false;
     }
-    const size_t confCount = bytes[kEmptyStubHeaderSize - 1];   // count byte at offset 73
-    const size_t fixed = kEmptyStubHeaderSize + confCount * kPubKeySize;
+    const size_t headerSize = (tag == kEmptyStubTagV4) ? kEmptyStubHeaderSizeV4 : kEmptyStubHeaderSizeV3;
+    if (bytes.size() < headerSize) return false;
+    const size_t confCount = bytes[headerSize - 1];   // n_conf is the last header byte either way
+    const size_t fixed = headerSize + confCount * kPubKeySize;
     if (bytes.size() < fixed + 4) return false;                  // need uf_size field
     uint32_t ufSize = 0;
     for (int i = 0; i < 4; ++i) {
@@ -121,6 +139,10 @@ Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
         return Pool{};
     }
 
+    const uint8_t tag = bytes[0];
+    const bool isV4 = (tag == kEmptyStubTagV4);
+    const size_t headerSize = isV4 ? kEmptyStubHeaderSizeV4 : kEmptyStubHeaderSizeV3;
+
     uint64_t seq = 0;
     for (int i = 0; i < 8; ++i) {
         seq |= static_cast<uint64_t>(bytes[1 + i]) << (i * 8);
@@ -134,8 +156,18 @@ Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
     Pool pool(prev_hash, static_cast<cs::Sequence>(seq));
     pool.set_hash(std::move(this_hash));
 
-    const size_t confCount = bytes[kEmptyStubHeaderSize - 1];
-    const size_t confidantsOffset = kEmptyStubHeaderSize;
+    // realTrusted: present only in v4. v3 stubs lose this → reward distribution
+    // remains undercounted for legacy DBs until a re-migrate writes v4.
+    if (isV4) {
+        uint64_t realTrusted = 0;
+        for (int i = 0; i < 8; ++i) {
+            realTrusted |= static_cast<uint64_t>(bytes[73 + i]) << (i * 8);
+        }
+        pool.add_real_trusted(realTrusted);
+    }
+
+    const size_t confCount = bytes[headerSize - 1];
+    const size_t confidantsOffset = headerSize;
     if (confCount > 0) {
         std::vector<cs::PublicKey> confidants;
         confidants.reserve(confCount);
@@ -146,6 +178,9 @@ Pool parse_empty_pool_stub(const cs::Bytes& bytes) {
         }
         pool.set_confidants(confidants);
     }
+    // numberTrusted_ in pool defaults to 0 unless we set it. set_confidants
+    // doesn't, so populate from the count we have. Applies to both v3 and v4.
+    pool.add_number_trusted(static_cast<uint8_t>(confCount));
 
     // user_fields blob (kFieldBlockReward etc.) for mining-era support.
     const size_t ufSizeOffset = confidantsOffset + confCount * kPubKeySize;
