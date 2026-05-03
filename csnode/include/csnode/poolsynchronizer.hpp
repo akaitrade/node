@@ -26,6 +26,13 @@ public:
     void getBlockReply(PoolsBlock&& poolsBlock, const cs::PublicKey& sender);
     bool isSyncroStarted() const;
 
+    // Idempotent shutdown hook. Called by Node::stop() BEFORE transport_ is
+    // torn down so the watchdog timer cannot fire onTimeOut() against an
+    // already-freed transport. After stop() returns, sync()/syncLastPool()/
+    // onTimeOut() become no-ops; the timer is stopped and the synchroLog is
+    // cleared. Safe to call multiple times.
+    void stop();
+
     cs::Sequence getMaxNeighbourSequence();
     static const RoundNumber kRoundDifferentForSync = values::kDefaultMetaStorageMaxSize;
     void getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg);
@@ -76,6 +83,7 @@ private:
     BlockChain* blockChain_;
 
     std::atomic<bool> isSyncroStarted_ = false;
+    std::atomic<bool> stopped_ = false;   // shutdown guard; once set, all entry points are no-ops
 
     Sequence maxRequestedSequence_ = kWrongSequence;
     std::unordered_map<PublicKey, Sequence> neighbours_;

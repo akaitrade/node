@@ -1780,25 +1780,49 @@ void BlockChain::testCachedBlocks() {
                 lastConfList[i] = batch[i - 1].pool.confidants();
             }
 
-            // Force pool.hash() cache so workers do read-only access to it.
+            // Warm any lazily-cached Pool fields on the main thread before
+            // dispatching workers. hash() is the documented lazy field
+            // (Pool::hash() updateHash on first access). Touching the others
+            // here is defensive — confirms each pool's deserialised data is
+            // fully materialised before any worker touches it.
             for (auto& d : batch) {
                 (void)d.pool.hash();
+                (void)d.pool.signatures();
+                (void)d.pool.confidants();
+                (void)d.pool.realTrusted();
+                (void)d.pool.numberTrusted();
+                (void)d.pool.roundConfirmations();
+                (void)d.pool.numberConfirmations();
+                (void)d.pool.roundConfirmationMask();
             }
 
-            // Dispatch parallel verifies; collect futures.
+            // Dispatch parallel verifies. Capture stable pointers by VALUE
+            // rather than references-to-local-references; the latter is
+            // implementation-defined and was the suspected cause of
+            // intermittent verify failures on the last block of each batch.
             std::vector<std::future<bool>> futures;
             futures.reserve(batch.size());
             for (size_t i = 0; i < batch.size(); ++i) {
-                const csdb::Pool& pool = batch[i].pool;
-                const cs::PublicKeys& lc = lastConfList[i];
-                futures.push_back(verifierPool_->submit([this, &pool, &lc]() {
-                    return verifyBlockSignatures(pool, lc, /*isTrusted=*/false);
+                const csdb::Pool* poolPtr = &batch[i].pool;
+                const cs::PublicKeys* lcPtr = &lastConfList[i];
+                futures.push_back(verifierPool_->submit([this, poolPtr, lcPtr]() {
+                    return verifyBlockSignatures(*poolPtr, *lcPtr, /*isTrusted=*/false);
                 }));
+            }
+
+            // Wait for ALL verifies to complete before applying any block.
+            // Avoids storeBlock running in parallel with still-pending verify
+            // futures (storeBlock takes Pool& mutable; any global side
+            // effect from apply could otherwise race a pending verify).
+            std::vector<bool> verifyOk;
+            verifyOk.reserve(batch.size());
+            for (auto& f : futures) {
+                verifyOk.push_back(f.get());
             }
 
             // Apply in order. Stop applying at the first verify failure.
             for (size_t i = 0; i < batch.size(); ++i) {
-                if (!futures[i].get()) {
+                if (!verifyOk[i]) {
                     cserror() << kLogPrefix << "verify failed at block " << batch[i].pool.sequence()
                               << " in batch; dropping it and rest from cache";
                     break;

@@ -277,6 +277,14 @@ void Node::stop() {
     EventReport::sendRunningStatus(*this, Running::Status::Stop);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+    // Stop the pool synchronizer FIRST. Its watchdog timer fires onTimeOut()
+    // every ~sequencesVerificationFrequency ms; if the timer is still live
+    // when transport_->stop() runs, a pending onTimeOut iteration can call
+    // sendBlockRequest() against a half-torn-down transport and segfault.
+    if (poolSynchronizer_) {
+        poolSynchronizer_->stop();
+    }
+
     // stopping transport stops the node (see Node::run() method)
     transport_->stop();
     cswarning() << "[TRANSPORT STOPPED]";

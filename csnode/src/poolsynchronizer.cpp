@@ -43,6 +43,9 @@ PoolSynchronizer::PoolSynchronizer(BlockChain* blockChain)
 }
 
 void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference) {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (neighbours_.empty()) {
         csdebug() << "SYNC: no actual neighbours to start sync";
         return;
@@ -108,6 +111,9 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
 }
 
 void PoolSynchronizer::syncLastPool() {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (neighbours_.empty()) {
         csdebug() << "SYNC: (last pool) no actual neighbours to request the last block";
         return;
@@ -158,6 +164,9 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
 }
 
 void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::PublicKey& sender) {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     csdebug() << "SYNC: Get Block Reply <<<<<<< : count: " << poolsBlock.size()
         << ", seqs: [" << poolsBlock.front().sequence()
         << ", " << poolsBlock.back().sequence() << "]";
@@ -176,6 +185,9 @@ bool PoolSynchronizer::isSyncroStarted() const {
 //
 
 void PoolSynchronizer::onTimeOut() {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (!isSyncroStarted_) {
         return;
     }
@@ -446,6 +458,19 @@ void PoolSynchronizer::synchroFinished() {
     isSyncroStarted_ = false;
     maxRequestedSequence_ = kWrongSequence;
     csdebug() << "SYNC: Synchro finished";
+}
+
+void PoolSynchronizer::stop() {
+    // Idempotent: subsequent calls observe stopped_ already true and no-op.
+    bool expected = false;
+    if (!stopped_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    timer_.stop();
+    isSyncroStarted_ = false;
+    synchroLog_.clear();
+    maxRequestedSequence_ = kWrongSequence;
+    cslog() << "SYNC: shutdown — pool synchronizer stopped";
 }
 
 void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg) {
