@@ -4,8 +4,6 @@
 #include <set>
 #include <vector>
 
-#include <boost/filesystem.hpp>
-
 #include <csdb/internal/utils.hpp>
 #include <csdb/pool.hpp>
 #include <csdb/transaction.hpp>
@@ -15,7 +13,10 @@
 
 namespace {
 constexpr const char* kDbPath = "/indexdb";
-constexpr const char* kLastIndexedPath =  "/last_indexed";
+// Reserved key inside the index LMDB used to persist lastIndexedPool_.
+// Length (16 bytes) cannot collide with the 40-byte (pubkey + sequence) entries,
+// so it is safe to share the same database with the per-address index.
+constexpr const char* kLastIndexedKey = "__last_indexed__";
 
 auto getTrxIndexKey(const cs::PublicKey& _pubKey, cs::Sequence _seq) {
     cs::Bytes ret(_pubKey.begin(), _pubKey.end());
@@ -32,10 +33,15 @@ namespace cs {
 TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, bool _recreate)
     : bc_(_bc),
       rootPath_(_path),
-      db_(std::make_unique<Lmdb>(_path + kDbPath)),
-      recreate_(_recreate ? true : hasToRecreate(_path + kLastIndexedPath, lastIndexedPool_)),
-      lastIndexedFile_(_path + kLastIndexedPath, sizeof(cs::Sequence)) {
+      db_(std::make_unique<Lmdb>(_path + kDbPath)) {
+    // last_indexed lives inside the same LMDB as the index entries (replaces
+    // the old mmap'd /last_indexed file, which was not crash-safe and went
+    // stale even on clean shutdown — the OS lazily flushed Boost mapped_file
+    // pages, so on restart its value lagged the LMDB and forced a full reindex).
     init();
+    if (_recreate || !loadLastIndexedFromDb()) {
+        recreate_ = true;
+    }
 }
 
 bool TransactionsIndex::recreate() const {
@@ -120,7 +126,10 @@ void TransactionsIndex::invalidate() {
 
 void TransactionsIndex::close() {
     if (db_->isOpen()) {
-      db_->close();
+        // Force pending writes (including last_indexed) to disk before close
+        // so a clean shutdown actually persists the latest index state.
+        db_->flush();
+        db_->close();
     }
 }
 
@@ -184,27 +193,21 @@ Sequence TransactionsIndex::getPrevTransBlock(const csdb::Address& _addr, Sequen
     return db_->value<Sequence>(key);
 }
 
-inline bool TransactionsIndex::hasToRecreate(const std::string& _lastIndFilePath,
-                                             cs::Sequence& _lastIndexedPool) {
-    boost::filesystem::path p(_lastIndFilePath);
-    if (!boost::filesystem::is_regular_file(p)) {
-        return true;
+bool TransactionsIndex::loadLastIndexedFromDb() {
+    if (!db_->isOpen() || !db_->isKeyExists(kLastIndexedKey)) {
+        return false;
     }
-    MMappedFileWrap<FileSource> f(_lastIndFilePath, sizeof(cs::Sequence), false);
-    if (!f.isOpen()) {
-        return true;
+    cs::Sequence v = db_->value<cs::Sequence>(kLastIndexedKey);
+    if (v == kWrongSequence) {
+        return false;
     }
-    _lastIndexedPool = *(f.data<const cs::Sequence>());
-    if (_lastIndexedPool == kWrongSequence) {
-        return true;
-    }
-    return false;
+    lastIndexedPool_ = v;
+    return true;
 }
 
 inline void TransactionsIndex::updateLastIndexed() {
-    auto ptr = lastIndexedFile_.data<cs::Sequence>();
-    if (ptr) {
-        *ptr = lastIndexedPool_;
+    if (db_->isOpen()) {
+        db_->insert(kLastIndexedKey, lastIndexedPool_);
     }
 }
 

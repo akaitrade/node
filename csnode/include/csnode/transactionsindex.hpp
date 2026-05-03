@@ -7,7 +7,6 @@
 
 #include <csdb/address.hpp>
 #include <lib/system/common.hpp>
-#include <lib/system/mmappedfile.hpp>
 #include <lmdb.hpp>
 
 class BlockChain;
@@ -47,7 +46,9 @@ private:
     void updateFromNextBlock(const csdb::Pool&);
     void updateLastIndexed();
 
-    static bool hasToRecreate(const std::string&, cs::Sequence&);
+    // Reads last_indexed value from the index LMDB. Returns true if a valid
+    // value was loaded into lastIndexedPool_, false if missing or sentinel.
+    bool loadLastIndexedFromDb();
 
     void setPrevTransBlock(const PublicKey&, cs::Sequence _curr, cs::Sequence _prev);
     void removeLastTransBlock(const PublicKey&, cs::Sequence _curr);
@@ -56,8 +57,7 @@ private:
     const std::string rootPath_;
     std::unique_ptr<Lmdb> db_;
     Sequence lastIndexedPool_ = 0;
-    bool recreate_;
-    MMappedFileWrap<FileSink> lastIndexedFile_;
+    bool recreate_ = false;
 
     std::map<csdb::Address, cs::Sequence> lapoos_;
 };
