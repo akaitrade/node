@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #include <serializer.hpp>
@@ -3395,21 +3396,20 @@ Bytes SmartContracts::serialize() {
         ++qIt;
     }
 
-    //TODO: next two set should be sorted unless we impact the difference of hashes while loading contracts
-    size_t bSize = blacklistedContracts_.size();
-    os << bSize;
-    auto bIt = blacklistedContracts_.begin();
-    for (size_t i = 0; i < bSize; ++i) {
-        os << bIt->public_key();
-        ++bIt;
+    // Copy unordered_sets into ordered sets for deterministic byte output.
+    // Iteration over std::unordered_set is implementation-defined, so direct
+    // iteration produced different hash values on each save → cache integrity
+    // check failed on load even when the logical state was identical.
+    std::set<csdb::Address> sortedBlacklist(blacklistedContracts_.begin(), blacklistedContracts_.end());
+    os << sortedBlacklist.size();
+    for (const auto& addr : sortedBlacklist) {
+        os << addr.public_key();
     }
 
-    size_t lSize = locked_contracts.size();
-    os << lSize;
-    auto lIt = locked_contracts.begin();
-    for (size_t i = 0; i < lSize; ++i) {
-        os << lIt->public_key();
-        ++lIt;
+    std::set<csdb::Address> sortedLocked(locked_contracts.begin(), locked_contracts.end());
+    os << sortedLocked.size();
+    for (const auto& addr : sortedLocked) {
+        os << addr.public_key();
     }
     return data;
 }
