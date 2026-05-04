@@ -3518,11 +3518,11 @@ SmartContracts::StateItem SmartContracts::StateItem::from_bytes(Bytes& data) {
     is >> uSize;
     for (uint64_t i = 0ULL; i < uSize; ++i) {
         std::string u1;
-        is >> u1;   
+        is >> u1;
         uint64_t u1Size = 0;
-        is >> u1Size;    
+        is >> u1Size;
         std::map<csdb::Address, std::string> iMap;
-        for (size_t i1 = 0ULL; i < u1Size; ++i) {
+        for (size_t i1 = 0ULL; i1 < u1Size; ++i1) {
             PublicKey pKey;
             std::string s1;
             is >> pKey;
