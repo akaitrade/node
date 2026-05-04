@@ -43,7 +43,6 @@ public:
     static const size_t kCachedBlocksLimit = 10000;
     static const size_t kPerPeerCooldownMs = 5000;     // peer "busy" window after a request
     static const size_t kNoAnswerEntryTtlMs = 10000;   // NoAnswer entry GC after this
-    static constexpr std::chrono::seconds kStallTimeout{30};   // watchdog trigger
 
     //void trySource(cs::Sequence finSeq, cs::PublicKey& source);
     //void showNeighbours();
@@ -93,7 +92,6 @@ private:
     // Single-threaded: all callers run via CallQueuePolicy, including stop().
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
     Timer timer_;
-    std::chrono::steady_clock::time_point lastProgressAt_ = std::chrono::steady_clock::now();
 
     // Sequences received from peers but rejected (empty sigs / storeBlock=false).
     // The forward-walking cursor doesn't go back, so without explicit tracking

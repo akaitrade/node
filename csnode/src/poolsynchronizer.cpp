@@ -98,9 +98,7 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
 
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
-        // Anchor cursor + stall clock at sync start; from here we ratchet forward only.
         maxRequestedSequence_ = lastWrittenSequence;
-        lastProgressAt_ = std::chrono::steady_clock::now();
         timer_.start(
             cs::ConfigHolder::instance().config()->getPoolSyncSettings().sequencesVerificationFrequency,
             Timer::Type::HighPrecise,
@@ -168,12 +166,6 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
     }
 
     if (oldCachedBlocksSize != blockChain_->getCachedBlocksSize() || oldLastWrittenSequence != lastWrittenSequence) {
-        // Cache growth counts as progress: replies arrive out of order, so
-        // lastWrittenSequence stalls until gap-fillers land.
-        if (lastWrittenSequence > oldLastWrittenSequence ||
-            blockChain_->getCachedBlocksSize() > oldCachedBlocksSize) {
-            lastProgressAt_ = std::chrono::steady_clock::now();
-        }
         const bool isFinished = showSyncronizationProgress(lastWrittenSequence);
 
         if (isFinished) {
@@ -228,26 +220,14 @@ void PoolSynchronizer::onTimeOut() {
         return;
     }
 
-    // Stall watchdog: clear peer cooldowns but do NOT rewind the cursor —
-    // rewinding re-issued in-flight ranges and produced an infinite refire loop.
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastProgressAt_ > kStallTimeout) {
-        const auto stalledFor = std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressAt_).count();
-        cswarning() << "SYNC: stall watchdog -- no progress for " << stalledFor
-                    << "s, releasing peer cooldowns and refiring";
-        synchroLog_.clear();
-        lastProgressAt_ = now;
-        sendBlockRequest();
-        return;
-    }
-
+    // Recovery handled by: per-peer cooldowns expire (kPerPeerCooldownMs),
+    // NoAnswer entries time out (kNoAnswerEntryTtlMs) and requeue into
+    // rejectedSequences_, rejected drain runs every sendBlockRequest tick.
     auto currentRound = cs::Conveyer::instance().currentRoundNumber();
-
     if (blockChain_->getLastSeq() < currentRound) {
-        // Extend the request window; do NOT teardown sync state every tick.
         sendBlockRequest();
     }
-    else if (blockChain_->getLastSeq() >= currentRound) {
+    else {
         synchroFinished();
     }
 }
