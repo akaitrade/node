@@ -142,8 +142,8 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
             continue;
         }
 
-        if (pool.signatures().size() == 0) {
-            cserror() << "SYNC: No signatures in pool #" << pool.sequence() << ", will re-request";
+        if (pool.signatures().size() == 0 && pool.transactions_count() > 0) {
+            cserror() << "SYNC: No signatures in non-empty pool #" << pool.sequence() << ", will re-request";
             std::lock_guard<std::mutex> lock(rejectedMutex_);
             rejectedSequences_.insert(sequence);
             continue;
@@ -190,9 +190,25 @@ void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::Publ
     csdebug() << "SYNC: Get Block Reply <<<<<<< : count: " << poolsBlock.size()
         << ", seqs: [" << poolsBlock.front().sequence()
         << ", " << poolsBlock.back().sequence() << "]";
+
+    // Re-queue requested-but-undelivered sequences (partial reply path).
+    {
+        auto it = synchroLog_.find(sender);
+        if (it != synchroLog_.end()) {
+            std::unordered_set<cs::Sequence> delivered;
+            delivered.reserve(poolsBlock.size());
+            for (const auto& p : poolsBlock) delivered.insert(p.sequence());
+            const auto& requested = std::get<0>(it->second);
+            std::lock_guard<std::mutex> lock(rejectedMutex_);
+            for (auto seq : requested) {
+                if (delivered.find(seq) == delivered.end()) {
+                    rejectedSequences_.insert(seq);
+                }
+            }
+        }
+    }
+
     removeSynchroLog(sender);
-    //std::thread sThread(&PoolSynchronizer::manageSyncBlocks, this, std::move(poolsBlock));;
-    //sThread.detach();
     manageSyncBlocks(std::move(poolsBlock));
 }
 

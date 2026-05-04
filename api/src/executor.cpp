@@ -45,16 +45,9 @@ cs::ExecutorSettings::Types cs::ExecutorSettings::get() {
 void cs::Executor::executeByteCode(executor::ExecuteByteCodeResult& resp, const std::string& address, const std::string& smart_address,
                                    const std::vector<general::ByteCodeObject>& code, const std::string& state,
                                    std::vector<executor::MethodHeader>& methodHeader, bool isGetter, cs::Sequence sequence) {
-    // Per-contract serialisation when parallel mode is on; otherwise the
-    // historical global mutex (preserves previous behaviour by default).
-    static std::mutex globalMutex;
-    std::unique_lock<std::mutex> globalLock;
     std::optional<ContractCallLockGuard> perContractLock;
     if (parallelContractExecutionEnabled()) {
         perContractLock.emplace(contractCallLockManager_, smart_address);
-    }
-    else {
-        globalLock = std::unique_lock<std::mutex>(globalMutex);
     }
 
     if (!code.empty()) {
@@ -955,14 +948,12 @@ std::optional<cs::Executor::OriginExecuteResult> cs::Executor::execute(const std
 
     try {
         std::shared_lock sharedLock(sharedErrorMutex_);
-        std::unique_lock<std::mutex> callLock;
         std::optional<ContractCallLockGuard> perContractLock;
         if (parallelContractExecutionEnabled()) {
-            perContractLock.emplace(contractCallLockManager_, address);
+            perContractLock.emplace(contractCallLockManager_, smartContractBinary.contractAddress);
         }
-        else {
-            callLock = std::unique_lock<std::mutex>(callExecutorLock_);
-        }
+        // Socket is single-threaded; protect the RPC unconditionally.
+        std::lock_guard<std::mutex> socketLock(callExecutorLock_);
         origExecutor_->executeByteCode(originExecuteRes.resp, static_cast<general::AccessID>(accessId), address, smartContractBinary, methodHeader, EXECUTION_TIME, EXECUTOR_VERSION);
     }
     catch (::apache::thrift::transport::TTransportException& x) {

@@ -90,6 +90,7 @@ private:
     Sequence maxRequestedSequence_ = kWrongSequence;
     std::unordered_map<PublicKey, Sequence> neighbours_;
 
+    // Single-threaded: all callers run via CallQueuePolicy, including stop().
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
     Timer timer_;
     std::chrono::steady_clock::time_point lastProgressAt_ = std::chrono::steady_clock::now();

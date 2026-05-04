@@ -1572,7 +1572,10 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
     }
 
     if (!BlockChain::isBootstrap(pool)) {
-        if ((pool.numberConfirmations() == 0 || pool.roundConfirmations().size() == 0) && pool.sequence() > 1) {
+        // Stub-derived empty pools have no confirmations on disk; only enforce
+        // for non-empty pools. Coordinated upgrade requirement.
+        const bool requireConfirmations = pool.transactions_count() > 0;
+        if (requireConfirmations && (pool.numberConfirmations() == 0 || pool.roundConfirmations().size() == 0) && pool.sequence() > 1) {
             return false;
         }
     }
@@ -1928,13 +1931,10 @@ void BlockChain::clearBlockCache() {
 std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequence maxSequence) const {
     cs::Sequence seq = getLastSeq();
     const auto firstSequence = seq + 1;
-    // Neighbour-max is the last block peers actually hold (inclusive).
-    // Round-fallback is the round counter; the last completed block sits at
-    // currentRoundNumber-1 (or earlier if not yet flushed), so subtract one.
     const cs::Sequence inclusiveLast = (maxSequence != cs::kWrongSequence)
         ? maxSequence
-        : (cs::Conveyer::instance().currentRoundNumber() >= 2
-            ? cs::Conveyer::instance().currentRoundNumber() - 2
+        : (cs::Conveyer::instance().currentRoundNumber() >= 1
+            ? cs::Conveyer::instance().currentRoundNumber() - 1
             : cs::Sequence{0});
 
     if (firstSequence > inclusiveLast) {
@@ -1953,20 +1953,12 @@ std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequ
     if (ranges.empty()) {
         return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
     }
-    bool emplaceLater = false;
     if (firstSequence < ranges.front().first) {
         ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
-        emplaceLater = true;
     }
-    //TODO: this piece of code should be precisely examined
     if (ranges.back().second < roundNumber) {
         ranges.emplace_back(cachedBlocks_->maxSequence() + 1, roundNumber);
     }
-    if (emplaceLater) {
-        ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
-    }
-
-
     return ranges;
 }
 

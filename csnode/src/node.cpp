@@ -2017,6 +2017,18 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         return MessageActions::Drop;
     }
 
+    // Drop transaction-content traffic while syncing — we can't validate it
+    // against current state and it just bloats memory.
+    if (poolSynchronizer_ && poolSynchronizer_->isSyncroStarted()) {
+        switch (type) {
+            case MsgTypes::TransactionPacket:
+            case MsgTypes::TransactionPacketHash:
+                return MessageActions::Drop;
+            default:
+                break;
+        }
+    }
+
     // always process this types
     switch (type) {
         case MsgTypes::FirstSmartStage:
@@ -3698,18 +3710,23 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 }
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
+    // Behind in sync: refuse confidant role and skip Solver round init.
+    const bool behindInSync = blockChain_.getLastSeq() + 1ULL < roundTable.round;
+
     bool found = false;
     uint8_t confidantIndex = 0;
 
-    for (auto& conf : roundTable.confidants) {
-        if (conf == nodeIdKey_) {
-            myLevel_ = Level::Confidant;
-            myConfidantIndex_ = confidantIndex;
-            found = true;
-            break;
-        }
+    if (!behindInSync) {
+        for (auto& conf : roundTable.confidants) {
+            if (conf == nodeIdKey_) {
+                myLevel_ = Level::Confidant;
+                myConfidantIndex_ = confidantIndex;
+                found = true;
+                break;
+            }
 
-        confidantIndex++;
+            confidantIndex++;
+        }
     }
 
     if (!found) {
@@ -3761,11 +3778,12 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     line1 << " R-" << WithDelimiters(cs::Conveyer::instance().currentRoundNumber()) << "." << cs::numeric_cast<int>(subRound_) << " ";
 
     if (Level::Normal == myLevel_) {
-        line1 << "NORMAL";
         if (getBlockChain().getLastSeq() + 1ULL == cs::Conveyer::instance().currentRoundNumber()) {
+            line1 << "NORMAL";
             status_ = cs::NodeStatus::InRound;
         }
         else {
+            line1 << "SYNCING";
             status_ = cs::NodeStatus::Synchronization;
         }
     }
@@ -3818,7 +3836,9 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     stat_.onRoundStart(cs::Conveyer::instance().currentRoundNumber(), false /*skip_logs*/);
     csdebug() << line2.str();
 
-    solver_->nextRound(updateRound);
+    if (!behindInSync) {
+        solver_->nextRound(updateRound);
+    }
     if (cacheLBs_) {
         getBlockChain().cacheLastBlocks();
         if (getBlockChain().getIncorrectBlockNumbers()->empty()) {
