@@ -3560,9 +3560,7 @@ SmartContracts::QueueItem SmartContracts::QueueItem::from_bytes(Bytes& data) {
     for (size_t i = 0ULL; i < eSize;++i) {
         Bytes eData;
         is >> eData;
-        SmartContracts::ExecutionItem tmp;
-        tmp.from_bytes(eData);
-        res.executions.push_back(tmp);
+        res.executions.push_back(SmartContracts::ExecutionItem::from_bytes(eData));
     }
     is >> res.status;
     is >> res.seq_enqueue;
@@ -3586,9 +3584,8 @@ Bytes SmartContracts::ExecutionItem::to_bytes() {
     os << consumed_fee.integral() << consumed_fee.fraction();
     uint64_t uSize = uses.size();
     os << uSize;
-    auto it = uses.begin();
-    while (it != uses.end()) {
-        os << it->public_key();
+    for (const auto& addr : uses) {
+        os << addr.public_key();
     }
 
     os << result.toBinary();
