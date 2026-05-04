@@ -1925,16 +1925,18 @@ void BlockChain::clearBlockCache() {
     cachedBlocks_->clear();
 }
 
-std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks() const {
+std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequence maxSequence) const {
     cs::Sequence seq = getLastSeq();
     const auto firstSequence = seq + 1;
-    const auto currentRoundNumber = cs::Conveyer::instance().currentRoundNumber()-1;
+    const auto upperBound = (maxSequence != cs::kWrongSequence)
+        ? maxSequence
+        : cs::Conveyer::instance().currentRoundNumber() - 1;
 
-    if (firstSequence >= currentRoundNumber) {
+    if (firstSequence >= upperBound) {
         return std::vector<SequenceInterval>();
     }
 
-    const auto roundNumber = currentRoundNumber > 0 ? std::max(firstSequence, currentRoundNumber - 1) : 0;
+    const auto roundNumber = upperBound > 0 ? std::max(firstSequence, upperBound - 1) : 0;
 
     // return at least [next, 0] or [next, currentRoundNumber]:
     if (cachedBlocks_->isEmpty()) {

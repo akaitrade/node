@@ -230,7 +230,9 @@ public:
      * @return    The required blocks in form vector of intervals
      */
 
-    std::vector<SequenceInterval> getRequiredBlocks() const;
+    // maxSequence overrides the upper bound; kWrongSequence = use currentRoundNumber-1.
+    // Sync should pass neighbour-max; the round-number fallback drifts wildly on long chains.
+    std::vector<SequenceInterval> getRequiredBlocks(cs::Sequence maxSequence = cs::kWrongSequence) const;
 
     /**
      * @fn    void BlockChain::testCachedBlocks();

@@ -45,6 +45,7 @@ struct Args {
     bool use_stubs = true;      // write empty pools as compact stubs in dst
     bool verify_balances = false; // replay both DBs through simplified balance accounting
     size_t mismatch_print_limit = 20; // first N mismatching wallets printed in detail
+    std::string dst_backend = "rocksdb"; // "rocksdb" or "berkeley"
 };
 
 void print_usage() {
@@ -63,6 +64,7 @@ void print_usage() {
         "  --cross-verify   After migration, walk src+dst in lockstep and compare hash/prev_hash/confidants/user_fields/tx-count per block\n"
         "  --validate-only  Skip migration; just run --cross-verify against an existing dst (src and dst must both exist)\n"
         "  --no-stubs       Write empty pools as full Pool::to_binary() instead of compact stubs (default: stubs enabled)\n"
+        "  --dst-backend B  Destination backend: 'rocksdb' (default) or 'berkeley'. Use 'berkeley' to apply v4 stubs in-place to a BerkeleyDB chain without changing storage engine.\n"
         "  --verify-balances Replay src and dst through simplified native-coin accounting and compare end-state wallet maps. Catches lossy on-disk format bugs that affect balances (e.g. dropped realTrusted_ in stubs). Skips smart-contract execution and delegation.\n";
 }
 
@@ -91,6 +93,14 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (k == "--cross-verify") { a.cross_verify = true; }
         else if (k == "--validate-only") { a.validate_only = true; a.cross_verify = true; }
         else if (k == "--no-stubs") { a.use_stubs = false; }
+        else if (k == "--dst-backend") {
+            auto v = need_value("--dst-backend"); if (!v) return false;
+            a.dst_backend = v;
+            if (a.dst_backend != "rocksdb" && a.dst_backend != "berkeley") {
+                std::cerr << "--dst-backend must be 'rocksdb' or 'berkeley'\n";
+                return false;
+            }
+        }
         else if (k == "--verify-balances") { a.verify_balances = true; }
         else if (k == "--help" || k == "-h") { print_usage(); return false; }
         else { std::cerr << "unknown argument: " << k << "\n"; print_usage(); return false; }
@@ -551,11 +561,25 @@ int main(int argc, char** argv) {
                       << ": " << v_src.last_error_message() << "\n";
             return 1;
         }
-        auto v_dst = std::make_shared<csdb::DatabaseRocksDB>();
-        if (!v_dst->open(args.dst)) {
-            std::cerr << "failed to open RocksDB at " << args.dst
-                      << ": " << v_dst->last_error_message() << "\n";
-            return 1;
+        // open() is on each concrete DB class, not the abstract base, so call
+        // through the typed handle before storing in the shared_ptr<Database>.
+        std::shared_ptr<csdb::Database> v_dst;
+        if (args.dst_backend == "berkeley") {
+            auto v_dst_typed = std::make_shared<csdb::DatabaseBerkeleyDB>();
+            if (!v_dst_typed->open(args.dst)) {
+                std::cerr << "failed to open dst (berkeley) at " << args.dst
+                          << ": " << v_dst_typed->last_error_message() << "\n";
+                return 1;
+            }
+            v_dst = std::move(v_dst_typed);
+        } else {
+            auto v_dst_typed = std::make_shared<csdb::DatabaseRocksDB>();
+            if (!v_dst_typed->open(args.dst)) {
+                std::cerr << "failed to open dst (rocksdb) at " << args.dst
+                          << ": " << v_dst_typed->last_error_message() << "\n";
+                return 1;
+            }
+            v_dst = std::move(v_dst_typed);
         }
         csdb::Database& v_src_base = v_src;
         csdb::Database& v_dst_base = *v_dst;
@@ -579,14 +603,36 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto dst_db = std::make_shared<csdb::DatabaseRocksDB>();
-    if (args.bulk_load) {
-        dst_db->set_bulk_load(true);
-    }
-    if (!dst_db->open(args.dst)) {
-        std::cerr << "failed to open RocksDB at " << args.dst
-                  << ": " << dst_db->last_error_message() << "\n";
-        return 1;
+    // Polymorphic destination: keep a base shared_ptr for Storage and a typed
+    // pointer to the RocksDB instance (when applicable) for the bulk-load /
+    // compact_full hooks that don't exist on BerkeleyDB. open() is on each
+    // concrete class — call it through the typed handle before storing in the
+    // base shared_ptr.
+    std::shared_ptr<csdb::Database> dst_db;
+    csdb::DatabaseRocksDB* dst_rocks = nullptr;
+    if (args.dst_backend == "berkeley") {
+        auto bdb = std::make_shared<csdb::DatabaseBerkeleyDB>();
+        if (args.bulk_load) {
+            std::cout << "note: --dst-backend berkeley does not support bulk-load; ignoring\n";
+        }
+        if (!bdb->open(args.dst)) {
+            std::cerr << "failed to open dst (berkeley) at " << args.dst
+                      << ": " << bdb->last_error_message() << "\n";
+            return 1;
+        }
+        dst_db = std::move(bdb);
+    } else {
+        auto rocks = std::make_shared<csdb::DatabaseRocksDB>();
+        if (args.bulk_load) {
+            rocks->set_bulk_load(true);
+        }
+        if (!rocks->open(args.dst)) {
+            std::cerr << "failed to open dst (rocksdb) at " << args.dst
+                      << ": " << rocks->last_error_message() << "\n";
+            return 1;
+        }
+        dst_rocks = rocks.get();
+        dst_db = std::move(rocks);
     }
 
     csdb::Storage::OpenOptions opt;
@@ -605,14 +651,15 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "csdb_migrate"
-              << "\n  src: "      << args.src
-              << "\n  dst: "      << args.dst
-              << "\n  from: "     << args.from
-              << "\n  to: "       << (args.to == std::numeric_limits<cs::Sequence>::max() ? std::string("end") : std::to_string(args.to))
-              << "\n  queue: "    << args.queue
-              << "\n  batch: "    << args.batch
-              << "\n  progress: " << args.progress_every
-              << "\n  stubs: "    << (args.use_stubs ? "enabled" : "disabled (full pools)")
+              << "\n  src: "       << args.src
+              << "\n  dst: "       << args.dst
+              << "\n  dst-backend: " << args.dst_backend
+              << "\n  from: "      << args.from
+              << "\n  to: "        << (args.to == std::numeric_limits<cs::Sequence>::max() ? std::string("end") : std::to_string(args.to))
+              << "\n  queue: "     << args.queue
+              << "\n  batch: "     << args.batch
+              << "\n  progress: "  << args.progress_every
+              << "\n  stubs: "     << (args.use_stubs ? "enabled" : "disabled (full pools)")
               << std::endl;
 
     csdb::Database& src_base = src_db;          // new_iterator is public on Database
@@ -707,11 +754,11 @@ int main(int argc, char** argv) {
     std::cout << "draining writer ..." << std::endl;
     dst.close();
 
-    if (args.bulk_load) {
+    if (args.bulk_load && dst_rocks != nullptr) {
         std::cout << "compacting destination (bulk-load mode) ..." << std::endl;
         const auto t_compact = clock::now();
-        if (!dst_db->compact_full()) {
-            std::cerr << "compact_full failed: " << dst_db->last_error_message() << "\n";
+        if (!dst_rocks->compact_full()) {
+            std::cerr << "compact_full failed: " << dst_rocks->last_error_message() << "\n";
             return 1;
         }
         const auto compact_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t_compact);

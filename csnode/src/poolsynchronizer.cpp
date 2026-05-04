@@ -390,7 +390,11 @@ void PoolSynchronizer::sendBlockRequest() {
         maxRequestedSequence_ = lastWritten;
     }
 
-    auto requiredBlocks = blockChain_->getRequiredBlocks();
+    // Stop extending forward when the cache is at the cap; only the rejected-
+    // sequence drain below still fires (that's the path that unblocks gaps).
+    const bool cacheFull = blockChain_->getCachedBlocksSize() >= kCachedBlocksLimit;
+
+    auto requiredBlocks = blockChain_->getRequiredBlocks(getMaxNeighbourSequence());
     auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
     auto end = neighbour;
     updateSynchroLog();
@@ -421,9 +425,12 @@ void PoolSynchronizer::sendBlockRequest() {
             }
         }
 
-        auto forwardSequences = getNeededSequences(requiredBlocks, neighbour->second);
-        if (rejectedForPeer.size() + forwardSequences.size() > batchCap) {
-            forwardSequences.resize(batchCap - rejectedForPeer.size());
+        std::vector<cs::Sequence> forwardSequences;
+        if (!cacheFull) {
+            forwardSequences = getNeededSequences(requiredBlocks, neighbour->second);
+            if (rejectedForPeer.size() + forwardSequences.size() > batchCap) {
+                forwardSequences.resize(batchCap - rejectedForPeer.size());
+            }
         }
 
         std::vector<cs::Sequence> neededSequences;
@@ -520,10 +527,7 @@ std::vector<Sequence> PoolSynchronizer::getNeededSequences(
 }
 
 void PoolSynchronizer::synchroFinished() {
-    // Defensive sanity check: the chain should have no remaining required
-    // blocks below currentRound at this point. Logged but non-blocking so
-    // we surface bugs without changing behaviour.
-    auto required = blockChain_->getRequiredBlocks();
+    auto required = blockChain_->getRequiredBlocks(getMaxNeighbourSequence());
     if (!required.empty()) {
         cswarning() << "SYNC: synchroFinished but " << required.size()
                     << " required-block range(s) still reported by blockchain";
@@ -598,22 +602,32 @@ void PoolSynchronizer::updateSynchroLog() {
     if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
         return;
     }
-    //csdebug() << __func__ << ":";
     auto timeNow = cs::Utils::currentTimestamp();
     auto it = synchroLog_.begin();
     while (it != synchroLog_.end()) {
         auto msg = std::get<1>(it->second);
         auto timeEvent = std::get<2>(it->second);
-        //csdebug() << cs::Utils::byteStreamToHex(it->first) << ": " << std::get<0>(it->second).back() << ", time: " << timeEvent << ", status: " << static_cast<int>(msg);
-        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + kNoAnswerEntryTtlMs))) {
-            //csdebug() << __func__ << " -> " << synchroLog_.size() << ": key " << cs::Utils::byteStreamToHex(it->first) << " erased";
+        const bool stale =
+            (msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) ||
+            (msg == SyncroMessage::NoAnswer    && timeNow > timeEvent + kNoAnswerEntryTtlMs);
+        if (stale) {
+            // Re-queue NoAnswer sequences — cursor only walks forward, so
+            // without this they'd never be re-requested.
+            if (msg == SyncroMessage::NoAnswer) {
+                const auto& seqs = std::get<0>(it->second);
+                if (!seqs.empty()) {
+                    std::lock_guard<std::mutex> lock(rejectedMutex_);
+                    for (auto seq : seqs) {
+                        rejectedSequences_.insert(seq);
+                    }
+                }
+            }
             it = synchroLog_.erase(it);
         }
         else {
             ++it;
         }
     }
-    //csdebug() << __func__ << ": finished";
 }
 
 bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
