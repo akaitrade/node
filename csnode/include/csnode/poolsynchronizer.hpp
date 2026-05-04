@@ -2,6 +2,8 @@
 #define POOLSYNCHRONIZER_HPP
 
 #include <chrono>
+#include <mutex>
+#include <unordered_set>
 
 #include <csdb/pool.hpp>
 
@@ -91,6 +93,12 @@ private:
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
     Timer timer_;
     std::chrono::steady_clock::time_point lastProgressAt_ = std::chrono::steady_clock::now();
+
+    // Sequences received from peers but rejected (empty sigs / storeBlock=false).
+    // The forward-walking cursor doesn't go back, so without explicit tracking
+    // these would be orphaned. Drained as priority into the next request batch.
+    std::unordered_set<cs::Sequence> rejectedSequences_;
+    mutable std::mutex rejectedMutex_;
 };
 }  // namespace cs
 #endif  // POOLSYNCHRONIZER_HPP

@@ -133,20 +133,37 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
 
     for (auto& pool : poolsBlock) {
         const auto sequence = pool.sequence();
-        
+
         if (lastWrittenSequence > sequence) {
             csdebug() << "skip seq " << sequence;
+            // Have it already → not a candidate for re-request.
+            std::lock_guard<std::mutex> lock(rejectedMutex_);
+            rejectedSequences_.erase(sequence);
             continue;
         }
 
         if (pool.signatures().size() == 0) {
-            cserror() << "SYNC: No signatures in pool #" << pool.sequence();
+            cserror() << "SYNC: No signatures in pool #" << pool.sequence() << ", will re-request";
+            std::lock_guard<std::mutex> lock(rejectedMutex_);
+            rejectedSequences_.insert(sequence);
             continue;
         }
 
         if (blockChain_->storeBlock(pool, cs::PoolStoreType::Synced)) {
+            {
+                std::lock_guard<std::mutex> lock(rejectedMutex_);
+                rejectedSequences_.erase(sequence);
+            }
             blockChain_->testCachedBlocks();
             lastWrittenSequence = blockChain_->getLastSeq();
+        }
+        else {
+            // storeBlock returned false (consistency check, hash mismatch, etc.)
+            // Track for re-request — without this, a forward-only cursor would
+            // orphan the gap once it advanced past this sequence.
+            cswarning() << "SYNC: storeBlock failed for #" << sequence << ", will re-request";
+            std::lock_guard<std::mutex> lock(rejectedMutex_);
+            rejectedSequences_.insert(sequence);
         }
     }
 
@@ -378,21 +395,67 @@ void PoolSynchronizer::sendBlockRequest() {
     auto end = neighbour;
     updateSynchroLog();
     do {
-        auto neededSequences = getNeededSequences(requiredBlocks, neighbour->second);
+        // Priority pass: drain rejected sequences this peer can serve. These
+        // sit BELOW the forward cursor and would otherwise be orphaned. We
+        // consume them first so a single batch can carry both retries and
+        // forward progress.
+        std::vector<cs::Sequence> rejectedForPeer;
+        const size_t batchCap =
+            cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount;
+        {
+            std::lock_guard<std::mutex> lock(rejectedMutex_);
+            for (auto it = rejectedSequences_.begin();
+                 it != rejectedSequences_.end() && rejectedForPeer.size() < batchCap; ) {
+                if (*it > neighbour->second) { ++it; continue; }   // peer doesn't have it yet
+                bool inFlight = false;
+                for (const auto& entry : synchroLog_) {
+                    const auto& seqs = std::get<0>(entry.second);
+                    if (std::find(seqs.begin(), seqs.end(), *it) != seqs.end()) {
+                        inFlight = true;
+                        break;
+                    }
+                }
+                if (inFlight) { ++it; continue; }
+                rejectedForPeer.push_back(*it);
+                it = rejectedSequences_.erase(it);
+            }
+        }
+
+        auto forwardSequences = getNeededSequences(requiredBlocks, neighbour->second);
+        if (rejectedForPeer.size() + forwardSequences.size() > batchCap) {
+            forwardSequences.resize(batchCap - rejectedForPeer.size());
+        }
+
+        std::vector<cs::Sequence> neededSequences;
+        neededSequences.reserve(rejectedForPeer.size() + forwardSequences.size());
+        neededSequences.insert(neededSequences.end(), rejectedForPeer.begin(), rejectedForPeer.end());
+        neededSequences.insert(neededSequences.end(), forwardSequences.begin(), forwardSequences.end());
 
         if (neededSequences.empty()) {
             csdetails() << "SYNC: All sequences already requested";
             break;
         }
-        else {
-            maxRequestedSequence_ = neededSequences.back();
-        }
+
         if (checkSynchroLog(neighbour->first)) {
             cslog() << "SYNC: requesting for " << neededSequences.size()
                 << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
                 << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
             emit sendRequest(neighbour->first, neededSequences);
             addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
+            // Advance cursor only on actual send, only by the FORWARD portion.
+            // Rejected entries are below the cursor by definition; advancing
+            // for them would be a no-op or worse. Advancing without sending
+            // (the prior bug) orphaned ranges when peers were in cooldown.
+            if (!forwardSequences.empty()) {
+                maxRequestedSequence_ = forwardSequences.back();
+            }
+        }
+        else {
+            // Peer was busy after all — return rejected entries to the queue.
+            std::lock_guard<std::mutex> lock(rejectedMutex_);
+            for (auto seq : rejectedForPeer) {
+                rejectedSequences_.insert(seq);
+            }
         }
 
         ++neighbour;
@@ -457,6 +520,22 @@ std::vector<Sequence> PoolSynchronizer::getNeededSequences(
 }
 
 void PoolSynchronizer::synchroFinished() {
+    // Defensive sanity check: the chain should have no remaining required
+    // blocks below currentRound at this point. Logged but non-blocking so
+    // we surface bugs without changing behaviour.
+    auto required = blockChain_->getRequiredBlocks();
+    if (!required.empty()) {
+        cswarning() << "SYNC: synchroFinished but " << required.size()
+                    << " required-block range(s) still reported by blockchain";
+    }
+    {
+        std::lock_guard<std::mutex> lock(rejectedMutex_);
+        if (!rejectedSequences_.empty()) {
+            cswarning() << "SYNC: synchroFinished with " << rejectedSequences_.size()
+                        << " rejected sequence(s) still pending re-request";
+        }
+    }
+
     timer_.stop();
     isSyncroStarted_ = false;
     maxRequestedSequence_ = kWrongSequence;
@@ -472,6 +551,10 @@ void PoolSynchronizer::stop() {
     timer_.stop();
     isSyncroStarted_ = false;
     synchroLog_.clear();
+    {
+        std::lock_guard<std::mutex> lock(rejectedMutex_);
+        rejectedSequences_.clear();
+    }
     maxRequestedSequence_ = kWrongSequence;
     cslog() << "SYNC: shutdown — pool synchronizer stopped";
 }
