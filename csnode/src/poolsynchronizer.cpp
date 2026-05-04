@@ -151,8 +151,11 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
     }
 
     if (oldCachedBlocksSize != blockChain_->getCachedBlocksSize() || oldLastWrittenSequence != lastWrittenSequence) {
-        if (lastWrittenSequence > oldLastWrittenSequence) {
-            lastProgressAt_ = std::chrono::steady_clock::now();   // resets stall watchdog
+        // Cache growth counts as progress: replies arrive out of order, so
+        // lastWrittenSequence stalls until gap-fillers land.
+        if (lastWrittenSequence > oldLastWrittenSequence ||
+            blockChain_->getCachedBlocksSize() > oldCachedBlocksSize) {
+            lastProgressAt_ = std::chrono::steady_clock::now();
         }
         const bool isFinished = showSyncronizationProgress(lastWrittenSequence);
 
@@ -192,14 +195,14 @@ void PoolSynchronizer::onTimeOut() {
         return;
     }
 
-    // Stall watchdog: reset in-flight state if no progress for kStallTimeout.
+    // Stall watchdog: clear peer cooldowns but do NOT rewind the cursor —
+    // rewinding re-issued in-flight ranges and produced an infinite refire loop.
     const auto now = std::chrono::steady_clock::now();
     if (now - lastProgressAt_ > kStallTimeout) {
         const auto stalledFor = std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressAt_).count();
         cswarning() << "SYNC: stall watchdog -- no progress for " << stalledFor
-                    << "s, clearing in-flight requests and refiring";
+                    << "s, releasing peer cooldowns and refiring";
         synchroLog_.clear();
-        maxRequestedSequence_ = blockChain_->getLastSeq();
         lastProgressAt_ = now;
         sendBlockRequest();
         return;
