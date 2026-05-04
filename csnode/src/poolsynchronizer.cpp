@@ -237,7 +237,12 @@ void PoolSynchronizer::onTimeOut() {
 }
 
 void PoolSynchronizer::onStoreBlockTimeElapsed() {
-    if (isSyncroStarted()) {
+    if (!isSyncroStarted()) {
+        return;
+    }
+    // Only finish if genuinely caught up; the no-block-stored timeout otherwise
+    // ends an active sync that's just temporarily blocked.
+    if (blockChain_->getRequiredBlocks(getMaxNeighbourSequence()).empty()) {
         synchroFinished();
     }
 }
@@ -438,30 +443,23 @@ void PoolSynchronizer::sendBlockRequest() {
         neededSequences.insert(neededSequences.end(), rejectedForPeer.begin(), rejectedForPeer.end());
         neededSequences.insert(neededSequences.end(), forwardSequences.begin(), forwardSequences.end());
 
-        if (neededSequences.empty()) {
-            csdetails() << "SYNC: All sequences already requested";
-            break;
-        }
-
-        if (checkSynchroLog(neighbour->first)) {
-            cslog() << "SYNC: requesting for " << neededSequences.size()
-                << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
-                << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
-            emit sendRequest(neighbour->first, neededSequences);
-            addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
-            // Advance cursor only on actual send, only by the FORWARD portion.
-            // Rejected entries are below the cursor by definition; advancing
-            // for them would be a no-op or worse. Advancing without sending
-            // (the prior bug) orphaned ranges when peers were in cooldown.
-            if (!forwardSequences.empty()) {
-                maxRequestedSequence_ = forwardSequences.back();
+        if (!neededSequences.empty()) {
+            if (checkSynchroLog(neighbour->first)) {
+                cslog() << "SYNC: requesting for " << neededSequences.size()
+                    << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
+                    << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
+                emit sendRequest(neighbour->first, neededSequences);
+                addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
+                if (!forwardSequences.empty()) {
+                    maxRequestedSequence_ = forwardSequences.back();
+                }
             }
-        }
-        else {
-            // Peer was busy after all — return rejected entries to the queue.
-            std::lock_guard<std::mutex> lock(rejectedMutex_);
-            for (auto seq : rejectedForPeer) {
-                rejectedSequences_.insert(seq);
+            else {
+                // Peer busy — return rejected entries to the queue.
+                std::lock_guard<std::mutex> lock(rejectedMutex_);
+                for (auto seq : rejectedForPeer) {
+                    rejectedSequences_.insert(seq);
+                }
             }
         }
 

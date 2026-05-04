@@ -1928,15 +1928,20 @@ void BlockChain::clearBlockCache() {
 std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequence maxSequence) const {
     cs::Sequence seq = getLastSeq();
     const auto firstSequence = seq + 1;
-    const auto upperBound = (maxSequence != cs::kWrongSequence)
+    // Neighbour-max is the last block peers actually hold (inclusive).
+    // Round-fallback is the round counter; the last completed block sits at
+    // currentRoundNumber-1 (or earlier if not yet flushed), so subtract one.
+    const cs::Sequence inclusiveLast = (maxSequence != cs::kWrongSequence)
         ? maxSequence
-        : cs::Conveyer::instance().currentRoundNumber() - 1;
+        : (cs::Conveyer::instance().currentRoundNumber() >= 2
+            ? cs::Conveyer::instance().currentRoundNumber() - 2
+            : cs::Sequence{0});
 
-    if (firstSequence >= upperBound) {
+    if (firstSequence > inclusiveLast) {
         return std::vector<SequenceInterval>();
     }
 
-    const auto roundNumber = upperBound > 0 ? std::max(firstSequence, upperBound - 1) : 0;
+    const auto roundNumber = inclusiveLast;
 
     // return at least [next, 0] or [next, currentRoundNumber]:
     if (cachedBlocks_->isEmpty()) {
