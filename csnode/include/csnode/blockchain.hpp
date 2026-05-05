@@ -169,6 +169,9 @@ public:
 
     // storage adaptor
     void close();
+    // Set during shutdown so a long-running slow-start (storage_.open + onReadFromDB)
+    // can bail out promptly instead of completing the full chain replay first.
+    void requestStop() { stop_ = true; }
     bool getTransaction(const csdb::Address& addr, const int64_t& innerId, csdb::Transaction& result) const;
     void arrangeBlocksInCache();
 

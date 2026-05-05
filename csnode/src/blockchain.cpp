@@ -144,6 +144,11 @@ bool BlockChain::init(
     bool checkTrxIndexRecreate = true;
 
     csdb::Storage::OpenCallback progress = [&](const csdb::Storage::OpenProgress& progress) {
+        if (stop_) {
+            cslog() << kLogPrefix << "shutdown requested, aborting slow start at "
+                    << WithDelimiters(progress.poolsProcessed);
+            return true;
+        }
         if (checkTrxIndexRecreate) {
           checkTrxIndexRecreate = false;
           if (trxIndex_->recreate() && successfulQuickStart) {
@@ -224,6 +229,10 @@ void BlockChain::onStartReadFromDB(cs::Sequence lastWrittenPoolSeq) {
 }
 
 void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
+    if (stop_) {
+        *shouldStop = true;
+        return;
+    }
     auto blockSeq = block.sequence();
     lastSequence_ = blockSeq;
     if (blockSeq == 1) {

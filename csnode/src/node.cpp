@@ -3987,6 +3987,10 @@ void Node::requestStop() {
 }
 
 void Node::onStopRequested() {
+    // Bail out of any in-flight slow start (BlockChain::init read loop) so Ctrl+C
+    // is honoured immediately instead of waiting hours for the full replay.
+    blockChain_.requestStop();
+
     if (stopRequested_) {
         stop();
         return;
