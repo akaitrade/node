@@ -10,6 +10,7 @@
 #include <csnode/blockchain.hpp>
 #include <csnode/blockchain_serializer.hpp>
 #include <csnode/serializers_helper.hpp>
+#include <lib/system/logger.hpp>
 
 namespace {
 const std::string kDataFileName = "blockchain.dat";
@@ -35,6 +36,8 @@ void BlockChain_Serializer::bind(BlockChain& bchain, std::set<cs::PublicKey>& in
 }
 
 void BlockChain_Serializer::clear(const std::filesystem::path& rootDir) {
+    cswarning() << "BlockChain_Serializer::clear called for " << rootDir
+                << "; resetting in-memory lastSequence_ from " << lastSequence_->load() << " to 0";
     previousNonEmpty_->clear();
     lastNonEmptyBlock_->poolSeq = 0;
     lastNonEmptyBlock_->transCount = 0;
@@ -90,6 +93,9 @@ void BlockChain_Serializer::load(const std::filesystem::path& rootDir) {
 
     Sequence lastSequence;
     ia >> lastSequence;
+    cswarning() << "BlockChain_Serializer::load called for " << rootDir
+                << "; setting in-memory lastSequence_ from " << lastSequence_->load()
+                << " to " << lastSequence;
     lastSequence_->store(lastSequence);
     ia >> *initialConfidants_;
 

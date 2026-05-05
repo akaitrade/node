@@ -1977,21 +1977,19 @@ std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequ
 
     const auto roundNumber = inclusiveLast;
 
-    // return at least [next, 0] or [next, currentRoundNumber]:
     if (cachedBlocks_->isEmpty()) {
         return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
     }
 
     auto ranges = cachedBlocks_->ranges();
+    const auto minCached = cachedBlocks_->minSequence();
+    const auto maxCached = cachedBlocks_->maxSequence();
 
-    if (ranges.empty()) {
-        return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
+    if (firstSequence < minCached) {
+        ranges.emplace_back(firstSequence, minCached - 1);
     }
-    if (firstSequence < ranges.front().first) {
-        ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
-    }
-    if (ranges.back().second < roundNumber) {
-        ranges.emplace_back(cachedBlocks_->maxSequence() + 1, roundNumber);
+    if (maxCached < roundNumber) {
+        ranges.emplace_back(maxCached + 1, roundNumber);
     }
     return ranges;
 }
