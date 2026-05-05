@@ -328,12 +328,7 @@ cs::Sequence PoolSynchronizer::getMaxNeighbourSequence() {
 }
 
 void PoolSynchronizer::onPingReceived(cs::Sequence sequence, const cs::PublicKey& publicKey) {
-    if (sequence > blockChain_->getLastSeq()) {
-        neighbours_[publicKey] = sequence;
-    }
-    else {
-        neighbours_.erase(publicKey);
-    }
+    neighbours_[publicKey] = sequence;
 }
 
 void PoolSynchronizer::onNeighbourRemoved(const cs::PublicKey& publicKey) {
@@ -531,10 +526,14 @@ std::vector<Sequence> PoolSynchronizer::getNeededSequences(
 }
 
 void PoolSynchronizer::synchroFinished() {
-    auto required = blockChain_->getRequiredBlocks(getMaxNeighbourSequence());
-    if (!required.empty()) {
-        cswarning() << "SYNC: synchroFinished but " << required.size()
-                    << " required-block range(s) still reported by blockchain";
+    const auto neighbourMax = getMaxNeighbourSequence();
+    const auto lastWritten = blockChain_->getLastSeq();
+    if (neighbourMax > lastWritten + 1) {
+        auto required = blockChain_->getRequiredBlocks(neighbourMax);
+        if (!required.empty()) {
+            cswarning() << "SYNC: synchroFinished but " << required.size()
+                        << " required-block range(s) still reported by blockchain";
+        }
     }
     {
         std::lock_guard<std::mutex> lock(rejectedMutex_);

@@ -3599,7 +3599,7 @@ SmartContracts::ExecutionItem SmartContracts::ExecutionItem::from_bytes(Bytes& d
     is >> res.ref_start.sequence >> res.ref_start.transaction;
     Bytes tdata;
     is >> tdata;
-    res.transaction.from_binary(tdata);
+    res.transaction = csdb::Transaction::from_binary(tdata);
     int32_t tint;
     uint64_t tfrac;
 

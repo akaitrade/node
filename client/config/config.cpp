@@ -80,6 +80,7 @@ const std::string PARAM_NAME_STORAGE_CONTRACT_PARALLEL_WORKERS = "contract_paral
 const std::string PARAM_NAME_STORAGE_USE_STUBS = "use_stubs";
 const std::string PARAM_NAME_STORAGE_ROCKSDB_BLOCK_CACHE_MB = "rocksdb_block_cache_mb";
 const std::string PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB = "rocksdb_memtable_mb";
+const std::string PARAM_NAME_STORAGE_CHECKPOINT_KEEP = "checkpoint_keep";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -972,6 +973,7 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_USE_STUBS, storageData_.useStubs);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ROCKSDB_BLOCK_CACHE_MB, storageData_.rocksdbBlockCacheMb);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB, storageData_.rocksdbMemtableMb);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_KEEP, storageData_.checkpointKeep);
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

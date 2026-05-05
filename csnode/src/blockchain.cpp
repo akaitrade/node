@@ -231,10 +231,7 @@ void BlockChain::onStartReadFromDB(cs::Sequence lastWrittenPoolSeq) {
 }
 
 void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
-    if (stop_) {
-        *shouldStop = true;
-        return;
-    }
+    // stop_ is honoured by the OpenCallback (UserCancelled), not here.
     auto blockSeq = block.sequence();
     lastSequence_ = blockSeq;
     if (blockSeq == 1) {
@@ -261,6 +258,20 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
             }
             updateNonEmptyBlocks(block);
             walletsCacheUpdater_->loadNextBlock(block, block.confidants(), *this);
+        }
+    }
+
+    if (serializationManPtr_
+        && blockSeq
+        && blockSeq % kQuickStartSaveCachesInterval == 0
+        && !*shouldStop) {
+        cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
+        if (serializationManPtr_->save(blockSeq)) {
+            const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
+            serializationManPtr_->pruneCheckpoints(keep);
+        }
+        else {
+            cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
         }
     }
 }
@@ -800,9 +811,14 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
 
     if (serializationManPtr_
         && pool.sequence()
-        && pool.sequence() % kQuickStartSaveCachesInterval == 0
-        && !serializationManPtr_->save(pool.sequence())) {
-        cserror() << "Cannot save caches with version " << pool.sequence();
+        && pool.sequence() % kQuickStartSaveCachesInterval == 0) {
+        if (serializationManPtr_->save(pool.sequence())) {
+            const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
+            serializationManPtr_->pruneCheckpoints(keep);
+        }
+        else {
+            cserror() << "Cannot save caches with version " << pool.sequence();
+        }
     }
 
     return true;

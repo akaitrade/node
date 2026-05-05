@@ -117,12 +117,8 @@ struct CachesSerializationManager::Impl {
       );
     }
 
-    void saveHashes(size_t version) {
-        std::ofstream f(
-          std::filesystem::path(kQuickStartRoot) /
-          std::to_string(version) /
-          kHashesFile
-        );
+    void saveHashes(const std::filesystem::path& dir) {
+        std::ofstream f(dir / kHashesFile);
         f << getHashes();
     }
 
@@ -176,6 +172,9 @@ struct CachesSerializationManager::Impl {
         std::set<size_t> result;
 
         for (auto& p : std::filesystem::directory_iterator(kQuickStartRoot)) {
+            if (p.path().extension() == ".tmp") {
+                continue;
+            }
             auto path = p.path().string();
             if (path.empty()) {
                 continue;
@@ -245,6 +244,13 @@ CachesSerializationManager::CachesSerializationManager()
   if (!std::filesystem::exists(pImpl_->kQuickStartRoot)
       || !std::filesystem::is_directory(pImpl_->kQuickStartRoot)) {
     std::filesystem::create_directories(pImpl_->kQuickStartRoot);
+    return;
+  }
+  for (auto& p : std::filesystem::directory_iterator(pImpl_->kQuickStartRoot)) {
+    if (p.path().extension() == ".tmp") {
+      std::error_code ec;
+      std::filesystem::remove_all(p.path(), ec);
+    }
   }
 }
 
@@ -296,29 +302,45 @@ bool CachesSerializationManager::save(size_t version) {
         return false;
     }
 
-    try {
-        std::filesystem::path p(pImpl_->kQuickStartRoot);
-        p /= std::to_string(version);
-        if (!std::filesystem::exists(p) || !std::filesystem::is_directory(p)) {
-          std::filesystem::create_directories(p);
-        }
+    const std::filesystem::path root(pImpl_->kQuickStartRoot);
+    const std::filesystem::path final_path = root / std::to_string(version);
+    const std::filesystem::path tmp_path   = root / (std::to_string(version) + ".tmp");
 
-        pImpl_->blockchainSerializer.save(p);
-        pImpl_->smartContractsSerializer.save(p);
-        pImpl_->walletsCacheSerializer.save(p);
-        pImpl_->walletsIdsSerializer.save(p);
-        pImpl_->roundStatSerializer.save(p);
+    std::error_code ec;
+    std::filesystem::remove_all(tmp_path, ec);
+    std::filesystem::create_directories(tmp_path, ec);
+    if (ec) {
+        cserror() << "CachesSerializationManager: cannot create " << tmp_path << ": " << ec.message();
+        return false;
+    }
+
+    try {
+        pImpl_->blockchainSerializer.save(tmp_path);
+        pImpl_->smartContractsSerializer.save(tmp_path);
+        pImpl_->walletsCacheSerializer.save(tmp_path);
+        pImpl_->walletsIdsSerializer.save(tmp_path);
+        pImpl_->roundStatSerializer.save(tmp_path);
 #ifdef NODE_API
-        pImpl_->tokensMasterSerializer.save(p);
-        pImpl_->apiHandlerSerializer.save(p);
+        pImpl_->tokensMasterSerializer.save(tmp_path);
+        pImpl_->apiHandlerSerializer.save(tmp_path);
 #endif
-        pImpl_->saveHashes(version);
+        pImpl_->saveHashes(tmp_path);
     } catch (const std::exception& e) {
-        cserror() << "CachesSerializationManager: error on save: "
-                  << e.what();
+        cserror() << "CachesSerializationManager: error on save: " << e.what();
+        std::filesystem::remove_all(tmp_path, ec);
         return false;
     } catch (...) {
         cserror() << "CachesSerializationManager: unknown save error ";
+        std::filesystem::remove_all(tmp_path, ec);
+        return false;
+    }
+
+    std::filesystem::remove_all(final_path, ec);
+    std::filesystem::rename(tmp_path, final_path, ec);
+    if (ec) {
+        cserror() << "CachesSerializationManager: rename "
+                  << tmp_path << " -> " << final_path << " failed: " << ec.message();
+        std::filesystem::remove_all(tmp_path, ec);
         return false;
     }
     return true;
@@ -356,6 +378,23 @@ void CachesSerializationManager::clear(size_t version) {
         return;
     }
     pImpl_->clear(version);
+}
+
+void CachesSerializationManager::pruneCheckpoints(size_t keep) {
+    if (!pImpl_->bindingsReady()) {
+        return;
+    }
+    auto versions = pImpl_->getVersions();
+    versions.erase(0);
+    if (versions.size() <= keep) {
+        return;
+    }
+    const size_t toRemove = versions.size() - keep;
+    size_t removed = 0;
+    for (auto it = versions.begin(); removed < toRemove && it != versions.end(); ++it) {
+        pImpl_->clear(*it);
+        ++removed;
+    }
 }
 
 } // namespace cs

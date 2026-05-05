@@ -39,6 +39,7 @@ public:
 
     bool save(size_t version = 0);
     bool load();
+    void pruneCheckpoints(size_t keep);
 
 private:
     struct Impl;
