@@ -25,6 +25,7 @@ public:
     void update(const csdb::Pool&);
     void invalidate();
     void close();
+    void flush();
 
     bool recreate() const;
 

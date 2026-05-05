@@ -49,7 +49,11 @@ bool TransactionsIndex::recreate() const {
 }
 
 void TransactionsIndex::onStartReadFromDb(Sequence _lastWrittenPoolSeq) {
-    if (!recreate_ && lastIndexedPool_ != _lastWrittenPoolSeq) {
+    if (recreate_) {
+        return;
+    }
+    // Index ahead of chain = corruption. Lag is normal (catch-up via onReadFromDb).
+    if (lastIndexedPool_ != kWrongSequence && lastIndexedPool_ > _lastWrittenPoolSeq) {
         recreate_ = true;
     }
 }
@@ -126,10 +130,14 @@ void TransactionsIndex::invalidate() {
 
 void TransactionsIndex::close() {
     if (db_->isOpen()) {
-        // Force pending writes (including last_indexed) to disk before close
-        // so a clean shutdown actually persists the latest index state.
         db_->flush();
         db_->close();
+    }
+}
+
+void TransactionsIndex::flush() {
+    if (db_->isOpen()) {
+        db_->flush();
     }
 }
 

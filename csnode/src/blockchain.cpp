@@ -267,6 +267,7 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
         && !*shouldStop) {
         cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
         if (serializationManPtr_->save(blockSeq)) {
+            trxIndex_->flush();
             const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
             serializationManPtr_->pruneCheckpoints(keep);
         }
@@ -813,6 +814,7 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
         && pool.sequence()
         && pool.sequence() % kQuickStartSaveCachesInterval == 0) {
         if (serializationManPtr_->save(pool.sequence())) {
+            trxIndex_->flush();
             const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
             serializationManPtr_->pruneCheckpoints(keep);
         }
