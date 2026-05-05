@@ -576,20 +576,6 @@ void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessa
         changeSynchroLog(sender, msg);
     }
     else {
-        // Peer can't / won't serve this batch (NoSuchBlocks, IncorrectRequest,
-        // DuplicatedRequest). Re-queue the requested sequences as rejected so
-        // another peer picks them up — without this they're dropped from the
-        // retry path and the gap stalls forever.
-        auto it = synchroLog_.find(sender);
-        if (it != synchroLog_.end()) {
-            const auto& seqs = std::get<0>(it->second);
-            if (!seqs.empty()) {
-                std::lock_guard<std::mutex> lock(rejectedMutex_);
-                for (auto seq : seqs) {
-                    rejectedSequences_.insert(seq);
-                }
-            }
-        }
         removeSynchroLog(sender);
     }
 }
