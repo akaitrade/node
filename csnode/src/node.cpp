@@ -1981,6 +1981,9 @@ void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
     auto lastSequence = blockChain_.getLastSeq();
 
     if (lastSequence < sequence) {
+        if (poolSynchronizer_ && poolSynchronizer_->isSyncroStarted()) {
+            return;
+        }
         cswarning() << "Local max block " << WithDelimiters(lastSequence) << " is lower than remote one " << WithDelimiters(sequence)
                     << ", trying to request round table";
 
@@ -4400,6 +4403,9 @@ void Node::deepBlockValidation(const csdb::Pool& block, bool* check_failed) {//c
 }
 
 void Node::onRoundTimeElapsed() {
+    if (poolSynchronizer_ && poolSynchronizer_->isSyncroStarted()) {
+        return;
+    }
     solver_->resetGrayList();
     const cs::PublicKey& own_key = solver_->getPublicKey();
     if (initialConfidants_.find(own_key) == initialConfidants_.end()) {
