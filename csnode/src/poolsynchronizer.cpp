@@ -396,19 +396,30 @@ void PoolSynchronizer::sendBlockRequest() {
         maxRequestedSequence_ = cursorCap;
     }
 
-    // Stop extending forward when the cache is at the cap; only the rejected-
-    // sequence drain below still fires (that's the path that unblocks gaps).
     const bool cacheFull = blockChain_->getCachedBlocksSize() >= kCachedBlocksLimit;
+
+    const auto minCached = blockChain_->getCachedBlocksMinSequence();
+    std::vector<cs::Sequence> gapSequences;
+    if (minCached != cs::kWrongSequence && minCached > lastWritten + 1) {
+        for (auto s = lastWritten + 1; s < minCached && gapSequences.size() < 1024; ++s) {
+            bool inFlight = false;
+            for (const auto& entry : synchroLog_) {
+                const auto& seqs = std::get<0>(entry.second);
+                if (std::find(seqs.begin(), seqs.end(), s) != seqs.end()) {
+                    inFlight = true;
+                    break;
+                }
+            }
+            if (!inFlight) gapSequences.push_back(s);
+        }
+    }
+    auto gapIt = gapSequences.begin();
 
     auto requiredBlocks = blockChain_->getRequiredBlocks(getMaxNeighbourSequence());
     auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
     auto end = neighbour;
     updateSynchroLog();
     do {
-        // Priority pass: drain rejected sequences this peer can serve. These
-        // sit BELOW the forward cursor and would otherwise be orphaned. We
-        // consume them first so a single batch can carry both retries and
-        // forward progress.
         std::vector<cs::Sequence> rejectedForPeer;
         const size_t batchCap =
             cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount;
@@ -416,7 +427,7 @@ void PoolSynchronizer::sendBlockRequest() {
             std::lock_guard<std::mutex> lock(rejectedMutex_);
             for (auto it = rejectedSequences_.begin();
                  it != rejectedSequences_.end() && rejectedForPeer.size() < batchCap; ) {
-                if (*it > neighbour->second) { ++it; continue; }   // peer doesn't have it yet
+                if (*it > neighbour->second) { ++it; continue; }
                 bool inFlight = false;
                 for (const auto& entry : synchroLog_) {
                     const auto& seqs = std::get<0>(entry.second);
@@ -431,17 +442,31 @@ void PoolSynchronizer::sendBlockRequest() {
             }
         }
 
+        std::vector<cs::Sequence> gapForPeer;
+        while (gapIt != gapSequences.end()
+               && rejectedForPeer.size() + gapForPeer.size() < batchCap) {
+            if (*gapIt <= neighbour->second) {
+                gapForPeer.push_back(*gapIt);
+                gapIt = gapSequences.erase(gapIt);
+            }
+            else {
+                ++gapIt;
+            }
+        }
+
         std::vector<cs::Sequence> forwardSequences;
         if (!cacheFull) {
             forwardSequences = getNeededSequences(requiredBlocks, neighbour->second);
-            if (rejectedForPeer.size() + forwardSequences.size() > batchCap) {
-                forwardSequences.resize(batchCap - rejectedForPeer.size());
+            const size_t used = rejectedForPeer.size() + gapForPeer.size();
+            if (used + forwardSequences.size() > batchCap) {
+                forwardSequences.resize(batchCap - used);
             }
         }
 
         std::vector<cs::Sequence> neededSequences;
-        neededSequences.reserve(rejectedForPeer.size() + forwardSequences.size());
+        neededSequences.reserve(rejectedForPeer.size() + gapForPeer.size() + forwardSequences.size());
         neededSequences.insert(neededSequences.end(), rejectedForPeer.begin(), rejectedForPeer.end());
+        neededSequences.insert(neededSequences.end(), gapForPeer.begin(), gapForPeer.end());
         neededSequences.insert(neededSequences.end(), forwardSequences.begin(), forwardSequences.end());
 
         if (!neededSequences.empty()) {
@@ -456,11 +481,10 @@ void PoolSynchronizer::sendBlockRequest() {
                 }
             }
             else {
-                // Peer busy — return rejected entries to the queue.
                 std::lock_guard<std::mutex> lock(rejectedMutex_);
-                for (auto seq : rejectedForPeer) {
-                    rejectedSequences_.insert(seq);
-                }
+                for (auto seq : rejectedForPeer) rejectedSequences_.insert(seq);
+                gapSequences.insert(gapSequences.end(), gapForPeer.begin(), gapForPeer.end());
+                gapIt = gapSequences.begin();
             }
         }
 

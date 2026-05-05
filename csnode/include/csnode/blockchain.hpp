@@ -209,6 +209,7 @@ public:
 
     std::size_t getCachedBlocksSize() const;
     std::size_t getCachedBlocksSizeSynced() const;
+    cs::Sequence getCachedBlocksMinSequence() const;
     void clearBlockCache();
 
     void cacheLastBlocks();
@@ -559,7 +560,7 @@ private:
 
     friend class cs::BlockChain_Serializer;
 
-    const size_t kQuickStartSaveCachesInterval = 10'000'000;
+    const size_t kQuickStartSaveCachesInterval = 5'000'000;
     int32_t blockRewardIntegral_;
     uint64_t blockRewardFraction_ ;
     int32_t miningCoefficientIntegral_;

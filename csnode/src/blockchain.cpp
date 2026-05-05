@@ -1950,6 +1950,11 @@ std::size_t BlockChain::getCachedBlocksSizeSynced() const {
     return cachedBlocks_->sizeSynced();
 }
 
+cs::Sequence BlockChain::getCachedBlocksMinSequence() const {
+    cs::Lock lock(cachedBlocksMutex_);
+    return cachedBlocks_->isEmpty() ? cs::kWrongSequence : cachedBlocks_->minSequence();
+}
+
 void BlockChain::clearBlockCache() {
     cs::Lock lock(cachedBlocksMutex_);
     cachedBlocks_->clear();

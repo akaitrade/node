@@ -3153,7 +3153,11 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
     }
 
     if (poolSynchronizer_->isSyncroStarted() && !iMode) {
-        getCharacteristic(rPackage);
+        const auto pkgSeq = rPackage.poolMetaInfo().sequenceNumber;
+        const auto reach = blockChain_.getLastSeq() + cs::PoolSynchronizer::kCachedBlocksLimit;
+        if (pkgSeq <= reach) {
+            getCharacteristic(rPackage);
+        }
     }
 
     //if (iMode && poolSynchronizer_->getTargetSequence() > 0ULL) {
@@ -3303,9 +3307,12 @@ void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& 
     // first change conveyer state
     cs::Conveyer::instance().setTable(roundTable);
 
-    // create pool by previous round, then change conveyer state.
     if (!cs::ConfigHolder::instance().config()->isIdleMode()) {
-        getCharacteristic(rPackage);
+        const auto pkgSeq = rPackage.poolMetaInfo().sequenceNumber;
+        const auto reach = blockChain_.getLastSeq() + cs::PoolSynchronizer::kCachedBlocksLimit;
+        if (!poolSynchronizer_->isSyncroStarted() || pkgSeq <= reach) {
+            getCharacteristic(rPackage);
+        }
     }
 
 
