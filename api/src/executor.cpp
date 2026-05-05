@@ -801,13 +801,27 @@ void cs::Executor::checkExecutorVersion() {
     }
 }
 
+namespace {
+// Mirror the csconnector server-side limits so a Java reply with > 16K
+// container entries doesn't trip TProtocolException::Exceeded size limit
+// on the client side (which kills the executor connection and pins the
+// watcher thread spinning on reconnect).
+constexpr int32_t kExecClientStringLimit    = 100 * 1024 * 1024;  // 100 MB
+constexpr int32_t kExecClientContainerLimit = 1 * 1024 * 1024;    // 1M items
+constexpr bool    kExecClientStrictRead     = false;
+constexpr bool    kExecClientStrictWrite    = true;
+}
+
 cs::Executor::Executor(const cs::ExecutorSettings::Types& types)
 : blockchain_(std::get<cs::Reference<const BlockChain>>(types))
 , solver_(std::get<cs::Reference<const cs::SolverCore>>(types))
 , socket_(::apache::thrift::stdcxx::make_shared<::apache::thrift::transport::TSocket>(cs::ConfigHolder::instance().config()->getApiSettings().executorHost,
                                                                                       cs::ConfigHolder::instance().config()->getApiSettings().executorPort))
 , executorTransport_(new ::apache::thrift::transport::TBufferedTransport(socket_))
-, origExecutor_(std::make_unique<executor::ContractExecutorConcurrentClient>(::apache::thrift::stdcxx::make_shared<apache::thrift::protocol::TBinaryProtocol>(executorTransport_))) {
+, origExecutor_(std::make_unique<executor::ContractExecutorConcurrentClient>(
+      ::apache::thrift::stdcxx::make_shared<apache::thrift::protocol::TBinaryProtocol>(
+          executorTransport_, kExecClientStringLimit, kExecClientContainerLimit,
+          kExecClientStrictRead, kExecClientStrictWrite))) {
     socket_->setSendTimeout(cs::ConfigHolder::instance().config()->getApiSettings().executorSendTimeout);
     socket_->setRecvTimeout(cs::ConfigHolder::instance().config()->getApiSettings().executorReceiveTimeout);
 
@@ -841,19 +855,6 @@ cs::Executor::Executor(const cs::ExecutorSettings::Types& types)
         isWatcherRunning_.store(true, std::memory_order_release);
 
         while (!requestStop_) {
-            if (isConnected()) {
-                static std::mutex mutex;
-                std::unique_lock lock(mutex);
-
-                cvErrorConnect_.wait_for(lock, std::chrono::seconds(5), [&] {
-                    return !isConnected() || requestStop_;
-                });
-            }
-
-            if (requestStop_) {
-                break;
-            }
-
             if (executorProcess_->isRunning()) {
                 if (!isConnected()) {
                     connect();
@@ -862,6 +863,28 @@ cs::Executor::Executor(const cs::ExecutorSettings::Types& types)
             else if (state_ != ExecutorState::Launching) {
                 checkAnotherExecutor();
                 runProcess();
+            }
+
+            if (requestStop_) {
+                break;
+            }
+
+            // Always sleep at the bottom of the loop. When connected, wait up
+            // to 5s, broken early by a connection error. When disconnected,
+            // sleep 2s between connect() retries — required to avoid pinning
+            // a CPU core when connect() fails fast (TCP RST after executor
+            // disconnect on Thrift size-limit exception).
+            static std::mutex mutex;
+            std::unique_lock lock(mutex);
+            if (isConnected()) {
+                cvErrorConnect_.wait_for(lock, std::chrono::seconds(5), [&] {
+                    return !isConnected() || requestStop_.load();
+                });
+            }
+            else {
+                cvErrorConnect_.wait_for(lock, std::chrono::seconds(2), [&] {
+                    return requestStop_.load();
+                });
             }
         }
 
@@ -1021,5 +1044,8 @@ void cs::Executor::notifyError() {
 void cs::Executor::recreateOriginExecutor() {
     std::lock_guard lock(sharedErrorMutex_);
     disconnect();
-    origExecutor_.reset(new executor::ContractExecutorConcurrentClient(::apache::thrift::stdcxx::make_shared<apache::thrift::protocol::TBinaryProtocol>(executorTransport_)));
+    origExecutor_.reset(new executor::ContractExecutorConcurrentClient(
+        ::apache::thrift::stdcxx::make_shared<apache::thrift::protocol::TBinaryProtocol>(
+            executorTransport_, kExecClientStringLimit, kExecClientContainerLimit,
+            kExecClientStrictRead, kExecClientStrictWrite)));
 }

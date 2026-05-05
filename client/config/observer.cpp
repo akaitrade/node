@@ -41,7 +41,11 @@ void cs::config::Observer::eventLoop() {
     std::unique_lock lock(mutex_);
 
     while (isObserved_.load(std::memory_order_acquire)) {
-        variable_.wait_for(lock, std::chrono::milliseconds(config_.observerWaitTime()));
+        // Predicate prevents spurious wakeups from triggering a re-parse —
+        // every wakeup without it floods the log with [configInfo] lines.
+        variable_.wait_for(lock, std::chrono::milliseconds(config_.observerWaitTime()), [&] {
+            return !isObserved_.load(std::memory_order_acquire);
+        });
 
         if (!isObserved_.load(std::memory_order_acquire)) {
             break;

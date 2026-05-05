@@ -391,6 +391,16 @@ void PoolSynchronizer::sendBlockRequest() {
         maxRequestedSequence_ = lastWritten;
     }
 
+    // Cap the cursor so it can't outrun the apply path. Without this, peers
+    // reporting near-head sequences (~175M) drag the cursor up there, the
+    // cache fills with forward blocks that testCachedBlocks can never apply
+    // (minSequence != lastSeq+1 short-circuit), and the gap at lastSeq+1
+    // gets starved.
+    const auto cursorCap = lastWritten + kCachedBlocksLimit;
+    if (maxRequestedSequence_ > cursorCap) {
+        maxRequestedSequence_ = cursorCap;
+    }
+
     // Stop extending forward when the cache is at the cap; only the rejected-
     // sequence drain below still fires (that's the path that unblocks gaps).
     const bool cacheFull = blockChain_->getCachedBlocksSize() >= kCachedBlocksLimit;
@@ -566,6 +576,20 @@ void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessa
         changeSynchroLog(sender, msg);
     }
     else {
+        // Peer can't / won't serve this batch (NoSuchBlocks, IncorrectRequest,
+        // DuplicatedRequest). Re-queue the requested sequences as rejected so
+        // another peer picks them up — without this they're dropped from the
+        // retry path and the gap stalls forever.
+        auto it = synchroLog_.find(sender);
+        if (it != synchroLog_.end()) {
+            const auto& seqs = std::get<0>(it->second);
+            if (!seqs.empty()) {
+                std::lock_guard<std::mutex> lock(rejectedMutex_);
+                for (auto seq : seqs) {
+                    rejectedSequences_.insert(seq);
+                }
+            }
+        }
         removeSynchroLog(sender);
     }
 }
