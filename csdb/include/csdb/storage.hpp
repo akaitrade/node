@@ -149,7 +149,9 @@ public:
               cs::Sequence startReadFrom = 0,
               size_t asyncWriteQueueMax = 5000,
               size_t writeBatchSize = 100,
-              bool useEmptyPoolStubs = true);
+              bool useEmptyPoolStubs = true,
+              uint64_t rocksDbBlockCacheBytes = 0,
+              uint64_t rocksDbMemtableBytes = 0);
 
     /**
      * @brief Creating the storage using the parameters set.

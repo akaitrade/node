@@ -74,6 +74,11 @@ void DatabaseRocksDB::set_last_error_from_status(const rocksdb::Status& s) {
     set_last_error(err, "RocksDB error: %s", s.ToString().c_str());
 }
 
+void DatabaseRocksDB::set_tuning(uint64_t block_cache_bytes, uint64_t memtable_bytes) {
+    if (block_cache_bytes > 0) block_cache_bytes_ = block_cache_bytes;
+    if (memtable_bytes > 0)    memtable_bytes_    = memtable_bytes;
+}
+
 bool DatabaseRocksDB::open(const std::string& path) {
     boost::filesystem::path direc(path);
     if (boost::filesystem::exists(direc)) {
@@ -85,35 +90,59 @@ bool DatabaseRocksDB::open(const std::string& path) {
     rocksdb::Options options;
     options.create_if_missing = true;
     options.create_missing_column_families = true;
-    // LZ4 hot, LZ4HC bottommost (slower-encode/better ratio; cold tier).
     options.compression = rocksdb::kLZ4Compression;
     options.bottommost_compression = rocksdb::kLZ4HCCompression;
     options.level_compaction_dynamic_level_bytes = true;
-    options.max_background_jobs = 8;                 // tune up for sync-time throughput
-    options.write_buffer_size = 256u << 20;          // 256 MiB memtable
-    options.bytes_per_sync = 1u << 20;               // 1 MiB
+    options.max_background_jobs = 8;
+    options.write_buffer_size = memtable_bytes_;
+    options.bytes_per_sync = 1u << 20;
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
-
-    rocksdb::BlockBasedTableOptions topt;
-    topt.block_size = 16 * 1024;
-    topt.cache_index_and_filter_blocks = true;
-    topt.pin_l0_filter_and_index_blocks_in_cache = true;
-    topt.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));
-    topt.format_version = 5;
-    options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(topt));
+    options.enable_pipelined_write = true;
+    options.compaction_readahead_size = 2u << 20;
+    options.max_open_files = -1;
 
     if (bulk_load_) {
-        // Disables auto-compaction, raises stall triggers to ~infinity,
-        // bumps write_buffer_size + max_write_buffer_number. SSTs pile up in
-        // L0 unthrottled until compact_full() is called at end of import.
         options.PrepareForBulkLoad();
     }
 
-    rocksdb::ColumnFamilyOptions cf_opts(options);
+    auto block_cache = rocksdb::NewLRUCache(block_cache_bytes_);
+
+    auto make_table_factory = [&](size_t block_size, bool partition) {
+        rocksdb::BlockBasedTableOptions topt;
+        topt.block_size = block_size;
+        topt.block_cache = block_cache;
+        topt.cache_index_and_filter_blocks = true;
+        topt.pin_l0_filter_and_index_blocks_in_cache = true;
+        topt.cache_index_and_filter_blocks_with_high_priority = true;
+        topt.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));
+        topt.format_version = 5;
+        topt.optimize_filters_for_memory = true;
+        if (partition) {
+            // Top-level only resident; sub-partitions cache on demand.
+            topt.index_type = rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch;
+            topt.partition_filters = true;
+            topt.metadata_block_size = 4096;
+            topt.pin_top_level_index_and_filter = true;
+        }
+        return std::shared_ptr<rocksdb::TableFactory>(rocksdb::NewBlockBasedTableFactory(topt));
+    };
+
+    rocksdb::ColumnFamilyOptions cf_blocks_opts(options);
+    cf_blocks_opts.table_factory = make_table_factory(16 * 1024, false);
+    cf_blocks_opts.target_file_size_base = 256ULL << 20;
+
+    rocksdb::ColumnFamilyOptions cf_seq_no_opts(options);
+    cf_seq_no_opts.table_factory = make_table_factory(4 * 1024, true);
+    cf_seq_no_opts.write_buffer_size = 32ULL << 20;
+
+    rocksdb::ColumnFamilyOptions cf_contracts_opts(options);
+    cf_contracts_opts.table_factory = make_table_factory(16 * 1024, false);
+    cf_contracts_opts.write_buffer_size = 32ULL << 20;
+
     std::vector<rocksdb::ColumnFamilyDescriptor> cfs = {
-        {rocksdb::kDefaultColumnFamilyName, cf_opts},  // blocks
-        {kCfSeqNo,                          cf_opts},
-        {kCfContracts,                      cf_opts},
+        {rocksdb::kDefaultColumnFamilyName, cf_blocks_opts},
+        {kCfSeqNo,                          cf_seq_no_opts},
+        {kCfContracts,                      cf_contracts_opts},
     };
     std::vector<rocksdb::ColumnFamilyHandle*> handles;
 

@@ -697,7 +697,9 @@ bool Storage::open(
     cs::Sequence startReadFrom,
     size_t asyncWriteQueueMax,
     size_t writeBatchSize,
-    bool useEmptyPoolStubs
+    bool useEmptyPoolStubs,
+    uint64_t rocksDbBlockCacheBytes,
+    uint64_t rocksDbMemtableBytes
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
@@ -713,8 +715,11 @@ bool Storage::open(
 
 #ifdef CSDB_USE_ROCKSDB
     auto db{::std::make_shared<::csdb::DatabaseRocksDB>()};
+    db->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
 #else
     auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
+    (void)rocksDbBlockCacheBytes;
+    (void)rocksDbMemtableBytes;
 #endif
     db->open(path);
     OpenOptions opt{db, newBlockchainTop, startReadFrom};

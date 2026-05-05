@@ -34,6 +34,12 @@ public:
     // called once at the end of a bulk-load run.
     bool compact_full();
 
+    // Override the default RocksDB resource budget. Must be called before
+    // open(). Zero values keep the built-in defaults (1 GiB cache, 256 MiB
+    // memtable). The block cache is shared across all CFs and counts both
+    // index/filter and data blocks.
+    void set_tuning(uint64_t block_cache_bytes, uint64_t memtable_bytes);
+
     bool open(const std::string& path);
 
 private:
@@ -60,6 +66,8 @@ private:
     rocksdb::ColumnFamilyHandle* cf_seq_no_ = nullptr;
     rocksdb::ColumnFamilyHandle* cf_contracts_ = nullptr;
     bool bulk_load_ = false;
+    uint64_t block_cache_bytes_ = 1ULL << 30;      // 1 GiB
+    uint64_t memtable_bytes_    = 256ULL << 20;    // 256 MiB
 };
 
 }  // namespace csdb
