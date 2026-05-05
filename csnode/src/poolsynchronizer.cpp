@@ -59,10 +59,6 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
     if (!isSyncroStarted_ && roundNum < (lastWrittenSequence + difference)) {
         return;
     }
-    if (maxRequestedSequence_ != kWrongSequence && maxRequestedSequence_ > lastWrittenSequence) {
-        return;
-    }
-
     if (isSyncroStarted_ && roundNum > 0) {
         --roundNum;
     }
@@ -98,7 +94,6 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
 
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
-        maxRequestedSequence_ = lastWrittenSequence;
         timer_.start(
             cs::ConfigHolder::instance().config()->getPoolSyncSettings().sequencesVerificationFrequency,
             Timer::Type::HighPrecise,
@@ -134,34 +129,20 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
 
         if (lastWrittenSequence > sequence) {
             csdebug() << "skip seq " << sequence;
-            // Have it already → not a candidate for re-request.
-            std::lock_guard<std::mutex> lock(rejectedMutex_);
-            rejectedSequences_.erase(sequence);
             continue;
         }
 
         if (pool.signatures().size() == 0 && pool.transactions_count() > 0) {
-            cserror() << "SYNC: No signatures in non-empty pool #" << pool.sequence() << ", will re-request";
-            std::lock_guard<std::mutex> lock(rejectedMutex_);
-            rejectedSequences_.insert(sequence);
+            cserror() << "SYNC: No signatures in non-empty pool #" << sequence;
             continue;
         }
 
         if (blockChain_->storeBlock(pool, cs::PoolStoreType::Synced)) {
-            {
-                std::lock_guard<std::mutex> lock(rejectedMutex_);
-                rejectedSequences_.erase(sequence);
-            }
             blockChain_->testCachedBlocks();
             lastWrittenSequence = blockChain_->getLastSeq();
         }
         else {
-            // storeBlock returned false (consistency check, hash mismatch, etc.)
-            // Track for re-request — without this, a forward-only cursor would
-            // orphan the gap once it advanced past this sequence.
-            cswarning() << "SYNC: storeBlock failed for #" << sequence << ", will re-request";
-            std::lock_guard<std::mutex> lock(rejectedMutex_);
-            rejectedSequences_.insert(sequence);
+            cswarning() << "SYNC: storeBlock failed for #" << sequence;
         }
     }
 
@@ -182,23 +163,6 @@ void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::Publ
     csdebug() << "SYNC: Get Block Reply <<<<<<< : count: " << poolsBlock.size()
         << ", seqs: [" << poolsBlock.front().sequence()
         << ", " << poolsBlock.back().sequence() << "]";
-
-    // Re-queue requested-but-undelivered sequences (partial reply path).
-    {
-        auto it = synchroLog_.find(sender);
-        if (it != synchroLog_.end()) {
-            std::unordered_set<cs::Sequence> delivered;
-            delivered.reserve(poolsBlock.size());
-            for (const auto& p : poolsBlock) delivered.insert(p.sequence());
-            const auto& requested = std::get<0>(it->second);
-            std::lock_guard<std::mutex> lock(rejectedMutex_);
-            for (auto seq : requested) {
-                if (delivered.find(seq) == delivered.end()) {
-                    rejectedSequences_.insert(seq);
-                }
-            }
-        }
-    }
 
     removeSynchroLog(sender);
     manageSyncBlocks(std::move(poolsBlock));
@@ -380,173 +344,65 @@ void PoolSynchronizer::sendBlockRequest() {
         return;
     }
 
-    // Ratchet forward only; never rewind (that caused the per-tick re-request loop).
-    const auto lastWritten = blockChain_->getLastSeq();
-    if (maxRequestedSequence_ == kWrongSequence || maxRequestedSequence_ < lastWritten) {
-        maxRequestedSequence_ = lastWritten;
-    }
-
-    // Cap the cursor so it can't outrun the apply path. Without this, peers
-    // reporting near-head sequences (~175M) drag the cursor up there, the
-    // cache fills with forward blocks that testCachedBlocks can never apply
-    // (minSequence != lastSeq+1 short-circuit), and the gap at lastSeq+1
-    // gets starved.
-    const auto cursorCap = lastWritten + kCachedBlocksLimit;
-    if (maxRequestedSequence_ > cursorCap) {
-        maxRequestedSequence_ = cursorCap;
-    }
-
-    const bool cacheFull = blockChain_->getCachedBlocksSize() >= kCachedBlocksLimit;
-
-    const auto minCached = blockChain_->getCachedBlocksMinSequence();
-    std::vector<cs::Sequence> gapSequences;
-    if (minCached != cs::kWrongSequence && minCached > lastWritten + 1) {
-        for (auto s = lastWritten + 1; s < minCached && gapSequences.size() < 1024; ++s) {
-            bool inFlight = false;
-            for (const auto& entry : synchroLog_) {
-                const auto& seqs = std::get<0>(entry.second);
-                if (std::find(seqs.begin(), seqs.end(), s) != seqs.end()) {
-                    inFlight = true;
-                    break;
-                }
-            }
-            if (!inFlight) gapSequences.push_back(s);
-        }
-    }
-    auto gapIt = gapSequences.begin();
+    updateSynchroLog();
 
     auto requiredBlocks = blockChain_->getRequiredBlocks(getMaxNeighbourSequence());
+    if (requiredBlocks.empty()) {
+        return;
+    }
+
+    const auto lastWritten = blockChain_->getLastSeq();
+    const auto cursorCap = lastWritten + kCachedBlocksLimit;
+    const size_t batchCap =
+        cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount;
+    const size_t maxCandidates = batchCap * neighbours_.size();
+
+    auto inFlight = [this](cs::Sequence s) {
+        for (const auto& entry : synchroLog_) {
+            const auto& seqs = std::get<0>(entry.second);
+            if (std::find(seqs.begin(), seqs.end(), s) != seqs.end()) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<cs::Sequence> candidates;
+    candidates.reserve(maxCandidates);
+    for (const auto& interval : requiredBlocks) {
+        for (auto s = interval.first; s <= interval.second && s <= cursorCap; ++s) {
+            if (candidates.size() >= maxCandidates) break;
+            if (!inFlight(s)) candidates.push_back(s);
+        }
+        if (candidates.size() >= maxCandidates) break;
+    }
+
+    if (candidates.empty()) {
+        return;
+    }
+
     auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
-    auto end = neighbour;
-    updateSynchroLog();
+    const auto end = neighbour;
+    auto seqIt = candidates.begin();
     do {
-        std::vector<cs::Sequence> rejectedForPeer;
-        const size_t batchCap =
-            cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount;
-        {
-            std::lock_guard<std::mutex> lock(rejectedMutex_);
-            for (auto it = rejectedSequences_.begin();
-                 it != rejectedSequences_.end() && rejectedForPeer.size() < batchCap; ) {
-                if (*it > neighbour->second) { ++it; continue; }
-                bool inFlight = false;
-                for (const auto& entry : synchroLog_) {
-                    const auto& seqs = std::get<0>(entry.second);
-                    if (std::find(seqs.begin(), seqs.end(), *it) != seqs.end()) {
-                        inFlight = true;
-                        break;
-                    }
-                }
-                if (inFlight) { ++it; continue; }
-                rejectedForPeer.push_back(*it);
-                it = rejectedSequences_.erase(it);
-            }
+        if (seqIt == candidates.end()) break;
+        std::vector<cs::Sequence> batch;
+        while (batch.size() < batchCap && seqIt != candidates.end() && *seqIt <= neighbour->second) {
+            batch.push_back(*seqIt);
+            ++seqIt;
         }
-
-        std::vector<cs::Sequence> gapForPeer;
-        while (gapIt != gapSequences.end()
-               && rejectedForPeer.size() + gapForPeer.size() < batchCap) {
-            if (*gapIt <= neighbour->second) {
-                gapForPeer.push_back(*gapIt);
-                gapIt = gapSequences.erase(gapIt);
-            }
-            else {
-                ++gapIt;
-            }
+        if (!batch.empty() && checkSynchroLog(neighbour->first)) {
+            cslog() << "SYNC: requesting for " << batch.size()
+                << " blocks [" << batch.front() << ", " << batch.back()
+                << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
+            emit sendRequest(neighbour->first, batch);
+            addSynchroLog(neighbour->first, batch, SyncroMessage::NoAnswer);
         }
-
-        std::vector<cs::Sequence> forwardSequences;
-        if (!cacheFull) {
-            forwardSequences = getNeededSequences(requiredBlocks, neighbour->second);
-            const size_t used = rejectedForPeer.size() + gapForPeer.size();
-            if (used + forwardSequences.size() > batchCap) {
-                forwardSequences.resize(batchCap - used);
-            }
-        }
-
-        std::vector<cs::Sequence> neededSequences;
-        neededSequences.reserve(rejectedForPeer.size() + gapForPeer.size() + forwardSequences.size());
-        neededSequences.insert(neededSequences.end(), rejectedForPeer.begin(), rejectedForPeer.end());
-        neededSequences.insert(neededSequences.end(), gapForPeer.begin(), gapForPeer.end());
-        neededSequences.insert(neededSequences.end(), forwardSequences.begin(), forwardSequences.end());
-
-        if (!neededSequences.empty()) {
-            if (checkSynchroLog(neighbour->first)) {
-                cslog() << "SYNC: requesting for " << neededSequences.size()
-                    << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
-                    << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
-                emit sendRequest(neighbour->first, neededSequences);
-                addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
-                if (!forwardSequences.empty()) {
-                    maxRequestedSequence_ = forwardSequences.back();
-                }
-            }
-            else {
-                std::lock_guard<std::mutex> lock(rejectedMutex_);
-                for (auto seq : rejectedForPeer) rejectedSequences_.insert(seq);
-                gapSequences.insert(gapSequences.end(), gapForPeer.begin(), gapForPeer.end());
-                gapIt = gapSequences.begin();
-            }
-        }
-
         ++neighbour;
         if (neighbour == neighbours_.end()) {
             neighbour = neighbours_.begin();
         }
     } while (neighbour != end);
-}
-
-std::vector<Sequence> PoolSynchronizer::getNeededSequences(
-    const std::vector<BlockChain::SequenceInterval>& requiredBlocks,
-    Sequence neighbourLastSeq
-) {
-    if (requiredBlocks.empty()) {
-        csdebug() << "SYNC: Required blocks is empty !!!";
-        return {};
-    }
-
-    Sequence sequence = maxRequestedSequence_;
-    std::vector<Sequence> neededSequences;
-
-    for (size_t i = 0; i < cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount; ++i) {
-        ++sequence;
-
-        // max sequence
-        if (requiredBlocks.back().second != 0 && sequence > requiredBlocks.back().second) {
-            break;
-        }
-
-        // current neighbour has no more
-        if (sequence > neighbourLastSeq) {
-            break;
-        }
-
-        // Skip seqs already in flight to any peer.
-        bool alreadyRequested = false;
-        for (const auto& entry : synchroLog_) {
-            const auto& seqs = std::get<0>(entry.second);
-            if (std::find(seqs.begin(), seqs.end(), sequence) != seqs.end()) {
-                alreadyRequested = true;
-                break;
-            }
-        }
-        if (alreadyRequested) {
-            continue;
-        }
-
-        for (size_t j = 1; j <= requiredBlocks.size(); ++j) {
-            // Within a valid pair
-            if (sequence >= requiredBlocks[j - 1].first && sequence <= requiredBlocks[j - 1].second) {
-                break;
-            }
-            // Between pairs
-            if (sequence > requiredBlocks[j - 1].second && j < requiredBlocks.size() && sequence < requiredBlocks[j].first) {
-                sequence = requiredBlocks[j].first;
-                break;
-            }
-        }
-        neededSequences.push_back(sequence);
-    }
-    return neededSequences;
 }
 
 void PoolSynchronizer::synchroFinished() {
@@ -559,17 +415,8 @@ void PoolSynchronizer::synchroFinished() {
                         << " required-block range(s) still reported by blockchain";
         }
     }
-    {
-        std::lock_guard<std::mutex> lock(rejectedMutex_);
-        if (!rejectedSequences_.empty()) {
-            cswarning() << "SYNC: synchroFinished with " << rejectedSequences_.size()
-                        << " rejected sequence(s) still pending re-request";
-        }
-    }
-
     timer_.stop();
     isSyncroStarted_ = false;
-    maxRequestedSequence_ = kWrongSequence;
     csdebug() << "SYNC: Synchro finished";
 }
 
@@ -582,11 +429,6 @@ void PoolSynchronizer::stop() {
     timer_.stop();
     isSyncroStarted_ = false;
     synchroLog_.clear();
-    {
-        std::lock_guard<std::mutex> lock(rejectedMutex_);
-        rejectedSequences_.clear();
-    }
-    maxRequestedSequence_ = kWrongSequence;
     cslog() << "SYNC: shutdown — pool synchronizer stopped";
 }
 
@@ -638,17 +480,6 @@ void PoolSynchronizer::updateSynchroLog() {
             (msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) ||
             (msg == SyncroMessage::NoAnswer    && timeNow > timeEvent + kNoAnswerEntryTtlMs);
         if (stale) {
-            // Re-queue NoAnswer sequences — cursor only walks forward, so
-            // without this they'd never be re-requested.
-            if (msg == SyncroMessage::NoAnswer) {
-                const auto& seqs = std::get<0>(it->second);
-                if (!seqs.empty()) {
-                    std::lock_guard<std::mutex> lock(rejectedMutex_);
-                    for (auto seq : seqs) {
-                        rejectedSequences_.insert(seq);
-                    }
-                }
-            }
             it = synchroLog_.erase(it);
         }
         else {

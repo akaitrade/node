@@ -392,7 +392,15 @@ void CachesSerializationManager::pruneCheckpoints(size_t keep) {
     const size_t toRemove = versions.size() - keep;
     size_t removed = 0;
     for (auto it = versions.begin(); removed < toRemove && it != versions.end(); ++it) {
-        pImpl_->clear(*it);
+        // Remove only the directory. Per-serializer clear() resets live
+        // in-memory state, which would corrupt the running node.
+        std::filesystem::path p(pImpl_->kQuickStartRoot);
+        p /= std::to_string(*it);
+        std::error_code ec;
+        std::filesystem::remove_all(p, ec);
+        if (ec) {
+            cswarning() << "CachesSerializationManager: prune failed for " << p << ": " << ec.message();
+        }
         ++removed;
     }
 }

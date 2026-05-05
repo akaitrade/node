@@ -2,8 +2,6 @@
 #define POOLSYNCHRONIZER_HPP
 
 #include <chrono>
-#include <mutex>
-#include <unordered_set>
 
 #include <csdb/pool.hpp>
 
@@ -73,31 +71,19 @@ private:
     bool showSyncronizationProgress(Sequence lastWrittenSequence) const;
     void manageSyncBlocks(cs::PoolsBlock&& poolsBlock);
 
-    std::vector<Sequence> getNeededSequences(
-        const std::vector<BlockChain::SequenceInterval>& requiredBlocks,
-        Sequence neighbourLastSeq
-    );
-
     void synchroFinished();
     size_t nextIndex(size_t index) const;
 
     BlockChain* blockChain_;
 
     std::atomic<bool> isSyncroStarted_ = false;
-    std::atomic<bool> stopped_ = false;   // shutdown guard; once set, all entry points are no-ops
+    std::atomic<bool> stopped_ = false;
 
-    Sequence maxRequestedSequence_ = kWrongSequence;
     std::unordered_map<PublicKey, Sequence> neighbours_;
 
-    // Single-threaded: all callers run via CallQueuePolicy, including stop().
+    // Single-threaded: all callers run via CallQueuePolicy.
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
     Timer timer_;
-
-    // Sequences received from peers but rejected (empty sigs / storeBlock=false).
-    // The forward-walking cursor doesn't go back, so without explicit tracking
-    // these would be orphaned. Drained as priority into the next request batch.
-    std::unordered_set<cs::Sequence> rejectedSequences_;
-    mutable std::mutex rejectedMutex_;
 };
 }  // namespace cs
 #endif  // POOLSYNCHRONIZER_HPP
