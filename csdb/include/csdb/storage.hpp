@@ -151,7 +151,8 @@ public:
               size_t writeBatchSize = 100,
               bool useEmptyPoolStubs = true,
               uint64_t rocksDbBlockCacheBytes = 0,
-              uint64_t rocksDbMemtableBytes = 0);
+              uint64_t rocksDbMemtableBytes = 0,
+              const std::string& dbBackend = std::string{});
 
     /**
      * @brief Creating the storage using the parameters set.

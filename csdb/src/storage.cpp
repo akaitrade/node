@@ -20,7 +20,7 @@
 
 #include <csdb/address.hpp>
 #include <csdb/database.hpp>
-#if defined(CSDB_BUILD_MIGRATE)
+#if defined(CSDB_BUILD_MIGRATE) || (defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB))
 #include <csdb/database_berkeleydb.hpp>
 #include <csdb/database_rocksdb.hpp>
 #elif defined(CSDB_USE_ROCKSDB)
@@ -699,7 +699,8 @@ bool Storage::open(
     size_t writeBatchSize,
     bool useEmptyPoolStubs,
     uint64_t rocksDbBlockCacheBytes,
-    uint64_t rocksDbMemtableBytes
+    uint64_t rocksDbMemtableBytes,
+    const std::string& dbBackend
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
@@ -713,15 +714,32 @@ bool Storage::open(
         d->writeBatchSize_ = writeBatchSize;
     }
 
-#ifdef CSDB_USE_ROCKSDB
-    auto db{::std::make_shared<::csdb::DatabaseRocksDB>()};
-    db->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
+    std::shared_ptr<Database> db;
+#if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
+    if (dbBackend == "berkeleydb" || dbBackend == "berkeley") {
+        auto bdb = std::make_shared<DatabaseBerkeleyDB>();
+        bdb->open(path);
+        db = bdb;
+    } else {
+        auto rocks = std::make_shared<DatabaseRocksDB>();
+        rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
+        rocks->open(path);
+        db = rocks;
+    }
+#elif defined(CSDB_USE_ROCKSDB)
+    auto rocks = std::make_shared<DatabaseRocksDB>();
+    rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
+    rocks->open(path);
+    db = rocks;
+    (void)dbBackend;
 #else
-    auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
+    auto bdb = std::make_shared<DatabaseBerkeleyDB>();
+    bdb->open(path);
+    db = bdb;
     (void)rocksDbBlockCacheBytes;
     (void)rocksDbMemtableBytes;
+    (void)dbBackend;
 #endif
-    db->open(path);
     OpenOptions opt{db, newBlockchainTop, startReadFrom};
     opt.useEmptyPoolStubs = useEmptyPoolStubs;
     return open(opt, callback);

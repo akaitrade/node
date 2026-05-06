@@ -78,6 +78,7 @@ const std::string PARAM_NAME_STORAGE_PROGRESS_LOG_INTERVAL = "progress_log_inter
 const std::string PARAM_NAME_STORAGE_PARALLEL_CONTRACT_EXECUTION = "parallel_contract_execution";
 const std::string PARAM_NAME_STORAGE_CONTRACT_PARALLEL_WORKERS = "contract_parallel_workers";
 const std::string PARAM_NAME_STORAGE_USE_STUBS = "use_stubs";
+const std::string PARAM_NAME_STORAGE_DB_BACKEND = "db_backend";
 const std::string PARAM_NAME_STORAGE_ROCKSDB_BLOCK_CACHE_MB = "rocksdb_block_cache_mb";
 const std::string PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB = "rocksdb_memtable_mb";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_KEEP = "checkpoint_keep";
@@ -971,6 +972,7 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_PARALLEL_CONTRACT_EXECUTION, storageData_.parallelContractExecution);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CONTRACT_PARALLEL_WORKERS, storageData_.contractParallelWorkers);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_USE_STUBS, storageData_.useStubs);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_DB_BACKEND, storageData_.dbBackend);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ROCKSDB_BLOCK_CACHE_MB, storageData_.rocksdbBlockCacheMb);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB, storageData_.rocksdbMemtableMb);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_KEEP, storageData_.checkpointKeep);

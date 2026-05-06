@@ -10,7 +10,7 @@ option(CSDB_BUILD_BENCHMARK "Bulid benchmark" OFF)
 include (TestBigEndian)
 TEST_BIG_ENDIAN(CSDB_PLATFORM_IS_BIG_ENDIAN)
 
-if(CSDB_BUILD_MIGRATE)
+if(CSDB_BUILD_MIGRATE OR CSDB_BACKEND STREQUAL "both")
     set(CSDB_BACKEND_SOURCES
         src/database_berkeleydb.cpp include/csdb/database_berkeleydb.hpp
         src/database_rocksdb.cpp    include/csdb/database_rocksdb.hpp)
@@ -82,12 +82,12 @@ target_include_directories(
 
 include_directories(${Boost_INCLUDE_DIR})
 set(CSDB_BACKEND_LIBS "")
-if(CSDB_BUILD_MIGRATE)
+if(CSDB_BACKEND STREQUAL "both")
+    list(APPEND CSDB_BACKEND_LIBS BerkeleyDB rocksdb)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CSDB_USE_ROCKSDB CSDB_USE_BERKELEYDB)
+elseif(CSDB_BUILD_MIGRATE)
     list(APPEND CSDB_BACKEND_LIBS BerkeleyDB rocksdb)
     target_compile_definitions(${PROJECT_NAME} PRIVATE CSDB_BUILD_MIGRATE)
-    # In migrate builds the production backend (controlled by CSDB_BACKEND) is
-    # still what Storage::open(string) uses; both backends are available so
-    # csdb_migrate can construct DatabaseBerkeleyDB / DatabaseRocksDB directly.
     if(CSDB_BACKEND STREQUAL "rocksdb")
         target_compile_definitions(${PROJECT_NAME} PRIVATE CSDB_USE_ROCKSDB)
     endif()

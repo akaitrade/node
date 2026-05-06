@@ -171,7 +171,8 @@ bool BlockChain::init(
                        storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
                        storageCfg.useStubs,
                        static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
-                       static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20)) {
+                       static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
+                       storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
     }
