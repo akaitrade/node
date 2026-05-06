@@ -85,7 +85,9 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
               << "\n Total blocks: "      << totalBlocks;
     cslog() << "SYNC: Blocks remaining: " << blocksRemaining;
 
-    if (blocksRemaining == 0) {
+    // 1-block gap with empty cache = in-flight round; treat as caught up.
+    if (blocksRemaining == 0
+        || (cachedBlocksSize == 0 && blocksRemaining <= 1)) {
         showSyncronizationProgress(lastWrittenSequence);
         csdebug() << __func__ << ": call SyncroFinished";
         synchroFinished();
@@ -112,11 +114,17 @@ void PoolSynchronizer::syncLastPool() {
         csdebug() << "SYNC: (last pool) no actual neighbours to request the last block";
         return;
     }
+    // Skip if caught up; setting the flag here strands it (no reliable clear path).
+    const auto lastSeq = blockChain_->getLastSeq();
+    const auto round = cs::Conveyer::instance().currentRoundNumber();
+    if (lastSeq + 1 >= round) {
+        return;
+    }
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
     }
     cs::PublicKey target = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1))->first;
-    emit sendRequest(target, PoolsRequestedSequences{blockChain_->getLastSeq() + 1});
+    emit sendRequest(target, PoolsRequestedSequences{lastSeq + 1});
 }
 
 void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
@@ -189,7 +197,12 @@ void PoolSynchronizer::onTimeOut() {
     // NoAnswer entries time out (kNoAnswerEntryTtlMs) and requeue into
     // rejectedSequences_, rejected drain runs every sendBlockRequest tick.
     auto currentRound = cs::Conveyer::instance().currentRoundNumber();
-    if (blockChain_->getLastSeq() < currentRound) {
+    const auto last = blockChain_->getLastSeq();
+    // Effective catch-up: 1-block gap with empty cache = in-flight round.
+    if (last + 1 >= currentRound && blockChain_->getCachedBlocksSize() == 0) {
+        synchroFinished();
+    }
+    else if (last < currentRound) {
         sendBlockRequest();
     }
     else {
