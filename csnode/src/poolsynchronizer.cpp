@@ -433,9 +433,6 @@ void PoolSynchronizer::stop() {
 }
 
 void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
     csdebug() << __func__;
     if (msg == SyncroMessage::AwaitAnswer) {
         changeSynchroLog(sender, msg);
@@ -446,19 +443,11 @@ void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessa
 }
 
 void PoolSynchronizer::addSynchroLog(const cs::PublicKey& sender, cs::PoolsRequestedSequences& sequences, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
-    //csdebug() << __func__;
     synchroLog_.emplace(sender, std::make_tuple(sequences, msg, cs::Utils::currentTimestamp()));
     //csdebug() << __func__ << " -> " << synchroLog_.size() << ": key " << cs::Utils::byteStreamToHex(sender) << " added as " << static_cast<int>(msg) << " at " << std::get<2>(synchroLog_[sender]);
 }
 
 bool PoolSynchronizer::changeSynchroLog(const cs::PublicKey& sender, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return true;
-    }
-    //csdebug() << __func__;
     if (synchroLog_.find(sender) == synchroLog_.end()) {
         return false;
     }
@@ -468,9 +457,6 @@ bool PoolSynchronizer::changeSynchroLog(const cs::PublicKey& sender, SyncroMessa
 }
 
 void PoolSynchronizer::updateSynchroLog() {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
     auto timeNow = cs::Utils::currentTimestamp();
     auto it = synchroLog_.begin();
     while (it != synchroLog_.end()) {
@@ -489,10 +475,6 @@ void PoolSynchronizer::updateSynchroLog() {
 }
 
 bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return true;
-    }
-    //csdebug() << __func__;
     auto it = synchroLog_.find(sender);
     if (it == synchroLog_.end()) {
         return false;
@@ -503,9 +485,6 @@ bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
 }
 
 bool PoolSynchronizer::checkSynchroLog(const cs::PublicKey& sender) { //is true when we can request blocks's set
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return true;
-    }
     auto it = synchroLog_.find(sender);
     if (synchroLog_.find(sender) != synchroLog_.end()) {
         auto timeEvent = std::get<2>(it->second);

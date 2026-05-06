@@ -233,6 +233,12 @@ void BlockChain::onStartReadFromDB(cs::Sequence lastWrittenPoolSeq) {
 void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
     // stop_ is honoured by the OpenCallback (UserCancelled), not here.
     auto blockSeq = block.sequence();
+    {
+        const auto prev = lastSequence_.load();
+        if (prev > blockSeq + 100) {
+            cslog() << "TRACE: onReadFromDB lastSequence_ regress from " << prev << " to " << blockSeq;
+        }
+    }
     lastSequence_ = blockSeq;
     if (blockSeq == 1) {
         cs::Lock lock(dbLock_);
@@ -556,6 +562,8 @@ void BlockChain::removeLastBlock() {
         blockHashes_->remove(remove_hash);
     }
     --lastSequence_;
+    cslog() << "TRACE: removeLastBlock decremented lastSequence_ to " << lastSequence_.load()
+            << " (blocksToBeRemoved_=" << blocksToBeRemoved_ << ")";
 
     csmeta(csdebug) << kLogPrefix << "done";
 }
@@ -1395,6 +1403,14 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
 
         deferredBlock_ = pool;
         pool = deferredBlock_.clone();
+        {
+            const auto prev = lastSequence_.load();
+            const auto newSeq = deferredBlock_.sequence();
+            if (prev > newSeq + 100) {
+                cslog() << "TRACE: recordBlock lastSequence_ regress from " << prev << " to " << newSeq
+                        << " (deferredBlock pool seq=" << newSeq << ")";
+            }
+        }
         lastSequence_ = deferredBlock_.sequence();
     }
 
@@ -1681,6 +1697,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
             csdebug() << kLogPrefix << "The pool " << pool.sequence() << " is invalid, won't be stored";
             if (lastSequence_ == poolSequence) {
                 --lastSequence_;
+                cslog() << "TRACE: tryToStoreBlock check_failed decremented lastSequence_ to " << lastSequence_.load();
                 csdebug() << kLogPrefix << "Deleting defered block: " << deferredBlock_.sequence();
                 deferredBlock_ = csdb::Pool{};
             }
@@ -1706,6 +1723,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
         //here the problem could arise if deferred the block is saved to db
         if (lastSequence_ == poolSequence) {
             --lastSequence_;
+            cslog() << "TRACE: storeBlock-record-failed decremented lastSequence_ to " << lastSequence_.load();
             deferredBlock_ = csdb::Pool{};
         }
 
@@ -2123,6 +2141,9 @@ void BlockChain::setBlocksToBeRemoved(cs::Sequence number) {
     if (blocksToBeRemoved_ > 0) {
         csdebug() << kLogPrefix << "Can't change number of blocks to be removed, because the previous removal is still not finished";
         return;
+    }
+    if (number > 100) {
+        cslog() << "TRACE: setBlocksToBeRemoved with number=" << number << " (lastSeq=" << lastSequence_.load() << ")";
     }
     csdebug() << kLogPrefix << "Allowed NUMBER blocks to remove is set to " << blocksToBeRemoved_;
     blocksToBeRemoved_ = number;
