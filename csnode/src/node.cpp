@@ -1737,16 +1737,15 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
 }
 
 void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
-    csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
-
     bool isSyncOn = poolSynchronizer_->isSyncroStarted();
     bool isBlockchainUncertain = blockChain_.isLastBlockUncertain();
 
     if (!isSyncOn && !isBlockchainUncertain/* && poolSynchronizer_->getTargetSequence() == 0ULL*/) {
-        csdebug() << "NODE> Get block reply> Pool sync has already finished";
+        csdebug() << "NODE> Get block reply (dropped, not syncing) from " << cs::Utils::byteStreamToHex(sender);
         return;
     }
 
+    csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
     csdebug() << "NODE> Get Block Reply";
 
     cs::IDataStream stream(data, size);
@@ -1849,7 +1848,15 @@ void Node::processPacketsReply(cs::PacketsVector&& packets, const cs::RoundNumbe
         if (roundPackageCache_.size() > 0) {
             auto rPackage = roundPackageCache_.back();
             csdebug() << "NODE> Run characteristic meta";
-            getCharacteristic(rPackage);
+            const auto pkgSeq = rPackage.poolMetaInfo().sequenceNumber;
+            const auto reach = blockChain_.getLastSeq() + cs::PoolSynchronizer::kCachedBlocksLimit;
+            if (pkgSeq > reach) {
+                csdebug() << "NODE> drop far-forward roundPackage #" << pkgSeq
+                          << " (last=" << blockChain_.getLastSeq() << ")";
+            }
+            else {
+                getCharacteristic(rPackage);
+            }
         }
         else {
             csdebug() << "NODE> There is no roundPackage in the list, return and await any";
@@ -1964,6 +1971,22 @@ void Node::processTimer() {
     }
 
     conveyer.flushTransactions();
+
+    // Sync self-probe: kick processSync() when the chain falls behind the
+    // round counter and sync isn't already engaged. processSync's only known
+    // entry points were getRoundTable / getEmptyRoundPack — if those packets
+    // stop arriving cleanly (peer churn, neighbours_ drained, etc.), the node
+    // gets stuck with no way back into sync. Throttled to once per second.
+    static int syncProbeTick = 0;
+    if (++syncProbeTick >= 4) {
+        syncProbeTick = 0;
+        const auto lastSeq = blockChain_.getLastSeq();
+        if (poolSynchronizer_
+            && !poolSynchronizer_->isSyncroStarted()
+            && round > lastSeq + cs::PoolSynchronizer::kRoundDifferentForSync) {
+            processSync();
+        }
+    }
 }
 
 void Node::onTransactionsPacketFlushed(const cs::TransactionsPacket& packet) {

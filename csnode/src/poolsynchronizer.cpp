@@ -47,7 +47,8 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
         return;
     }
     if (neighbours_.empty()) {
-        csdebug() << "SYNC: no actual neighbours to start sync";
+        cswarning() << "SYNC: no actual neighbours to start sync (lastSeq="
+                    << blockChain_->getLastSeq() << ", round=" << roundNum << ")";
         return;
     }
     cs::Sequence lastWrittenSequence = blockChain_->getLastSeq();
@@ -292,6 +293,10 @@ cs::Sequence PoolSynchronizer::getMaxNeighbourSequence() {
 }
 
 void PoolSynchronizer::onPingReceived(cs::Sequence sequence, const cs::PublicKey& publicKey) {
+    neighbours_[publicKey] = sequence;
+}
+
+void PoolSynchronizer::onNeighbourAdded(const cs::PublicKey& publicKey, cs::Sequence sequence) {
     neighbours_[publicKey] = sequence;
 }
 

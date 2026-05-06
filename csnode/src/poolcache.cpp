@@ -126,13 +126,27 @@ std::vector<cs::PoolCache::Interval> cs::PoolCache::ranges() const {
     }
 
     if (sizeCreated() > 0) {
-        auto i = std::as_const(syncedIter);
-        auto iter = (syncedIter == sequences_.end()) ? sequences_.begin() : i;
-        auto createdInterval = createInterval(std::next(iter)->first, maxSequence());
+        // Pick the start of the gap-walk for the Created portion of the cache.
+        // Original code did `std::next(iter)->first` unconditionally — UB when
+        // std::next(iter) == sequences_.end() (single Created entry, or
+        // syncedIter is the last element). MSVC reads sentinel garbage (0),
+        // producing a bogus interval [1..maxSeq-1] that broke sync.
+        std::vector<cs::PoolCache::Interval> createdInterval;
+        if (syncedIter == sequences_.end()) {
+            // No synced entries: walk all Created entries from minSequence.
+            createdInterval = createInterval(minSequence(), maxSequence());
+        }
+        else {
+            auto next = std::next(syncedIter);
+            if (next != sequences_.end()) {
+                createdInterval = createInterval(next->first, maxSequence());
+            }
+        }
 
         if (sizeSynced() > 0 && !createdInterval.empty()) {
-            if (syncedIter->first != std::next(syncedIter)->first) {
-                intervals.push_back(std::make_pair(syncedIter->first + 1, std::next(syncedIter)->first - 1));
+            auto next = std::next(syncedIter);
+            if (next != sequences_.end() && syncedIter->first + 1 < next->first) {
+                intervals.push_back(std::make_pair(syncedIter->first + 1, next->first - 1));
             }
         }
 

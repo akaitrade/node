@@ -115,12 +115,9 @@ bool BlockChain::init(
     bool successfulQuickStart = false;
 
     if (newBlockchainTop == cs::kWrongSequence) {
-        if (trxIndex_->recreate()) {
+        successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
+        if (!successfulQuickStart && trxIndex_->recreate()) {
             cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
-            bindSerializationManToCaches(serializationManPtr, initialConfidants);
-        }
-        else {
-            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
         }
     }
 
@@ -128,6 +125,7 @@ bool BlockChain::init(
     if (successfulQuickStart) {
         if (lastSequence_ != 0) {
             firstBlockToReadInDatabase = lastSequence_ + 1;
+            trxIndex_->pinFloor(lastSequence_.load());
             emit successfullQuickStartEvent(csdb::Amount(blockRewardIntegral_, blockRewardFraction_), csdb::Amount(miningCoefficientIntegral_, miningCoefficientFraction_), miningOn_, miningOn_, TimeMinStage1_);
         }
 

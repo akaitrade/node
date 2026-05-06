@@ -52,9 +52,31 @@ void TransactionsIndex::onStartReadFromDb(Sequence _lastWrittenPoolSeq) {
     if (recreate_) {
         return;
     }
-    // Index ahead of chain = corruption. Lag is normal (catch-up via onReadFromDb).
-    if (lastIndexedPool_ != kWrongSequence && lastIndexedPool_ > _lastWrittenPoolSeq) {
+    if (lastIndexedPool_ == kWrongSequence) {
+        return;
+    }
+    if (lastIndexedPool_ != _lastWrittenPoolSeq) {
+        cslog() << "TRACE: trxIndex onStartReadFromDb lastIndexedPool=" << lastIndexedPool_
+                << " lastWrittenPoolSeq=" << _lastWrittenPoolSeq
+                << " gap=" << (static_cast<long long>(lastIndexedPool_)
+                               - static_cast<long long>(_lastWrittenPoolSeq));
+    }
+    if (lastIndexedPool_ <= _lastWrittenPoolSeq) {
+        return;
+    }
+    constexpr Sequence kMaxRollbackGap = 10000;
+    const Sequence aheadGap = lastIndexedPool_ - _lastWrittenPoolSeq;
+    if (aheadGap > kMaxRollbackGap) {
+        cslog() << "TRACE: trxIndex gap " << aheadGap << " > " << kMaxRollbackGap << ", recreate";
         recreate_ = true;
+        return;
+    }
+    cslog() << "TRACE: trxIndex roll back lastIndexedPool " << lastIndexedPool_
+            << " -> " << _lastWrittenPoolSeq;
+    lastIndexedPool_ = _lastWrittenPoolSeq;
+    updateLastIndexed();
+    if (db_->isOpen()) {
+        db_->flush();
     }
 }
 
@@ -138,6 +160,22 @@ void TransactionsIndex::close() {
 void TransactionsIndex::flush() {
     if (db_->isOpen()) {
         db_->flush();
+    }
+}
+
+void TransactionsIndex::pinFloor(Sequence floor) {
+    if (floor == kWrongSequence) {
+        return;
+    }
+    if (lastIndexedPool_ == kWrongSequence || lastIndexedPool_ < floor) {
+        cslog() << "TRACE: trxIndex pinFloor lifting lastIndexedPool from "
+                << lastIndexedPool_ << " to " << floor;
+        lastIndexedPool_ = floor;
+        recreate_ = false;
+        updateLastIndexed();
+        if (db_->isOpen()) {
+            db_->flush();
+        }
     }
 }
 

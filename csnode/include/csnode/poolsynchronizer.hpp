@@ -52,7 +52,7 @@ public signals:
 public slots:
     void onStoreBlockTimeElapsed();
     void onPingReceived(Sequence sequence, const PublicKey& publicKey);
-    void onNeighbourAdded(const PublicKey&, Sequence) {}
+    void onNeighbourAdded(const PublicKey&, Sequence);
     void onNeighbourRemoved(const PublicKey& publicKey);
 
 private slots:

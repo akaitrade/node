@@ -27,6 +27,8 @@ public:
     void close();
     void flush();
 
+    void pinFloor(Sequence floor);
+
     bool recreate() const;
 
     Sequence getPrevTransBlock(const csdb::Address& _addr, Sequence _curr) const;
