@@ -45,6 +45,8 @@ connector::connector(Node& node, cs::CachesSerializationManager& serializationMa
 , diag_processor(make_shared<api_diag::API_DIAGProcessor>(diag_handler))
 , stop_flag(false)
 {
+    apiexec_handler->setApiHandler(api_handler.get());
+
 #ifdef NODE_API
     serializationMan.bind(api_handler->tm_);
     serializationMan.bind(*api_handler);

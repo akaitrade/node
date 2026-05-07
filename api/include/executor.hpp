@@ -199,6 +199,10 @@ public:
     std::optional<std::vector<csdb::Transaction>> getInnerSendTransactions(const general::AccessID& accessId);
     void deleteInnerSendTransactions(const general::AccessID& accessId);
 
+    // v4: contract address bound to an active execution session, used by apihandler
+    // to resolve "the contract calling me" from its accessId.
+    std::optional<csdb::Address> getAddressByAccessId(const general::AccessID& accessId);
+
     bool isDeploy(const csdb::Transaction& transaction);
 
     /**
@@ -290,6 +294,7 @@ private:
     general::AccessID lastAccessId_{};
     std::map<general::AccessID, cs::Sequence> accessSequence_;
     std::map<general::AccessID, uint64_t> executeTrxnsTime;
+    std::map<general::AccessID, csdb::Address> accessContract_;
 
     std::map<csdb::Address, csdb::TransactionID> deployTrxns_;
     std::map<csdb::Address, std::string> lastState_;

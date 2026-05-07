@@ -44,11 +44,18 @@ class SolverCore;
 class SmartContracts;
 }
 
+namespace api {
+class APIHandler;
+}
+
 namespace apiexec {
 class APIEXECHandler : public APIEXECNull, public APIHandlerBase {
 public:
     explicit APIEXECHandler(BlockChain& blockchain, cs::SolverCore& _solver, cs::Executor& executor);
     APIEXECHandler(const APIEXECHandler&) = delete;
+
+    // v4: injected after construction so APIEXEC can read smart-contract / token caches built by APIHandler.
+    void setApiHandler(api::APIHandler* api) { api_ = api; }
     void GetSeed(apiexec::GetSeedResult& _return, const general::AccessID accessId) override;
     void SendTransaction(apiexec::SendTransactionResult& _return, const general::AccessID accessId, const api::Transaction& transaction) override;
     void WalletIdGet(api::WalletIdGetResult& _return, const general::AccessID accessId, const general::Address& address) override;
@@ -56,6 +63,48 @@ public:
     void WalletBalanceGet(api::WalletBalanceGetResult& _return, const general::Address& address) override;
     void PoolGet(PoolGetResult& _return, const int64_t sequence) override;
     void GetDateTime(GetDateTimeResult& _return, const general::AccessID accessId) override;
+
+    // ---- v4: block / round context ----
+    void GetBlockchainBlockNumber(apiexec::LongResult& _return, const general::AccessID accessId) override;
+    void GetCurrentRound(apiexec::LongResult& _return, const general::AccessID accessId) override;
+    void GetCurrentRoundWriter(apiexec::StringResult& _return, const general::AccessID accessId) override;
+    void GetCurrentRoundConfidants(apiexec::StringListResult& _return, const general::AccessID accessId) override;
+    void GetRoundWriter(apiexec::StringResult& _return, const general::AccessID accessId, const int64_t round) override;
+    void GetRoundConfidants(apiexec::StringListResult& _return, const general::AccessID accessId, const int64_t round) override;
+    void GetNetworkRoundDurationMills(apiexec::LongResult& _return, const general::AccessID accessId) override;
+    void GetChainId(apiexec::LongResult& _return, const general::AccessID accessId) override;
+
+    // ---- v4: delegation ----
+    void GetIncomingDelegations(apiexec::AmountResult& _return, const general::Address& address) override;
+    void GetOutgoingDelegations(apiexec::AmountResult& _return, const general::Address& address) override;
+    void GetIncomingDelegationsList(apiexec::DelegationListResult& _return, const general::Address& address) override;
+    void GetOutgoingDelegationsList(apiexec::DelegationListResult& _return, const general::Address& address) override;
+    void IsDelegationActive(apiexec::BoolResult& _return, const general::Address& fromAddr, const general::Address& toAddr, const int64_t atTimestampSeconds) override;
+
+    // ---- v4: mining (network-level) ----
+    void GetNetworkBlockReward(apiexec::AmountResult& _return, const general::AccessID accessId) override;
+    void GetMiningCoefficient(apiexec::AmountResult& _return, const general::AccessID accessId) override;
+
+    // ---- v4: transaction context ----
+    void GetTransactionByID(apiexec::TransactionRecordResult& _return, const std::string& id) override;
+    void GetTransactionFeeForSession(apiexec::AmountResult& _return, const general::AccessID accessId) override;
+    void GetTransactionMaxFeeForSession(apiexec::AmountResult& _return, const general::AccessID accessId) override;
+
+    // ---- v4: contract introspection ----
+    void GetContractByteCodeHash(apiexec::BinaryResult& _return, const general::Address& contractAddress) override;
+    void GetContractDeployer(apiexec::StringResult& _return, const general::Address& contractAddress) override;
+    void GetDeployedContracts(apiexec::StringListResult& _return, const general::Address& deployerAddress) override;
+    void IsContractAddress(apiexec::BoolResult& _return, const general::Address& address) override;
+
+    // ---- v4: self introspection (for the calling contract) ----
+    void GetMyBalance(apiexec::AmountResult& _return, const general::AccessID accessId) override;
+    void GetMyDeployer(apiexec::StringResult& _return, const general::AccessID accessId) override;
+    void GetMyDeployBlock(apiexec::LongResult& _return, const general::AccessID accessId) override;
+    void GetMyTransactionsCount(apiexec::LongResult& _return, const general::AccessID accessId) override;
+
+    // ---- v4: tokens ----
+    void GetTokenStandard(apiexec::LongResult& _return, const general::Address& contractAddress) override;
+    void GetTokenHolders(apiexec::TokenHoldersResult& _return, const general::Address& tokenAddress, const int64_t offset, const int64_t limit) override;
 
     cs::Executor& getExecutor() const {
         return executor_;
@@ -65,6 +114,7 @@ private:
     cs::Executor& executor_;
     BlockChain& blockchain_;
     cs::SolverCore& solver_;
+    api::APIHandler* api_ = nullptr;
 };
 }  // namespace apiexec
 
@@ -273,6 +323,10 @@ private:
     std::map<std::string, int64_t> mExecuteCount_;
 
     api::SmartContract fetch_smart_body(const csdb::Transaction&);
+
+    // v4: read-only accessors for APIEXECHandler.
+    TokensMaster& getTokensMaster() { return tm_; }
+    cs::SpinLockable<std::map<csdb::Address, std::vector<csdb::TransactionID>>>& getDeployedByCreator() { return deployedByCreator_; }
 
 private:
     std::vector<api::SealedTransaction> extractTransactions(const csdb::Pool& pool, int64_t limit, const int64_t offset);

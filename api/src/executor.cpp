@@ -75,6 +75,11 @@ void cs::Executor::executeByteCodeMultiple(executor::ExecuteByteCodeMultipleResu
     }
 
     const auto accessId = generateAccessId(sequence);
+    {
+        std::lock_guard lock(mutex_);
+        accessContract_[static_cast<general::AccessID>(accessId)] =
+            BlockChain::getAddressFromKey(invokedContract.contractAddress);
+    }
     ++execCount_;
 
     try {
@@ -234,6 +239,16 @@ std::optional<cs::Sequence> cs::Executor::getSequence(const general::AccessID& a
     std::shared_lock lock(mutex_);
 
     if (auto it = accessSequence_.find(accessId); it != accessSequence_.end()) {
+        return std::make_optional(it->second);
+    }
+
+    return std::nullopt;
+}
+
+std::optional<csdb::Address> cs::Executor::getAddressByAccessId(const general::AccessID& accessId) {
+    std::shared_lock lock(mutex_);
+
+    if (auto it = accessContract_.find(accessId); it != accessContract_.end()) {
         return std::make_optional(it->second);
     }
 
@@ -947,6 +962,7 @@ void cs::Executor::deleteAccessId(const general::AccessID& accessId) {
     std::lock_guard lock(mutex_);
     accessSequence_.erase(accessId);
     executeTrxnsTime.erase(accessId);
+    accessContract_.erase(accessId);
 }
 
 std::optional<cs::Executor::OriginExecuteResult> cs::Executor::execute(const std::string& address, const executor::SmartContractBinary& smartContractBinary,
@@ -963,6 +979,9 @@ std::optional<cs::Executor::OriginExecuteResult> cs::Executor::execute(const std
 
     if (!isGetter) {
         accessId = generateAccessId(explicitSequence, time);
+        std::lock_guard lock(mutex_);
+        accessContract_[static_cast<general::AccessID>(accessId)] =
+            BlockChain::getAddressFromKey(address);
     }
 
     ++execCount_;

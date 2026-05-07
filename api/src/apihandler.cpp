@@ -10,6 +10,9 @@
 #include <lib/system/utils.hpp>
 
 #include <solver/smartcontracts.hpp>
+#include <solver/consensus.hpp>
+
+#include <charconv>
 
 #include <src/priv_crypto.hpp>
 
@@ -3246,4 +3249,467 @@ void apiexec::APIEXECHandler::GetDateTime(GetDateTimeResult& _return, const gene
         SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
     else
         SetResponseStatus(_return.status, APIRequestStatusType::FAILURE);
+}
+
+// =====================================================================
+// v4 additions
+// =====================================================================
+
+namespace {
+
+std::string publicKeyToBase58(const cs::PublicKey& key) {
+    return EncodeBase58(key.data(), key.data() + cscrypto::kPublicKeySize);
+}
+
+void fillTransaction(api::Transaction& out, const csdb::TransactionID& id, const csdb::Transaction& tx) {
+    out.id = tx.innerID();
+    out.source = std::string(reinterpret_cast<const char*>(tx.source().public_key().data()), cscrypto::kPublicKeySize);
+    out.target = std::string(reinterpret_cast<const char*>(tx.target().public_key().data()), cscrypto::kPublicKeySize);
+    out.amount = ::convertAmount(tx.amount());
+    out.fee.commission = static_cast<int16_t>(tx.counted_fee().get_raw());
+    out.timeCreation = static_cast<int64_t>(tx.get_time());
+    out.poolNumber = static_cast<int64_t>(id.pool_seq());
+    if (tx.user_field_ids().count(0) != 0) {
+        const auto uf = tx.user_field(0);
+        if (uf.type() == csdb::UserField::Type::String) {
+            const auto& s = uf.value<std::string>();
+            out.__set_userFields(std::string(s.begin(), s.end()));
+        }
+    }
+}
+
+} // namespace
+
+void apiexec::APIEXECHandler::GetBlockchainBlockNumber(apiexec::LongResult& _return, const general::AccessID /*accessId*/) {
+    _return.value = static_cast<int64_t>(blockchain_.getLastSeq());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetCurrentRound(apiexec::LongResult& _return, const general::AccessID /*accessId*/) {
+    _return.value = static_cast<int64_t>(cs::Conveyer::instance().currentRoundNumber());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetCurrentRoundWriter(apiexec::StringResult& _return, const general::AccessID /*accessId*/) {
+    const auto& confidants = cs::Conveyer::instance().currentRoundTable().confidants;
+    if (confidants.empty()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    _return.value = publicKeyToBase58(confidants.front());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetCurrentRoundConfidants(apiexec::StringListResult& _return, const general::AccessID /*accessId*/) {
+    const auto& confidants = cs::Conveyer::instance().currentRoundTable().confidants;
+    _return.values.reserve(confidants.size());
+    for (const auto& key : confidants) {
+        _return.values.push_back(publicKeyToBase58(key));
+    }
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetRoundWriter(apiexec::StringResult& _return, const general::AccessID /*accessId*/, const int64_t round) {
+    if (round <= 0) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "round must be positive");
+        return;
+    }
+    const auto pool = executor_.loadBlockApi(static_cast<cs::Sequence>(round));
+    if (!pool.is_valid()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    _return.value = publicKeyToBase58(pool.writer_public_key());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetRoundConfidants(apiexec::StringListResult& _return, const general::AccessID /*accessId*/, const int64_t round) {
+    if (round <= 0) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "round must be positive");
+        return;
+    }
+    const auto pool = executor_.loadBlockApi(static_cast<cs::Sequence>(round));
+    if (!pool.is_valid()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const auto& confidants = pool.confidants();
+    _return.values.reserve(confidants.size());
+    for (const auto& key : confidants) {
+        _return.values.push_back(publicKeyToBase58(key));
+    }
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetNetworkRoundDurationMills(apiexec::LongResult& _return, const general::AccessID /*accessId*/) {
+    _return.value = static_cast<int64_t>(Consensus::TimeRound);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetChainId(apiexec::LongResult& _return, const general::AccessID /*accessId*/) {
+    _return.value = static_cast<int64_t>(blockchain_.uuid());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetIncomingDelegations(apiexec::AmountResult& _return, const general::Address& address) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(address);
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(addr, wallet)) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    csdb::Amount total{0};
+    if (wallet.delegateSources_) {
+        for (const auto& [_, items] : *wallet.delegateSources_) {
+            for (const auto& item : items) {
+                total += item.amount;
+            }
+        }
+    }
+    _return.amount = convertAmount(total);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetOutgoingDelegations(apiexec::AmountResult& _return, const general::Address& address) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(address);
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(addr, wallet)) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    csdb::Amount total{0};
+    if (wallet.delegateTargets_) {
+        for (const auto& [_, items] : *wallet.delegateTargets_) {
+            for (const auto& item : items) {
+                total += item.amount;
+            }
+        }
+    }
+    _return.amount = convertAmount(total);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetIncomingDelegationsList(apiexec::DelegationListResult& _return, const general::Address& address) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(address);
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(addr, wallet)) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    if (wallet.delegateSources_) {
+        for (const auto& [counterparty, items] : *wallet.delegateSources_) {
+            for (const auto& item : items) {
+                apiexec::DelegationItem out;
+                out.counterparty = publicKeyToBase58(counterparty);
+                out.amount = convertAmount(item.amount);
+                out.fromTime = static_cast<int64_t>(item.initialTime);
+                out.validUntil = static_cast<int64_t>(item.time);
+                out.coeff = static_cast<int8_t>(item.coeff);
+                _return.delegations.push_back(std::move(out));
+            }
+        }
+    }
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetOutgoingDelegationsList(apiexec::DelegationListResult& _return, const general::Address& address) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(address);
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(addr, wallet)) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    if (wallet.delegateTargets_) {
+        for (const auto& [counterparty, items] : *wallet.delegateTargets_) {
+            for (const auto& item : items) {
+                apiexec::DelegationItem out;
+                out.counterparty = publicKeyToBase58(counterparty);
+                out.amount = convertAmount(item.amount);
+                out.fromTime = static_cast<int64_t>(item.initialTime);
+                out.validUntil = static_cast<int64_t>(item.time);
+                out.coeff = static_cast<int8_t>(item.coeff);
+                _return.delegations.push_back(std::move(out));
+            }
+        }
+    }
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::IsDelegationActive(apiexec::BoolResult& _return, const general::Address& fromAddr, const general::Address& toAddr, const int64_t atTimestampSeconds) {
+    const csdb::Address from = BlockChain::getAddressFromKey(fromAddr);
+    const csdb::Address to = BlockChain::getAddressFromKey(toAddr);
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(from, wallet)) {
+        _return.value = false;
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+    bool active = false;
+    if (wallet.delegateTargets_) {
+        const auto it = wallet.delegateTargets_->find(to.public_key());
+        if (it != wallet.delegateTargets_->end()) {
+            const uint64_t t = static_cast<uint64_t>(atTimestampSeconds);
+            for (const auto& item : it->second) {
+                // delegation active when initialTime <= t <= time (validUntil); time==0 means open-ended.
+                if (item.initialTime <= t && (item.time == 0 || item.time >= t)) {
+                    active = true;
+                    break;
+                }
+            }
+        }
+    }
+    _return.value = active;
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetNetworkBlockReward(apiexec::AmountResult& _return, const general::AccessID /*accessId*/) {
+    _return.amount = convertAmount(Consensus::blockReward);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetMiningCoefficient(apiexec::AmountResult& _return, const general::AccessID /*accessId*/) {
+    _return.amount = convertAmount(Consensus::miningCoefficient);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetTransactionByID(apiexec::TransactionRecordResult& _return, const std::string& id) {
+    _return.found = false;
+    const auto dot = id.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= id.size()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "id must be <poolSeq>.<index>");
+        return;
+    }
+    uint64_t poolSeq = 0;
+    uint32_t index = 0;
+    const char* poolBeg = id.data();
+    const char* poolEnd = id.data() + dot;
+    const char* idxBeg  = id.data() + dot + 1;
+    const char* idxEnd  = id.data() + id.size();
+    if (std::from_chars(poolBeg, poolEnd, poolSeq).ec != std::errc{}
+        || std::from_chars(idxBeg,  idxEnd,  index ).ec != std::errc{}) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "id must contain decimal poolSeq and index");
+        return;
+    }
+    const csdb::TransactionID trxId(static_cast<cs::Sequence>(poolSeq), static_cast<cs::Sequence>(index));
+    const csdb::Transaction tx = executor_.loadTransactionApi(trxId);
+    if (!tx.is_valid()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+    fillTransaction(_return.transaction, trxId, tx);
+    _return.found = true;
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetTransactionFeeForSession(apiexec::AmountResult& _return, const general::AccessID /*accessId*/) {
+    // No per-execution fee accounting yet; the executor charges by network rules at finalize-time.
+    _return.amount = convertAmount(csdb::Amount{0});
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetTransactionMaxFeeForSession(apiexec::AmountResult& _return, const general::AccessID accessId) {
+    const auto contract = executor_.getAddressByAccessId(accessId);
+    if (!contract) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(*contract, wallet)) {
+        _return.amount = convertAmount(csdb::Amount{0});
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+    _return.amount = convertAmount(wallet.balance_);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetContractByteCodeHash(apiexec::BinaryResult& _return, const general::Address& contractAddress) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(contractAddress);
+    const auto deployId = executor_.getDeployTrxn(addr);
+    if (!deployId) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const csdb::Transaction deployTx = executor_.loadTransactionApi(*deployId);
+    if (!deployTx.is_valid()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    using namespace cs::trx_uf;
+    const auto codeUF = deployTx.user_field(deploy::Code);
+    if (codeUF.type() != csdb::UserField::Type::String) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const auto& codeBin = codeUF.value<std::string>();
+    const auto hash = cscrypto::calculateHash(reinterpret_cast<const cscrypto::Byte*>(codeBin.data()), codeBin.size());
+    _return.value.assign(reinterpret_cast<const char*>(hash.data()), hash.size());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetContractDeployer(apiexec::StringResult& _return, const general::Address& contractAddress) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(contractAddress);
+    const auto deployId = executor_.getDeployTrxn(addr);
+    if (!deployId) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const csdb::Transaction deployTx = executor_.loadTransactionApi(*deployId);
+    if (!deployTx.is_valid()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    csdb::Address source = deployTx.source();
+    if (source.is_wallet_id()) {
+        source = blockchain_.getAddressByType(source, BlockChain::AddressType::PublicKey);
+    }
+    _return.value = publicKeyToBase58(source.public_key());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetDeployedContracts(apiexec::StringListResult& _return, const general::Address& deployerAddress) {
+    if (api_ == nullptr) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "deployer index not initialised");
+        return;
+    }
+    const csdb::Address deployer = BlockChain::getAddressFromKey(deployerAddress);
+    auto locked = lockedReference(api_->getDeployedByCreator());
+    auto it = locked->find(deployer);
+    if (it == locked->end()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+    _return.values.reserve(it->second.size());
+    for (const auto& trId : it->second) {
+        const auto tx = executor_.loadTransactionApi(trId);
+        if (!tx.is_valid()) continue;
+        if (cs::SmartContracts::get_contract_state(blockchain_, tx.target()).empty()) continue;
+        csdb::Address target = tx.target();
+        if (target.is_wallet_id()) {
+            target = blockchain_.getAddressByType(target, BlockChain::AddressType::PublicKey);
+        }
+        _return.values.push_back(publicKeyToBase58(target.public_key()));
+    }
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::IsContractAddress(apiexec::BoolResult& _return, const general::Address& address) {
+    const csdb::Address addr = BlockChain::getAddressFromKey(address);
+    _return.value = !cs::SmartContracts::get_contract_state(blockchain_, addr).empty()
+                 || executor_.getDeployTrxn(addr).has_value();
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetMyBalance(apiexec::AmountResult& _return, const general::AccessID accessId) {
+    const auto contract = executor_.getAddressByAccessId(accessId);
+    if (!contract) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    BlockChain::WalletData wallet;
+    if (!blockchain_.findWalletData(*contract, wallet)) {
+        _return.amount = convertAmount(csdb::Amount{0});
+        SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+        return;
+    }
+    _return.amount = convertAmount(wallet.balance_);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetMyDeployer(apiexec::StringResult& _return, const general::AccessID accessId) {
+    const auto contract = executor_.getAddressByAccessId(accessId);
+    if (!contract) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const auto deployId = executor_.getDeployTrxn(*contract);
+    if (!deployId) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const csdb::Transaction deployTx = executor_.loadTransactionApi(*deployId);
+    if (!deployTx.is_valid()) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    csdb::Address source = deployTx.source();
+    if (source.is_wallet_id()) {
+        source = blockchain_.getAddressByType(source, BlockChain::AddressType::PublicKey);
+    }
+    _return.value = publicKeyToBase58(source.public_key());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetMyDeployBlock(apiexec::LongResult& _return, const general::AccessID accessId) {
+    const auto contract = executor_.getAddressByAccessId(accessId);
+    if (!contract) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    const auto deployId = executor_.getDeployTrxn(*contract);
+    if (!deployId) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    _return.value = static_cast<int64_t>(deployId->pool_seq());
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetMyTransactionsCount(apiexec::LongResult& _return, const general::AccessID accessId) {
+    const auto contract = executor_.getAddressByAccessId(accessId);
+    if (!contract) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND);
+        return;
+    }
+    _return.value = static_cast<int64_t>(blockchain_.getTransactionsCount(*contract));
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetTokenStandard(apiexec::LongResult& _return, const general::Address& contractAddress) {
+    if (api_ == nullptr) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "token cache not initialised");
+        return;
+    }
+    const csdb::Address addr = BlockChain::getAddressFromKey(contractAddress);
+    int64_t standard = 0;
+    api_->getTokensMaster().loadTokenInfo([&addr, &standard](const TokensMap& tokens, const HoldersMap&) {
+        const auto it = tokens.find(addr);
+        if (it != tokens.end()) {
+            standard = it->second.tokenStandard;
+        }
+    });
+    _return.value = standard;
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
+}
+
+void apiexec::APIEXECHandler::GetTokenHolders(apiexec::TokenHoldersResult& _return, const general::Address& tokenAddress, const int64_t offset, const int64_t limit) {
+    if (api_ == nullptr) {
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "token cache not initialised");
+        return;
+    }
+    const csdb::Address addr = BlockChain::getAddressFromKey(tokenAddress);
+    const int64_t boundedOffset = std::max<int64_t>(0, offset);
+    const int64_t boundedLimit  = std::clamp<int64_t>(limit, 0, 1000);
+
+    std::vector<apiexec::TokenHolder> collected;
+    api_->getTokensMaster().loadTokenInfo([&](const TokensMap& tokens, const HoldersMap&) {
+        const auto it = tokens.find(addr);
+        if (it == tokens.end()) return;
+        const auto& holders = it->second.holders;
+        int64_t skipped = 0;
+        for (auto h = holders.begin(); h != holders.end() && static_cast<int64_t>(collected.size()) < boundedLimit; ++h) {
+            if (skipped < boundedOffset) {
+                ++skipped;
+                continue;
+            }
+            apiexec::TokenHolder out;
+            out.address = publicKeyToBase58(h->first.public_key());
+            out.balance = h->second.balance;
+            out.transfersIn = 0;
+            out.transfersOut = static_cast<int64_t>(h->second.transfersCount);
+            collected.push_back(std::move(out));
+        }
+    });
+    _return.holders = std::move(collected);
+    SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
 }
