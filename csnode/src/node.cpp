@@ -167,9 +167,18 @@ bool Node::init() {
                 initialConfidants_,
                 cs::ConfigHolder::instance().config()->newBlockchainTopSeq())
         ) {
-            csinfo() << "Remove data for QUICK START";
-            cachesSerializationManager_.clear();
-
+            if (isStopRequested()) {
+                cslog() << "Init aborted by user; preserving QUICK START state.";
+                // Snapshot current in-memory progress to qs/0 so the next start
+                // resumes byte-precisely instead of falling back to the last 5M.
+                if (cachesSerializationManager_.save(0)) {
+                    blockChain_.flushIndexes();
+                    cslog() << "Saved interim QUICK START state to qs/0.";
+                }
+            } else {
+                csinfo() << "Remove data for QUICK START";
+                cachesSerializationManager_.clear();
+            }
             return false;
         }
         Consensus::TimeMinStage1 = blockChain_.getTimeMinStage1();
@@ -191,9 +200,16 @@ bool Node::init() {
             cs::ConfigHolder::instance().config()->getPathToDB(),
             &cachesSerializationManager_, initialConfidants_)
     ) {
-        csinfo() << "Remove data for QUICK START";
-        cachesSerializationManager_.clear();
-
+        if (isStopRequested()) {
+            cslog() << "Init aborted by user; preserving QUICK START state.";
+            if (cachesSerializationManager_.save(0)) {
+                blockChain_.flushIndexes();
+                cslog() << "Saved interim QUICK START state to qs/0.";
+            }
+        } else {
+            csinfo() << "Remove data for QUICK START";
+            cachesSerializationManager_.clear();
+        }
         return false;
     }
 
@@ -4306,12 +4322,10 @@ void Node::checkConsensusSettings(cs::Sequence seq, std::string& msg){
 }
 
 void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
-    if (stopRequested_) {
-        *shouldStop = true;
-        return;
-    }
+    // User-cancel is honoured by BlockChain::init's OpenCallback via blockChain_.stop_;
+    // signalling it via *shouldStop here would be misread by csdb as DataIntegrityError.
     if (!blockValidator_->validateBlock(block,
-        cs::BlockValidator::ValidationLevel::hashIntergrity 
+        cs::BlockValidator::ValidationLevel::hashIntergrity
             | cs::BlockValidator::ValidationLevel::blockNum
             /*| cs::BlockValidator::ValidationLevel::smartStates*/
             /*| cs::BlockValidator::ValidationLevel::accountBalance*/,

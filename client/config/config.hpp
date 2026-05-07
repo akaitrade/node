@@ -67,7 +67,7 @@ struct StorageData {
     bool parallelContractExecution = false; // master switch for per-contract parallel execution
     size_t contractParallelWorkers = 4;     // cap on in-flight contract executions when enabled
     bool useStubs = false;                  // write empty pools as compact stubs (read-side handles both); off by default
-    std::string dbBackend = "rocksdb";      // runtime DB backend selection (only used when built with CSDB_BACKEND=both)
+    std::string dbBackend = "berkeleydb";   // runtime DB backend (CSDB_BACKEND=both builds); set to "rocksdb" to opt in
     size_t rocksdbBlockCacheMb = 1024;      // RocksDB shared block cache (MiB); 0 = built-in default
     size_t rocksdbMemtableMb = 256;         // RocksDB write_buffer_size (MiB); 0 = built-in default
     size_t checkpointKeep = 5;              // retained periodic checkpoints (qs/0 always kept on top)

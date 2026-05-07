@@ -716,15 +716,16 @@ bool Storage::open(
 
     std::shared_ptr<Database> db;
 #if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
-    if (dbBackend == "berkeleydb" || dbBackend == "berkeley") {
-        auto bdb = std::make_shared<DatabaseBerkeleyDB>();
-        bdb->open(path);
-        db = bdb;
-    } else {
+    // Default berkeleydb; rocksdb is opt-in via [storage] db_backend = rocksdb.
+    if (dbBackend == "rocksdb" || dbBackend == "rocks") {
         auto rocks = std::make_shared<DatabaseRocksDB>();
         rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
         rocks->open(path);
         db = rocks;
+    } else {
+        auto bdb = std::make_shared<DatabaseBerkeleyDB>();
+        bdb->open(path);
+        db = bdb;
     }
 #elif defined(CSDB_USE_ROCKSDB)
     auto rocks = std::make_shared<DatabaseRocksDB>();

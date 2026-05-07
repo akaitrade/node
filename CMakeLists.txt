@@ -253,6 +253,8 @@ if(CSDB_BUILD_MIGRATE)
     add_subdirectory(tools/csdb_migrate)
 endif()
 
+add_subdirectory(tools/chain_integrity)
+
 if(NOT ${SKIP_SAMPLES})
     add_subdirectory(samples)
 endif()

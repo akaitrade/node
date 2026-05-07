@@ -218,6 +218,12 @@ bool BlockChain::isGood() const {
     return good_;
 }
 
+void BlockChain::flushIndexes() {
+    if (trxIndex_) {
+        trxIndex_->flush();
+    }
+}
+
 uint64_t BlockChain::uuid() const {
     return uuid_;
 }

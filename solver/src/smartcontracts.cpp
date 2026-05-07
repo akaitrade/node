@@ -1752,10 +1752,8 @@ void SmartContracts::on_next_block_impl(const csdb::Pool& block, bool reading_db
                             if (!reading_db) {
                                 csdebug() << kLogPrefix << to_base58(abs_addr) << " state is unchanged after " << ref_start;
                             }
-                            if (pnode->isStopRequested()) {
-                                *should_stop = true;
-                                return;
-                            }
+                            // User-cancel is signalled via Storage::OpenCallback (UserCancelled),
+                            // not via *should_stop (which csdb reads as DataIntegrityError).
                         }
                         remove_from_queue(ref_start, reading_db);
                     }

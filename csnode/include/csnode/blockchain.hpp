@@ -86,6 +86,10 @@ public:
 
     bool isGood() const;
 
+    // Flush ancillary index LMDBs (trxIndex). Used after qs/0 save on user-cancel
+    // so the on-disk index is in lockstep with the just-saved cache snapshot.
+    void flushIndexes();
+
     // return unique id of database if at least one unique block has written, otherwise (only genesis block) 0
     uint64_t uuid() const;
 
