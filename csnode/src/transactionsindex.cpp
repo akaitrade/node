@@ -13,10 +13,10 @@
 
 namespace {
 constexpr const char* kDbPath = "/indexdb";
-// Reserved key inside the index LMDB used to persist lastIndexedPool_.
-// Length (16 bytes) cannot collide with the 40-byte (pubkey + sequence) entries,
-// so it is safe to share the same database with the per-address index.
+// Reserved keys; lengths can't collide with the 40-byte (pubkey + sequence) entries.
 constexpr const char* kLastIndexedKey = "__last_indexed__";
+constexpr const char* kIncompleteKey  = "__incomplete__";
+constexpr const char* kCompleteKey    = "__walked_complete__";
 
 auto getTrxIndexKey(const cs::PublicKey& _pubKey, cs::Sequence _seq) {
     cs::Bytes ret(_pubKey.begin(), _pubKey.end());
@@ -42,10 +42,45 @@ TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, 
     if (_recreate || !loadLastIndexedFromDb()) {
         recreate_ = true;
     }
+    loadIncompleteFromDb();
+    loadCompleteFlagFromDb();
+    if (indexIncomplete_) {
+        cslog() << "TRACE: trxIndex __incomplete__ flag set on load — Trusted role gated until slow-start rebuilds the index";
+    }
+    if (!indexComplete_ && !recreate_ && lastIndexedPool_ >= 1000) {
+        cslog() << "TRACE: trxIndex has no completion sentinel — pre-patch indexdb suspected, will be rebuilt by slow-start";
+    }
 }
 
 bool TransactionsIndex::recreate() const {
     return recreate_;
+}
+
+bool TransactionsIndex::isReady() const {
+    if (indexIncomplete_) return false;
+    if (lastIndexedPool_ == kWrongSequence) return false;
+    if (lastIndexedPool_ < 1000) return true;
+    return indexComplete_;
+}
+
+bool TransactionsIndex::looksEmpty() const {
+    if (!db_->isOpen()) return false;
+    if (lastIndexedPool_ == kWrongSequence || lastIndexedPool_ < 1000) return false;
+    return !indexComplete_;
+}
+
+void TransactionsIndex::forceRebuild() {
+    lastIndexedPool_ = kWrongSequence;
+    recreate_ = true;
+    if (indexIncomplete_) {
+        indexIncomplete_ = false;
+        updateIncompleteFlag();
+    }
+    if (indexComplete_) {
+        indexComplete_ = false;
+        updateCompleteFlag();
+    }
+    updateLastIndexed();
 }
 
 void TransactionsIndex::onStartReadFromDb(Sequence _lastWrittenPoolSeq) {
@@ -94,6 +129,16 @@ void TransactionsIndex::onReadFromDb(const csdb::Pool& _pool) {
 void TransactionsIndex::onDbReadFinished() {
     if (recreate_) {
         recreate_ = false;
+        if (indexIncomplete_) {
+            indexIncomplete_ = false;
+            updateIncompleteFlag();
+            cslog() << "trxIndex __incomplete__ cleared by slow-start — Trusted role unblocked";
+        }
+        if (!indexComplete_) {
+            indexComplete_ = true;
+            updateCompleteFlag();
+            cslog() << "trxIndex marked complete by slow-start walk";
+        }
         lapoos_.clear();
         cslog() << "Recreated index 0 -> " << lastIndexedPool_
                 << ". Continue to keep it actual from new blocks.";
@@ -168,8 +213,16 @@ void TransactionsIndex::pinFloor(Sequence floor) {
         return;
     }
     if (lastIndexedPool_ == kWrongSequence || lastIndexedPool_ < floor) {
+        const Sequence prev = (lastIndexedPool_ == kWrongSequence) ? 0 : lastIndexedPool_;
         cslog() << "TRACE: trxIndex pinFloor lifting lastIndexedPool from "
                 << lastIndexedPool_ << " to " << floor;
+        // gap left unwalked → consensus would propose a divergent trx set. gate Trusted.
+        if (recreate_ || prev + 1 < floor) {
+            indexIncomplete_ = true;
+            cslog() << "TRACE: trxIndex marked __incomplete__ — Trusted role gated; "
+                       "wipe " << rootPath_ << kDbPath << " and restart for slow-start to clear";
+            updateIncompleteFlag();
+        }
         lastIndexedPool_ = floor;
         recreate_ = false;
         updateLastIndexed();
@@ -254,6 +307,36 @@ bool TransactionsIndex::loadLastIndexedFromDb() {
 inline void TransactionsIndex::updateLastIndexed() {
     if (db_->isOpen()) {
         db_->insert(kLastIndexedKey, lastIndexedPool_);
+    }
+}
+
+void TransactionsIndex::loadIncompleteFromDb() {
+    if (!db_->isOpen() || !db_->isKeyExists(kIncompleteKey)) {
+        indexIncomplete_ = false;
+        return;
+    }
+    indexIncomplete_ = (db_->value<uint8_t>(kIncompleteKey) != 0);
+}
+
+void TransactionsIndex::updateIncompleteFlag() {
+    if (db_->isOpen()) {
+        db_->insert(kIncompleteKey, static_cast<uint8_t>(indexIncomplete_ ? 1 : 0));
+        db_->flush();
+    }
+}
+
+void TransactionsIndex::loadCompleteFlagFromDb() {
+    if (!db_->isOpen() || !db_->isKeyExists(kCompleteKey)) {
+        indexComplete_ = false;
+        return;
+    }
+    indexComplete_ = (db_->value<uint8_t>(kCompleteKey) != 0);
+}
+
+void TransactionsIndex::updateCompleteFlag() {
+    if (db_->isOpen()) {
+        db_->insert(kCompleteKey, static_cast<uint8_t>(indexComplete_ ? 1 : 0));
+        db_->flush();
     }
 }
 

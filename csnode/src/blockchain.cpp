@@ -115,9 +115,18 @@ bool BlockChain::init(
     bool successfulQuickStart = false;
 
     if (newBlockchainTop == cs::kWrongSequence) {
-        successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
-        if (!successfulQuickStart && trxIndex_->recreate()) {
-            cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
+        if (trxIndex_->recreate() || !trxIndex_->isReady() || trxIndex_->looksEmpty()) {
+            cswarning() << "trxIndex needs rebuild — skipping QuickStart, slow-start will populate it";
+            if (!trxIndex_->recreate()) {
+                trxIndex_->forceRebuild();
+            }
+            bindSerializationManToCaches(serializationManPtr, initialConfidants);
+        }
+        else {
+            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
+            if (!successfulQuickStart && trxIndex_->recreate()) {
+                cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
+            }
         }
     }
 
@@ -224,6 +233,10 @@ void BlockChain::flushIndexes() {
     }
 }
 
+bool BlockChain::isTrxIndexReady() const {
+    return !trxIndex_ || trxIndex_->isReady();
+}
+
 uint64_t BlockChain::uuid() const {
     return uuid_;
 }
@@ -277,8 +290,9 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
         && blockSeq % kQuickStartSaveCachesInterval == 0
         && !*shouldStop) {
         cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
+        // flush trxIndex before qs save so the two stores stay coherent on crash.
+        trxIndex_->flush();
         if (serializationManPtr_->save(blockSeq)) {
-            trxIndex_->flush();
             const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
             serializationManPtr_->pruneCheckpoints(keep);
         }
@@ -826,8 +840,9 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
     if (serializationManPtr_
         && pool.sequence()
         && pool.sequence() % kQuickStartSaveCachesInterval == 0) {
+        // flush trxIndex before qs save so the two stores stay coherent on crash.
+        trxIndex_->flush();
         if (serializationManPtr_->save(pool.sequence())) {
-            trxIndex_->flush();
             const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
             serializationManPtr_->pruneCheckpoints(keep);
         }

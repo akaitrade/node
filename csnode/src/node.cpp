@@ -3759,13 +3759,19 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 }
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
-    // Behind in sync: refuse confidant role and skip Solver round init.
+    // Behind in sync OR trxIndex incomplete: refuse confidant role and skip Solver round init.
     const bool behindInSync = blockChain_.getLastSeq() + 1ULL < roundTable.round;
+    const bool trxIndexReady = blockChain_.isTrxIndexReady();
+    const bool deferConfidant = behindInSync || !trxIndexReady;
+
+    if (!trxIndexReady) {
+        cswarning() << "trxIndex __incomplete__ — refusing Trusted role this round";
+    }
 
     bool found = false;
     uint8_t confidantIndex = 0;
 
-    if (!behindInSync) {
+    if (!deferConfidant) {
         for (auto& conf : roundTable.confidants) {
             if (conf == nodeIdKey_) {
                 myLevel_ = Level::Confidant;
@@ -3885,7 +3891,7 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     stat_.onRoundStart(cs::Conveyer::instance().currentRoundNumber(), false /*skip_logs*/);
     csdebug() << line2.str();
 
-    if (!behindInSync) {
+    if (!deferConfidant) {
         solver_->nextRound(updateRound);
     }
     if (cacheLBs_) {

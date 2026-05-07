@@ -6,6 +6,14 @@
 #include <fstream>
 #include <vector>
 
+#ifdef _WIN32
+#  include <io.h>
+#  include <fcntl.h>
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
+#endif
+
 #include <csnode/blockchain_serializer.hpp>
 #include <csnode/smartcontracts_serializer.hpp>
 #include <csnode/tokens_serializer.hpp>
@@ -16,6 +24,46 @@
 #include <csconnector/csconnector.hpp>
 
 #include <lib/system/logger.hpp>
+
+namespace {
+
+void fsyncFile(const std::filesystem::path& p) {
+#ifdef _WIN32
+    int fd = ::_wopen(p.wstring().c_str(), _O_RDONLY | _O_BINARY);
+    if (fd >= 0) {
+        ::_commit(fd);
+        ::_close(fd);
+    }
+#else
+    int fd = ::open(p.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
+#endif
+}
+
+void fsyncDir([[maybe_unused]] const std::filesystem::path& dir) {
+#ifndef _WIN32
+    int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
+#endif
+}
+
+void fsyncDirContents(const std::filesystem::path& dir) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (entry.is_regular_file(ec)) {
+            fsyncFile(entry.path());
+        }
+    }
+}
+
+} // namespace
 
 namespace cs {
 
@@ -335,6 +383,9 @@ bool CachesSerializationManager::save(size_t version) {
         return false;
     }
 
+    // ensure data is on disk before we publish via rename
+    fsyncDirContents(tmp_path);
+
     std::filesystem::remove_all(final_path, ec);
     std::filesystem::rename(tmp_path, final_path, ec);
     if (ec) {
@@ -343,6 +394,9 @@ bool CachesSerializationManager::save(size_t version) {
         std::filesystem::remove_all(tmp_path, ec);
         return false;
     }
+
+    // make rename itself durable (POSIX requires fsync of the parent dir)
+    fsyncDir(root);
     return true;
 }
 

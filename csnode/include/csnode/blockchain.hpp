@@ -101,6 +101,9 @@ public:
     static csdb::Address getAddressFromKey(const std::string&);
     static csdb::Address getAddressFromKey(const cs::Bytes&);
 
+    // false while trxIndex has an unwalked floor gap; consensus uses this to gate Trusted.
+    bool isTrxIndexReady() const;
+
     static uint64_t getBlockTime(const csdb::Pool& block) noexcept;
     static std::string poolInfo(const csdb::Pool& pool);
     // create/save block and related methods
