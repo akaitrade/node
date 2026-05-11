@@ -1,13 +1,29 @@
 #include <poolcache.hpp>
 
 #include <cassert>
+#include <filesystem>
+#include <system_error>
+
 #include <csdb/pool.hpp>
 #include <lib/system/utils.hpp>
 
 static const std::string dbPath = "/poolcachedb";
 
+namespace {
+// PoolCache is a transient staging buffer for sync. The lmdbxx wrapper has
+// no public iteration primitive to rebuild sequences_ from disk on startup,
+// so any leftover LMDB entries from a crashed prior run would leak (db_ /
+// sequences_ drift, monotonically-growing poolcachedb). Wipe the dir before
+// cs::Lmdb opens it; lost in-flight sync work is re-fetched from peers.
+std::string wipeAndReturn(const std::string& fullPath) {
+    std::error_code ec;
+    std::filesystem::remove_all(fullPath, ec);
+    return fullPath;
+}
+}
+
 cs::PoolCache::PoolCache(const std::string& path)
-: db_(path + dbPath) {
+: db_(wipeAndReturn(path + dbPath)) {
     initialization();
 }
 
