@@ -14,12 +14,14 @@ find_package(Boost REQUIRED COMPONENTS system filesystem)
 
 target_include_directories(chain_integrity PRIVATE
   ${CMAKE_SOURCE_DIR}/csdb/include
+  ${CMAKE_SOURCE_DIR}/csnode/include
   ${CMAKE_SOURCE_DIR}/lib/include
   ${CMAKE_SOURCE_DIR}/client/include
   ${Boost_INCLUDE_DIR}
 )
 
 target_link_libraries(chain_integrity
+  csnode
   csdb
   Boost::system
   Boost::filesystem

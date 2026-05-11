@@ -80,6 +80,7 @@ add_library(csnode
   include/csnode/serializers_helper.hpp
   include/csnode/apihandler_serializer.hpp
   include/csnode/roundstat_serializer.hpp
+  include/csnode/chain_integrity.hpp
   src/blockchain.cpp
   src/blockchain_serializer.cpp
   src/node.cpp
@@ -116,6 +117,7 @@ add_library(csnode
   src/caches_serialization_manager.cpp
   src/apihandler_serializer.cpp
   src/roundstat_serializer.cpp
+  src/chain_integrity.cpp
 )
 
 configure_msvc_flags()
@@ -129,6 +131,15 @@ endif()
 target_link_libraries (csnode net csdb solver lib csconnector cscrypto base58 lz4 lmdbxx config ${Boost_LIBRARIES} ${FSLIBRARY})
 if(DBSQL)
 target_link_libraries (csnode dbsql)
+endif()
+
+# Mirror csdb's backend defines so chain_integrity.cpp can conditionally
+# compile the right backend opener.
+if(CSDB_BACKEND STREQUAL "rocksdb" OR CSDB_BACKEND STREQUAL "both")
+  target_compile_definitions(csnode PRIVATE CSDB_USE_ROCKSDB)
+endif()
+if(CSDB_BACKEND STREQUAL "berkeleydb" OR CSDB_BACKEND STREQUAL "both")
+  target_compile_definitions(csnode PRIVATE CSDB_USE_BERKELEYDB)
 endif()
 
 target_include_directories(${PROJECT_NAME} PUBLIC

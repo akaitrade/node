@@ -82,6 +82,8 @@ const std::string PARAM_NAME_STORAGE_DB_BACKEND = "db_backend";
 const std::string PARAM_NAME_STORAGE_ROCKSDB_BLOCK_CACHE_MB = "rocksdb_block_cache_mb";
 const std::string PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB = "rocksdb_memtable_mb";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_KEEP = "checkpoint_keep";
+const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY = "checkpoint_every";
+const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES = "checkpoint_every_minutes";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -886,7 +888,7 @@ Config Config::readFromFile(const std::string& fileName) {
             result.minCompatibleVersion_ = params.get<NodeVersion>(PARAM_NAME_MIN_COMPATIBLE_VERSION);
         }
 
-        result.setLoggerSettings(config);
+        result.setLoggerSettingsFromFile(fileName);
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
         result.readApiData(config);
@@ -943,6 +945,40 @@ void Config::setLoggerSettings(const boost::property_tree::ptree& config) {
     loggerSettings_ = boost::log::parse_settings(ss);
 }
 
+// Bypass the property_tree round-trip for logger settings: feed raw [Core] and
+// [Sinks.*] lines straight into boost::log::parse_settings. Required because
+// the round-trip mangles values containing inner quotes (e.g. filter string
+// literals like %Channel% == \"smartcontracts\"), which are exactly what
+// per-channel filters need.
+void Config::setLoggerSettingsFromFile(const std::string& fileName) {
+    std::ifstream fin(fileName);
+    if (!fin) return;
+    std::stringstream ss;
+    bool include = false;
+    std::string line;
+    while (std::getline(fin, line)) {
+        auto trimmed = line;
+        if (auto s = trimmed.find_first_not_of(" \t"); s != std::string::npos) {
+            trimmed.erase(0, s);
+        }
+        if (auto e = trimmed.find_last_not_of(" \t\r"); e != std::string::npos) {
+            trimmed.erase(e + 1);
+        }
+        if (!trimmed.empty() && trimmed.front() == '[' && trimmed.back() == ']') {
+            std::string section = trimmed.substr(1, trimmed.size() - 2);
+            include = (section == "Core") || (section.rfind("Sinks.", 0) == 0);
+        }
+        if (include) {
+            ss << line << "\n";
+        }
+    }
+    try {
+        loggerSettings_ = boost::log::parse_settings(ss);
+    } catch (...) {
+        // fall back silently; logger::initialize() will surface the error
+    }
+}
+
 void Config::readPoolSynchronizerData(const boost::property_tree::ptree& config) {
     const std::string& block = BLOCK_NAME_POOL_SYNC;
 
@@ -976,6 +1012,12 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ROCKSDB_BLOCK_CACHE_MB, storageData_.rocksdbBlockCacheMb);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB, storageData_.rocksdbMemtableMb);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_KEEP, storageData_.checkpointKeep);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY, storageData_.checkpointEvery);
+    if (storageData_.checkpointEvery > 0 && storageData_.checkpointEvery < 1000) {
+        cswarning() << "config: checkpoint_every=" << storageData_.checkpointEvery << " is too low, clamping to 1000";
+        storageData_.checkpointEvery = 1000;
+    }
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES, storageData_.checkpointEveryMinutes);
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

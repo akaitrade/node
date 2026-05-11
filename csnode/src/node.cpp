@@ -171,7 +171,18 @@ bool Node::init() {
                 cslog() << "Init aborted by user; preserving QUICK START state.";
                 // Snapshot current in-memory progress to qs/0 so the next start
                 // resumes byte-precisely instead of falling back to the last 5M.
-                if (cachesSerializationManager_.save(0)) {
+                cs::CheckpointHead headInfo;
+                const auto topSeq = blockChain_.getLastSeq();
+                auto hh = blockChain_.getHashBySequence(topSeq);
+                if (!hh.is_empty()) {
+                    headInfo.sequence = topSeq;
+                    headInfo.head_hash = hh.to_binary();
+                    if (topSeq > 0) {
+                        auto ph = blockChain_.getHashBySequence(topSeq - 1);
+                        if (!ph.is_empty()) headInfo.prev_hash = ph.to_binary();
+                    }
+                }
+                if (cachesSerializationManager_.save(0, headInfo)) {
                     blockChain_.flushIndexes();
                     cslog() << "Saved interim QUICK START state to qs/0.";
                 }
@@ -202,7 +213,18 @@ bool Node::init() {
     ) {
         if (isStopRequested()) {
             cslog() << "Init aborted by user; preserving QUICK START state.";
-            if (cachesSerializationManager_.save(0)) {
+            cs::CheckpointHead headInfo;
+            const auto topSeq = blockChain_.getLastSeq();
+            auto hh = blockChain_.getHashBySequence(topSeq);
+            if (!hh.is_empty()) {
+                headInfo.sequence = topSeq;
+                headInfo.head_hash = hh.to_binary();
+                if (topSeq > 0) {
+                    auto ph = blockChain_.getHashBySequence(topSeq - 1);
+                    if (!ph.is_empty()) headInfo.prev_hash = ph.to_binary();
+                }
+            }
+            if (cachesSerializationManager_.save(0, headInfo)) {
                 blockChain_.flushIndexes();
                 cslog() << "Saved interim QUICK START state to qs/0.";
             }
@@ -2020,9 +2042,6 @@ void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
     auto lastSequence = blockChain_.getLastSeq();
 
     if (lastSequence < sequence) {
-        if (poolSynchronizer_ && poolSynchronizer_->isSyncroStarted()) {
-            return;
-        }
         cswarning() << "Local max block " << WithDelimiters(lastSequence) << " is lower than remote one " << WithDelimiters(sequence)
                     << ", trying to request round table";
 
@@ -2057,18 +2076,6 @@ void Node::sendBlockRequestToConfidants(cs::Sequence sequence) {
 Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const MsgTypes type, const cs::PublicKey sender) {
     if (!good_) {
         return MessageActions::Drop;
-    }
-
-    // Drop transaction-content traffic while syncing — we can't validate it
-    // against current state and it just bloats memory.
-    if (poolSynchronizer_ && poolSynchronizer_->isSyncroStarted()) {
-        switch (type) {
-            case MsgTypes::TransactionPacket:
-            case MsgTypes::TransactionPacketHash:
-                return MessageActions::Drop;
-            default:
-                break;
-        }
     }
 
     // always process this types
@@ -3759,10 +3766,8 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 }
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
-    // Behind in sync OR trxIndex incomplete: refuse confidant role and skip Solver round init.
-    const bool behindInSync = blockChain_.getLastSeq() + 1ULL < roundTable.round;
     const bool trxIndexReady = blockChain_.isTrxIndexReady();
-    const bool deferConfidant = behindInSync || !trxIndexReady;
+    const bool deferConfidant = !trxIndexReady;
 
     if (!trxIndexReady) {
         cswarning() << "trxIndex __incomplete__ — refusing Trusted role this round";
@@ -4457,9 +4462,6 @@ void Node::deepBlockValidation(const csdb::Pool& block, bool* check_failed) {//c
 }
 
 void Node::onRoundTimeElapsed() {
-    if (poolSynchronizer_ && poolSynchronizer_->isSyncroStarted()) {
-        return;
-    }
     solver_->resetGrayList();
     const cs::PublicKey& own_key = solver_->getPublicKey();
     if (initialConfidants_.find(own_key) == initialConfidants_.end()) {

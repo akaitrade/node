@@ -1,3 +1,5 @@
+#define CS_LOG_CHANNEL "blockchain"
+#include <chrono>
 #include <base58.h>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
@@ -9,6 +11,7 @@
 #include <dbsql/roundinfo.hpp>
 #endif
 #include <csnode/blockchain.hpp>
+#include <csnode/chain_integrity.hpp>
 #include <csnode/blockhashes.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
@@ -78,7 +81,9 @@ bool BlockChain::bindSerializationManToCaches(
 
 bool BlockChain::tryQuickStart(
     cs::CachesSerializationManager* serializationManPtr,
-    std::set<cs::PublicKey>& initialConfidants
+    std::set<cs::PublicKey>& initialConfidants,
+    const std::string& dbPath,
+    const std::string& dbBackend
 ) {
     cslog() << "Try QUICK START...";
     if (!bindSerializationManToCaches(serializationManPtr, initialConfidants)) {
@@ -89,7 +94,25 @@ bool BlockChain::tryQuickStart(
     for (auto it : initialConfidants) {
         reserveConf.insert(it);
     }
-    bool ok = serializationManPtr_->load();
+
+    // Chain-binding verifier: opens the chain DB read-side for a single-block
+    // check, then closes. Storage::open will re-open later for the live walk.
+    auto verifier = [&dbPath, &dbBackend](const cs::CheckpointHead& head) -> bool {
+        if (head.head_hash.empty()) return true;  // legacy / no binding to verify
+        auto db = cs::chain_integrity::open_db(dbBackend, dbPath);
+        if (!db) {
+            cswarning() << "tryQuickStart: cannot open chain DB for verification; allowing checkpoint";
+            return true;
+        }
+        const bool ok = cs::chain_integrity::verify_at(*db, head.sequence, head.head_hash);
+        if (!ok) {
+            cserror() << "tryQuickStart: chain-binding mismatch at seq " << head.sequence
+                      << "; quarantining checkpoint";
+        }
+        return ok;
+    };
+
+    bool ok = serializationManPtr_->load(verifier);
 
     if (ok) {
         cslog() << "Caches for QUICK START loaded successfully!";
@@ -123,7 +146,8 @@ bool BlockChain::init(
             bindSerializationManToCaches(serializationManPtr, initialConfidants);
         }
         else {
-            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
+            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants,
+                                                 path, cs::ConfigHolder::instance().config()->getStorageSettings().dbBackend);
             if (!successfulQuickStart && trxIndex_->recreate()) {
                 cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
             }
@@ -218,6 +242,13 @@ bool BlockChain::init(
         }
     }
 
+    // Full slow walk (no QS shortcut) finished without interruption — mark
+    // cache state as validated end-to-end. Subsequent QS saves carry the bit
+    // forward via sentinel.bin.
+    if (!successfulQuickStart && !stop_ && serializationManPtr_) {
+        serializationManPtr_->setCompletedFromGenesis();
+    }
+
     good_ = true;
     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
     return true;
@@ -285,19 +316,27 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
         }
     }
 
-    if (serializationManPtr_
-        && blockSeq
-        && blockSeq % kQuickStartSaveCachesInterval == 0
-        && !*shouldStop) {
-        cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
-        // flush trxIndex before qs save so the two stores stay coherent on crash.
-        trxIndex_->flush();
-        if (serializationManPtr_->save(blockSeq)) {
-            const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
-            serializationManPtr_->pruneCheckpoints(keep);
-        }
-        else {
-            cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
+    if (serializationManPtr_ && blockSeq && !*shouldStop) {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
+        const auto now = std::chrono::steady_clock::now();
+        const bool byCount = (every > 0 && blockSeq % every == 0);
+        const bool byTime = (sto.checkpointEveryMinutes > 0
+            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
+        if (byCount || byTime) {
+            cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
+            trxIndex_->flush();
+            cs::CheckpointHead head;
+            head.sequence = blockSeq;
+            head.head_hash = block.hash().to_binary();
+            head.prev_hash = block.previous_hash().to_binary();
+            if (serializationManPtr_->save(blockSeq, head)) {
+                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
+                lastCheckpointWallClock_ = now;
+            }
+            else {
+                cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
+            }
         }
     }
 }
@@ -837,17 +876,26 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
         return false;
     }
 
-    if (serializationManPtr_
-        && pool.sequence()
-        && pool.sequence() % kQuickStartSaveCachesInterval == 0) {
-        // flush trxIndex before qs save so the two stores stay coherent on crash.
-        trxIndex_->flush();
-        if (serializationManPtr_->save(pool.sequence())) {
-            const auto keep = cs::ConfigHolder::instance().config()->getStorageSettings().checkpointKeep;
-            serializationManPtr_->pruneCheckpoints(keep);
-        }
-        else {
-            cserror() << "Cannot save caches with version " << pool.sequence();
+    if (serializationManPtr_ && pool.sequence()) {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
+        const auto now = std::chrono::steady_clock::now();
+        const bool byCount = (every > 0 && pool.sequence() % every == 0);
+        const bool byTime = (sto.checkpointEveryMinutes > 0
+            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
+        if (byCount || byTime) {
+            trxIndex_->flush();
+            cs::CheckpointHead head;
+            head.sequence = pool.sequence();
+            head.head_hash = pool.hash().to_binary();
+            head.prev_hash = pool.previous_hash().to_binary();
+            if (serializationManPtr_->save(pool.sequence(), head)) {
+                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
+                lastCheckpointWallClock_ = now;
+            }
+            else {
+                cserror() << "Cannot save caches with version " << pool.sequence();
+            }
         }
     }
 
@@ -1097,6 +1145,23 @@ void BlockChain::tryFlushDeferredBlock() {
 void BlockChain::close() {
     stop_ = true;
     tryFlushDeferredBlock();
+
+    // Capture chain-binding info BEFORE storage is closed; getHashBySequence
+    // needs the storage open.
+    cs::CheckpointHead headInfo;
+    if (serializationManPtr_) {
+        const auto topSeq = getLastSeq();
+        auto headHash = getHashBySequence(topSeq);
+        if (!headHash.is_empty()) {
+            headInfo.sequence = topSeq;
+            headInfo.head_hash = headHash.to_binary();
+            if (topSeq > 0) {
+                auto prevHash = getHashBySequence(topSeq - 1);
+                if (!prevHash.is_empty()) headInfo.prev_hash = prevHash.to_binary();
+            }
+        }
+    }
+
     cs::Lock lock(dbLock_);
     storage_.close();
     cs::Connector::disconnect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
@@ -1110,7 +1175,7 @@ void BlockChain::close() {
 
     csinfo() << "Blockchain: try to save caches for QUICK START.";
 
-    if (serializationManPtr_->save()) {
+    if (serializationManPtr_->save(0, headInfo)) {
       csinfo() << "Blockchain: caches for QUICK START saved successfully.";
     }
     else {

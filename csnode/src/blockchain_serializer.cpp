@@ -52,7 +52,6 @@ void BlockChain_Serializer::clear(const std::filesystem::path& rootDir) {
     *stakingOn_ = false;
     *miningOn_ = false;
     *TimeMinStage1_ = 500;
-    save(rootDir);
 }
 
 void BlockChain_Serializer::save(const std::filesystem::path& rootDir) {

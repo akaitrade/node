@@ -3,7 +3,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -11,8 +10,7 @@
 #include <string>
 
 #include <csdb/database.hpp>
-#include <csdb/empty_pool_stub.hpp>
-#include <csdb/pool.hpp>
+#include <csnode/chain_integrity.hpp>
 
 #if defined(CSDB_USE_ROCKSDB)
 #include <csdb/database_rocksdb.hpp>
@@ -107,113 +105,23 @@ int main(int argc, char** argv) {
     auto db = open_db(args);
     if (!db) return 2;
 
-    auto it = db->new_iterator();
-    if (!it) {
-        std::cerr << "iterator creation failed\n";
-        return 2;
-    }
-    it->seek_to_last();
-    cs::Sequence dbMax = 0;
-    if (it->is_valid()) {
-        dbMax = static_cast<cs::Sequence>(it->key());
-        if (dbMax > 0) --dbMax;  // keys are seq+1
-    }
-    const cs::Sequence to = std::min(args.to, dbMax);
-
-    std::cout << "chain_integrity: scanning " << args.from << ".." << to
-              << " (db max seq = " << dbMax << ")\n";
-
-    csdb::PoolHash prevHash;        // hash of (seq-1)
-    bool havePrev = false;
-    cs::Sequence prevSeq = 0;
-
-    size_t mismatchCount = 0;
-    size_t gapCount = 0;
-    size_t decodeFailures = 0;
-    size_t missingCount = 0;
-    size_t printed = 0;
+    cs::chain_integrity::Options opts;
+    opts.progress_every = args.progress_every;
+    opts.mismatch_print_limit = args.mismatch_print_limit;
+    opts.progress_log = &std::cout;
 
     auto t0 = std::chrono::steady_clock::now();
+    auto report = cs::chain_integrity::verify_range(*db, args.from, args.to, opts);
+    auto totalSecs = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t0).count();
 
-    for (cs::Sequence seq = args.from; seq <= to; ++seq) {
-        cs::Bytes blob;
-        const uint32_t key = static_cast<uint32_t>(seq + 1);   // csdb uses seq+1 as the key
-        if (!db->get(key, &blob)) {
-            ++missingCount;
-            if (printed < args.mismatch_print_limit) {
-                std::cout << "[MISSING] seq=" << seq << "\n";
-                ++printed;
-            }
-            havePrev = false;
-            continue;
-        }
-        csdb::Pool p = csdb::is_empty_pool_stub(blob)
-            ? csdb::parse_empty_pool_stub(blob)
-            : csdb::Pool::from_binary(std::move(blob));
-        if (!p.is_valid()) {
-            ++decodeFailures;
-            if (printed < args.mismatch_print_limit) {
-                std::cout << "[DECODE_FAIL] seq=" << seq << "\n";
-                ++printed;
-            }
-            havePrev = false;
-            continue;
-        }
-        if (p.sequence() != seq) {
-            ++mismatchCount;
-            if (printed < args.mismatch_print_limit) {
-                std::cout << "[SEQ_MISMATCH] expected=" << seq
-                          << " stored=" << p.sequence() << "\n";
-                ++printed;
-            }
-        }
-        if (havePrev) {
-            if (seq != prevSeq + 1) {
-                ++gapCount;
-                if (printed < args.mismatch_print_limit) {
-                    std::cout << "[GAP] expected_seq=" << (prevSeq + 1)
-                              << " got=" << seq << "\n";
-                    ++printed;
-                }
-            }
-            if (!(p.previous_hash() == prevHash)) {
-                ++mismatchCount;
-                if (printed < args.mismatch_print_limit) {
-                    std::cout << "[PREV_HASH] seq=" << seq
-                              << " stored_prev=" << p.previous_hash().to_string()
-                              << " expected_prev=" << prevHash.to_string()
-                              << "\n";
-                    ++printed;
-                }
-            }
-        }
-
-        prevHash = p.hash();
-        prevSeq = seq;
-        havePrev = true;
-
-        if (args.progress_every > 0 && (seq - args.from) % args.progress_every == 0 && seq != args.from) {
-            auto t = std::chrono::steady_clock::now();
-            auto secs = std::chrono::duration_cast<std::chrono::seconds>(t - t0).count();
-            std::cout << "  ... seq=" << seq
-                      << "  elapsed=" << secs << "s"
-                      << "  mismatches=" << mismatchCount
-                      << "  gaps=" << gapCount
-                      << "  decode_fail=" << decodeFailures
-                      << "  missing=" << missingCount
-                      << "\n";
-        }
-    }
-
-    auto t1 = std::chrono::steady_clock::now();
-    auto totalSecs = std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count();
     std::cout << "\n=== Summary ===\n"
-              << "scanned         : " << (to - args.from + 1) << " blocks (" << args.from << ".." << to << ")\n"
+              << "scanned         : " << report.scanned << " blocks (" << report.from << ".." << report.to << ")\n"
               << "elapsed         : " << totalSecs << "s\n"
-              << "prev-hash/seq   : " << mismatchCount << " mismatches\n"
-              << "gaps            : " << gapCount << "\n"
-              << "decode failures : " << decodeFailures << "\n"
-              << "missing pools   : " << missingCount << "\n";
+              << "prev-hash/seq   : " << report.mismatches << " mismatches\n"
+              << "gaps            : " << report.gaps << "\n"
+              << "decode failures : " << report.decode_failures << "\n"
+              << "missing pools   : " << report.missing << "\n";
 
-    return (mismatchCount + gapCount + decodeFailures + missingCount) ? 1 : 0;
+    return report.ok() ? 0 : 1;
 }

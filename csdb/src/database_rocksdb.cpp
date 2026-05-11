@@ -1,3 +1,4 @@
+#define CS_LOG_CHANNEL "blockchain"
 #include <cassert>
 #include <cstring>
 #include <limits>
@@ -55,10 +56,16 @@ DatabaseRocksDB::DatabaseRocksDB() = default;
 
 DatabaseRocksDB::~DatabaseRocksDB() {
     if (db_) {
+        if (!bulk_load_) {
+            db_->SyncWAL();
+            rocksdb::FlushOptions fo;
+            fo.wait = true;
+            for (auto* cf : {cf_blocks_, cf_seq_no_, cf_contracts_})
+                if (cf) db_->Flush(fo, cf);
+        }
         if (cf_blocks_)    db_->DestroyColumnFamilyHandle(cf_blocks_);
         if (cf_seq_no_)    db_->DestroyColumnFamilyHandle(cf_seq_no_);
         if (cf_contracts_) db_->DestroyColumnFamilyHandle(cf_contracts_);
-        // db_'s unique_ptr deleter calls `delete db_`, which closes & frees.
         cf_blocks_ = cf_seq_no_ = cf_contracts_ = nullptr;
     }
 }
@@ -96,6 +103,9 @@ bool DatabaseRocksDB::open(const std::string& path) {
     options.max_background_jobs = 8;
     options.write_buffer_size = memtable_bytes_;
     options.bytes_per_sync = 1u << 20;
+    options.wal_bytes_per_sync = 1u << 20;
+    options.wal_recovery_mode = rocksdb::WALRecoveryMode::kPointInTimeRecovery;
+    options.paranoid_checks = true;
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
     options.enable_pipelined_write = true;
     options.compaction_readahead_size = 2u << 20;
@@ -179,7 +189,8 @@ bool DatabaseRocksDB::put(const cs::Bytes& key, uint32_t seq_no, const cs::Bytes
               rocksdb::Slice(reinterpret_cast<const char*>(&native_seq), sizeof(native_seq)));
 
     rocksdb::WriteOptions wo;
-    if (bulk_load_) wo.disableWAL = true;
+    wo.sync = sync_writes_ && !bulk_load_;
+    wo.disableWAL = bulk_load_;
     auto s = db_->Write(wo, &batch);
     if (!s.ok()) { set_last_error_from_status(s); return false; }
     set_last_error();
@@ -207,7 +218,8 @@ bool DatabaseRocksDB::put_batch(const std::vector<PendingWrite>& items) {
     }
 
     rocksdb::WriteOptions wo;
-    if (bulk_load_) wo.disableWAL = true;
+    wo.sync = sync_writes_ && !bulk_load_;
+    wo.disableWAL = bulk_load_;
     auto s = db_->Write(wo, &batch);
     if (!s.ok()) { set_last_error_from_status(s); return false; }
     set_last_error();
@@ -216,6 +228,10 @@ bool DatabaseRocksDB::put_batch(const std::vector<PendingWrite>& items) {
 
 void DatabaseRocksDB::set_bulk_load(bool yes) {
     bulk_load_ = yes;
+}
+
+void DatabaseRocksDB::set_sync_writes(bool v) {
+    sync_writes_ = v;
 }
 
 bool DatabaseRocksDB::compact_full() {
@@ -315,7 +331,10 @@ bool DatabaseRocksDB::remove(const cs::Bytes& key) {
     rocksdb::WriteBatch batch;
     batch.Delete(cf_seq_no_, BytesSlice(key));
     batch.Delete(cf_blocks_, rocksdb::Slice(be_key));
-    s = db_->Write(rocksdb::WriteOptions(), &batch);
+    rocksdb::WriteOptions wo;
+    wo.sync = sync_writes_ && !bulk_load_;
+    wo.disableWAL = bulk_load_;
+    s = db_->Write(wo, &batch);
     if (!s.ok()) { set_last_error_from_status(s); return false; }
 
     set_last_error();
@@ -407,7 +426,10 @@ DatabaseRocksDB::IteratorPtr DatabaseRocksDB::new_iterator() {
 
 bool DatabaseRocksDB::updateContractData(const cs::Bytes& key, const cs::Bytes& data) {
     if (!db_) { set_last_error(NotOpen); return false; }
-    auto s = db_->Put(rocksdb::WriteOptions(), cf_contracts_, BytesSlice(key), BytesSlice(data));
+    rocksdb::WriteOptions wo;
+    wo.sync = sync_writes_ && !bulk_load_;
+    wo.disableWAL = bulk_load_;
+    auto s = db_->Put(wo, cf_contracts_, BytesSlice(key), BytesSlice(data));
     if (!s.ok()) { set_last_error_from_status(s); return false; }
     set_last_error();
     return true;

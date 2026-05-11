@@ -24,9 +24,9 @@ void TokensMaster_Serializer::bind(TokensMaster& tokens) {
 }
 
 void TokensMaster_Serializer::clear(const std::filesystem::path& rootDir) {
+    (void)rootDir;
     tokens_->clear();
     holders_->clear();
-    save(rootDir);
 }
 
 void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {

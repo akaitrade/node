@@ -22,8 +22,8 @@ namespace cs {
     }
 
     void RoundStat_Serializer::clear(const std::filesystem::path& rootDir) {
+        (void)rootDir;
         roundStat_->clear();
-        save(rootDir);
     }
 
 

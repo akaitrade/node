@@ -1,6 +1,7 @@
 #ifndef BLOCKCHAIN_HPP
 #define BLOCKCHAIN_HPP
 
+#include <chrono>
 #include <list>
 #include <map>
 #include <memory>
@@ -556,7 +557,8 @@ private:
         desiredHash_ = csdb::PoolHash{};
     }
 
-    bool tryQuickStart(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants);
+    bool tryQuickStart(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants,
+                       const std::string& dbPath, const std::string& dbBackend);
     bool bindSerializationManToCaches(cs::CachesSerializationManager*, std::set<cs::PublicKey>& initialConfidants);
 
     cs::CachesSerializationManager* serializationManPtr_ = nullptr;
@@ -567,7 +569,8 @@ private:
 
     friend class cs::BlockChain_Serializer;
 
-    const size_t kQuickStartSaveCachesInterval = 5'000'000;
+    static constexpr size_t kQuickStartSaveCachesInterval = 50'000; // fallback default; overridden by config checkpoint_every
+    std::chrono::steady_clock::time_point lastCheckpointWallClock_ = std::chrono::steady_clock::now();
     int32_t blockRewardIntegral_;
     uint64_t blockRewardFraction_ ;
     int32_t miningCoefficientIntegral_;

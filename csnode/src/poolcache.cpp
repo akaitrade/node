@@ -1,5 +1,6 @@
 #include <poolcache.hpp>
 
+#include <cassert>
 #include <csdb/pool.hpp>
 #include <lib/system/utils.hpp>
 
@@ -76,13 +77,8 @@ std::optional<cs::PoolCache::Data> cs::PoolCache::value(cs::Sequence sequence) c
 std::optional<cs::PoolCache::Data> cs::PoolCache::pop(cs::Sequence sequence) {
     auto data = value(sequence);
     db_.remove(sequence);
-
-    if (!data.has_value()) {
-        onRemoved(sequence);
-        return std::nullopt;
-    }
-
-    return std::make_optional(std::move(data).value());
+    onRemoved(sequence); // always sync mirror; onRemoved is idempotent
+    return data.has_value() ? std::make_optional(std::move(data).value()) : std::nullopt;
 }
 
 size_t cs::PoolCache::size() const {
@@ -176,6 +172,8 @@ void cs::PoolCache::onInserted(const char* data, size_t size) {
             syncedIter = iter;
         }
     }
+
+    checkInvariant();
 }
 
 void cs::PoolCache::onRemoved(const char* data, size_t size) {
@@ -195,6 +193,7 @@ void cs::PoolCache::onRemoved(cs::Sequence sequence) {
         }
 
         sequences_.erase(iter);
+        checkInvariant();
     }
 }
 
@@ -211,10 +210,18 @@ void cs::PoolCache::initialization() {
     db_.open();
 
     syncedIter = sequences_.end();
+    // verify open-time signal replay produced a consistent mirror
+    checkInvariant();
 }
 
 cs::PoolStoreType cs::PoolCache::cachedType(cs::Sequence sequence) const {
     return sequences_.find(sequence)->second;
+}
+
+void cs::PoolCache::checkInvariant() const {
+#ifndef NDEBUG
+    assert(sequences_.size() == db_.size());
+#endif
 }
 
 std::vector<cs::PoolCache::Interval> cs::PoolCache::createInterval(Sequence min, Sequence max) const {

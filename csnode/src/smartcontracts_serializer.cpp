@@ -1,3 +1,4 @@
+#define CS_LOG_CHANNEL "smartcontracts"
 #include <fstream>
 #include <sstream>
 #include <exception>
@@ -26,8 +27,8 @@ void SmartContracts_Serializer::bind(SmartContracts& contracts) {
 }
 
 void SmartContracts_Serializer::clear(const std::filesystem::path& rootDir) {
+    (void)rootDir;
     contracts_->clear();
-    save(rootDir);
 }
 
 void SmartContracts_Serializer::save(const std::filesystem::path& rootDir) {

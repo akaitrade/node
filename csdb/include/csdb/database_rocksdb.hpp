@@ -29,6 +29,7 @@ public:
     // Must be set before open(). Single-importer use only (no concurrent
     // readers expecting durability mid-load).
     void set_bulk_load(bool yes);
+    void set_sync_writes(bool v);
 
     // Manual flush + full-range compaction across all CFs. Intended to be
     // called once at the end of a bulk-load run.
@@ -66,6 +67,7 @@ private:
     rocksdb::ColumnFamilyHandle* cf_seq_no_ = nullptr;
     rocksdb::ColumnFamilyHandle* cf_contracts_ = nullptr;
     bool bulk_load_ = false;
+    bool sync_writes_ = true;
     uint64_t block_cache_bytes_ = 1ULL << 30;      // 1 GiB
     uint64_t memtable_bytes_    = 256ULL << 20;    // 256 MiB
 };

@@ -71,6 +71,8 @@ struct StorageData {
     size_t rocksdbBlockCacheMb = 1024;      // RocksDB shared block cache (MiB); 0 = built-in default
     size_t rocksdbMemtableMb = 256;         // RocksDB write_buffer_size (MiB); 0 = built-in default
     size_t checkpointKeep = 5;              // retained periodic checkpoints (qs/0 always kept on top)
+    size_t checkpointEvery = 50'000;        // blocks between periodic checkpoints (rolling history depth = checkpointEvery * checkpointKeep)
+    size_t checkpointEveryMinutes = 5;      // wall-clock fallback: also save if this many minutes elapsed since last save (0 = disabled)
 };
 
 struct ApiData {
@@ -361,6 +363,7 @@ private:
     static Config readFromFile(const std::string& fileName);
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
+    void setLoggerSettingsFromFile(const std::string& fileName);
     void readPoolSynchronizerData(const boost::property_tree::ptree& config);
     void readStorageData(const boost::property_tree::ptree& config);
     void readApiData(const boost::property_tree::ptree& config);
