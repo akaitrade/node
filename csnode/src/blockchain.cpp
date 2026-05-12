@@ -326,6 +326,7 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
         if (byCount || byTime) {
             cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
             trxIndex_->flush();
+            storage_.flush();   // sync chain DB WAL alongside indexes and QS save
             cs::CheckpointHead head;
             head.sequence = blockSeq;
             head.head_hash = block.hash().to_binary();
@@ -885,6 +886,7 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
             && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
         if (byCount || byTime) {
             trxIndex_->flush();
+            storage_.flush();   // sync chain DB WAL alongside indexes and QS save
             cs::CheckpointHead head;
             head.sequence = pool.sequence();
             head.head_hash = pool.hash().to_binary();

@@ -747,6 +747,11 @@ bool Storage::open(
     return open(opt, callback);
 }
 
+bool Storage::flush() {
+    if (!d || !d->db) return false;
+    return d->db->flush();
+}
+
 void Storage::close() {
     // Drain the async writer before destroying the underlying db. Otherwise
     // the writer thread can use-after-free / deadlock inside RocksDB's

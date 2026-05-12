@@ -56,6 +56,12 @@ public:
     virtual bool updateContractData(const cs::Bytes& key, const cs::Bytes& data) = 0;
     virtual bool getContractData(const cs::Bytes& key, cs::Bytes& data) = 0;
 
+    // Force any buffered writes to durable storage. Backends that defer fsync
+    // for throughput (RocksDB with sync=false, BerkeleyDB with DB_TXN_NOSYNC)
+    // call this at checkpoint boundaries to anchor durability. Default no-op
+    // is safe — BDB's NOSYNC has its own internal checkpoint loop.
+    virtual bool flush() { return true; }
+
     class Iterator {
     protected:
         Iterator();

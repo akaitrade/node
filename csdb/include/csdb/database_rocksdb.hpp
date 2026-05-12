@@ -56,6 +56,7 @@ private:
 
     bool updateContractData(const cs::Bytes& key, const cs::Bytes& data) override;
     bool getContractData(const cs::Bytes& key, cs::Bytes& data) override;
+    bool flush() override;
 
 private:
     class Iterator;
@@ -67,7 +68,11 @@ private:
     rocksdb::ColumnFamilyHandle* cf_seq_no_ = nullptr;
     rocksdb::ColumnFamilyHandle* cf_contracts_ = nullptr;
     bool bulk_load_ = false;
-    bool sync_writes_ = true;
+    // Match BerkeleyDB's DB_TXN_NOSYNC: per-write fsync is OFF; WAL is durably
+    // anchored at checkpoint boundaries via explicit flush() (called from
+    // BlockChain alongside the QS save). Set true only if you need
+    // BDB-paranoid per-write durability (slow at high TPS).
+    bool sync_writes_ = false;
     uint64_t block_cache_bytes_ = 1ULL << 30;      // 1 GiB
     uint64_t memtable_bytes_    = 256ULL << 20;    // 256 MiB
 };

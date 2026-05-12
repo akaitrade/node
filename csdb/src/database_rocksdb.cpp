@@ -424,6 +424,14 @@ DatabaseRocksDB::IteratorPtr DatabaseRocksDB::new_iterator() {
         db_->NewIterator(rocksdb::ReadOptions(), cf_blocks_)));
 }
 
+bool DatabaseRocksDB::flush() {
+    if (!db_) { set_last_error(NotOpen); return false; }
+    auto s = db_->SyncWAL();
+    if (!s.ok()) { set_last_error_from_status(s); return false; }
+    set_last_error();
+    return true;
+}
+
 bool DatabaseRocksDB::updateContractData(const cs::Bytes& key, const cs::Bytes& data) {
     if (!db_) { set_last_error(NotOpen); return false; }
     rocksdb::WriteOptions wo;

@@ -183,6 +183,18 @@ public:
     void close();
 
     /**
+     * @brief Forces buffered writes to durable storage on the underlying backend.
+     *
+     * For RocksDB this calls SyncWAL on the live WAL. For BerkeleyDB this is a
+     * no-op (the backend's DB_TXN_NOSYNC+checkpoint loop handles its own
+     * durability). Intended to be called at checkpoint boundaries so the
+     * chain DB is anchored alongside the QS snapshot.
+     *
+     * Returns true on success or no-op; false if the backend reports an error.
+     */
+    bool flush();
+
+    /**
      * @brief Last block hash
      * @return Last block hash
      *
