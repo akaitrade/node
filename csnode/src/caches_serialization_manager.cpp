@@ -203,10 +203,7 @@ struct CachesSerializationManager::Impl {
         result.data(),
         result.size()
       );
-      // bin2Hex returns a string whose .size() includes libsodium's trailing
-      // '\0' (cscrypto/src/helpers.cpp uses resize(len*2+1) without shrinking
-      // back). Strip it so the result is a clean hex string of len*2.
-      while (!hex.empty() && hex.back() == '\0') hex.pop_back();
+      while (!hex.empty() && hex.back() == '\0') hex.pop_back();   // strip libsodium's trailing null
       return hex;
     }
 
@@ -251,8 +248,7 @@ struct CachesSerializationManager::Impl {
         f.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
     }
 
-    // Returns true iff completed-from-genesis bit was set in the file. Missing
-    // file (legacy checkpoint) is treated as false.
+    // returns false for missing/legacy files
     bool loadSentinel(const std::filesystem::path& dir) {
         std::ifstream f(dir / kSentinelFile, std::ios::binary);
         if (!f.is_open()) return false;
@@ -326,10 +322,7 @@ struct CachesSerializationManager::Impl {
 
         std::string writtenHashes;
         f >> writtenHashes;
-        // Defensive: older checkpoints were written by code whose bin2Hex left
-        // a trailing '\0' in the file (449 chars for NODE_API instead of 448).
-        // Strip it so those files compare equal to freshly-computed hashes.
-        while (!writtenHashes.empty() && writtenHashes.back() == '\0') writtenHashes.pop_back();
+        while (!writtenHashes.empty() && writtenHashes.back() == '\0') writtenHashes.pop_back();   // legacy files had trailing null
         if (writtenHashes.empty()) {
             cserror() << "CachesSerializationManager: hash file empty or missing for version " << version;
             return false;
@@ -469,8 +462,7 @@ CachesSerializationManager::CachesSerializationManager()
     std::filesystem::create_directories(pImpl_->kQuickStartRoot);
     return;
   }
-  // Pass 1: clean partial saves (.tmp) and collect .prev backups that may
-  // need to be promoted back to the final dir (crash mid-publish recovery).
+  // Pass 1: clean .tmp; collect .prev for crash-mid-publish recovery
   std::vector<std::filesystem::path> prevDirs;
   for (auto& p : std::filesystem::directory_iterator(pImpl_->kQuickStartRoot)) {
     const auto ext = p.path().extension();
@@ -598,9 +590,7 @@ bool CachesSerializationManager::save(size_t version, const CheckpointHead& head
     // ensure data is on disk before we publish via rename
     fsyncDirContents(tmp_path);
 
-    // Rename-over-replace via .prev backup: the previous good version is
-    // preserved until the new one is successfully published. A crash between
-    // the two renames leaves only .prev, which the ctor recovers on next boot.
+    // .prev rename-over-replace: prior version preserved until new one is published
     const std::filesystem::path backup_path = root / (std::to_string(version) + ".prev");
     std::filesystem::remove_all(backup_path, ec);
 

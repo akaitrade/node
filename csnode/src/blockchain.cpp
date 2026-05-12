@@ -95,8 +95,7 @@ bool BlockChain::tryQuickStart(
         reserveConf.insert(it);
     }
 
-    // Chain-binding verifier: opens the chain DB read-side for a single-block
-    // check, then closes. Storage::open will re-open later for the live walk.
+    // single-block chain-binding check; Storage::open re-opens for live walk
     auto verifier = [&dbPath, &dbBackend](const cs::CheckpointHead& head) -> bool {
         if (head.head_hash.empty()) return true;  // legacy / no binding to verify
         auto db = cs::chain_integrity::open_db(dbBackend, dbPath);
@@ -242,9 +241,7 @@ bool BlockChain::init(
         }
     }
 
-    // Full slow walk (no QS shortcut) finished without interruption — mark
-    // cache state as validated end-to-end. Subsequent QS saves carry the bit
-    // forward via sentinel.bin.
+    // full genesis-to-head walk completed — mark caches validated; carries forward via sentinel.bin
     if (!successfulQuickStart && !stop_ && serializationManPtr_) {
         serializationManPtr_->setCompletedFromGenesis();
     }

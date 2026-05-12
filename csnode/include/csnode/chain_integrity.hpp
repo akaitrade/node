@@ -37,10 +37,7 @@ Report verify_range(csdb::Database& db,
 
 cs::Sequence db_top_sequence(csdb::Database& db);
 
-// Opens a chain DB by backend name ("rocksdb"/"berkeleydb"/"berkeley"/"both" — for
-// "both" the caller's preferred backend should be passed). Returns nullptr if
-// the backend isn't compiled in or open fails. The handle owns the DB; closing
-// happens at destruction.
+// open chain DB by backend name; returns nullptr if backend not compiled in or open fails
 std::shared_ptr<csdb::Database> open_db(const std::string& backend, const std::string& path);
 
 } // namespace cs::chain_integrity

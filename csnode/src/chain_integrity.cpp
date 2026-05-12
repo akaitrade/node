@@ -27,8 +27,7 @@ cs::Sequence db_top_sequence(csdb::Database& db) {
 
 bool verify_at(csdb::Database& db, cs::Sequence seq, const cs::Bytes& expected_hash) {
     cs::Bytes blob;
-    // Database::get(uint32_t) internally maps seq -> key (seq+1). Pass the
-    // sequence as-is, NOT seq+1 — otherwise we read the next block.
+    // Database::get(uint32_t) internally does seq->key+1; pass seq as-is
     if (!db.get(static_cast<uint32_t>(seq), &blob)) return false;
     csdb::Pool p = csdb::is_empty_pool_stub(blob)
         ? csdb::parse_empty_pool_stub(blob)
