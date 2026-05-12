@@ -436,7 +436,19 @@ void PoolSynchronizer::synchroFinished() {
     }
     timer_.stop();
     isSyncroStarted_ = false;
+    syncFinishedAtRound_.store(cs::Conveyer::instance().currentRoundNumber(),
+                               std::memory_order_release);
     csdebug() << "SYNC: Synchro finished";
+}
+
+bool PoolSynchronizer::isPostSyncSoaking() const {
+    const auto finishedAt = syncFinishedAtRound_.load(std::memory_order_acquire);
+    if (finishedAt == 0) return false;   // never finished a sync — no soak
+    const auto soakRounds = cs::ConfigHolder::instance().config()
+                                ->getPoolSyncSettings().postSyncSoakRounds;
+    if (soakRounds == 0) return false;
+    const auto currentRound = cs::Conveyer::instance().currentRoundNumber();
+    return currentRound < finishedAt + soakRounds;
 }
 
 void PoolSynchronizer::stop() {

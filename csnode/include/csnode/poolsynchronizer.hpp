@@ -26,6 +26,12 @@ public:
     void getBlockReply(PoolsBlock&& poolsBlock, const cs::PublicKey& sender);
     bool isSyncroStarted() const;
 
+    // True for postSyncSoakRounds rounds after the last synchroFinished(). Lets a
+    // freshly-synced node prove it can keep up in Normal role before being
+    // eligible for Trusted, preventing the "slow node elected Trusted, fails
+    // round, falls behind, repeats" cycle.
+    bool isPostSyncSoaking() const;
+
     // Idempotent shutdown hook. Called by Node::stop() BEFORE transport_ is
     // torn down so the watchdog timer cannot fire onTimeOut() against an
     // already-freed transport. After stop() returns, sync()/syncLastPool()/
@@ -78,6 +84,7 @@ private:
 
     std::atomic<bool> isSyncroStarted_ = false;
     std::atomic<bool> stopped_ = false;
+    std::atomic<cs::RoundNumber> syncFinishedAtRound_ = 0;   // 0 = never finished a sync
 
     std::unordered_map<PublicKey, Sequence> neighbours_;
 

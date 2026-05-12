@@ -991,6 +991,7 @@ void Config::readPoolSynchronizerData(const boost::property_tree::ptree& config)
 
     checkAndSaveValue(data, block, PARAM_NAME_POOL_SYNC_POOLS_COUNT, poolSyncData_.blockPoolsCount);
     checkAndSaveValue(data, block, PARAM_NAME_POOL_SYNC_SEQ_VERIF_FREQ, poolSyncData_.sequencesVerificationFrequency);
+    checkAndSaveValue(data, block, "post_sync_soak_rounds", poolSyncData_.postSyncSoakRounds);
 }
 
 void Config::readStorageData(const boost::property_tree::ptree& config) {

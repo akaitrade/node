@@ -3789,10 +3789,14 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     const bool trxIndexReady = blockChain_.isTrxIndexReady();
-    const bool deferConfidant = !trxIndexReady;
+    const bool postSyncSoak  = poolSynchronizer_ && poolSynchronizer_->isPostSyncSoaking();
+    const bool deferConfidant = !trxIndexReady || postSyncSoak;
 
     if (!trxIndexReady) {
         cswarning() << "trxIndex __incomplete__ — refusing Trusted role this round";
+    }
+    if (postSyncSoak) {
+        cswarning() << "post-sync soak — refusing Trusted role this round";
     }
 
     bool found = false;
