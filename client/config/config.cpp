@@ -895,6 +895,7 @@ Config Config::readFromFile(const std::string& fileName) {
         result.readConveyerData(config);
         result.readEventsReportData(config);
         result.readDbSQLData(config);
+        result.readWatchdogData(config);
 
         result.good_ = true;
     }
@@ -1018,6 +1019,17 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
         storageData_.checkpointEvery = 1000;
     }
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES, storageData_.checkpointEveryMinutes);
+}
+
+void Config::readWatchdogData(const boost::property_tree::ptree& config) {
+    const std::string block = "watchdog";
+    if (!config.count(block)) return;
+    const boost::property_tree::ptree& data = config.get_child(block);
+    checkAndSaveValue(data, block, "enabled",          watchdogData_.enabled);
+    checkAndSaveValue(data, block, "check_interval",   watchdogData_.checkInterval);
+    checkAndSaveValue(data, block, "stuck_threshold",  watchdogData_.stuckThreshold);
+    checkAndSaveValue(data, block, "emit_telemetry",   watchdogData_.emitTelemetry);
+    checkAndSaveValue(data, block, "kick_enabled",     watchdogData_.kickEnabled);
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

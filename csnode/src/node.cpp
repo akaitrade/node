@@ -16,6 +16,7 @@
 #include <csnode/nodecore.hpp>
 #include <csnode/nodeutils.hpp>
 #include <csnode/poolsynchronizer.hpp>
+#include <csnode/syncwatchdog.hpp>
 #include <csnode/itervalidator.hpp>
 #include <csnode/blockvalidator.hpp>
 #include <csnode/roundpackage.hpp>
@@ -71,6 +72,7 @@ Node::Node(cs::config::Observer& observer)
     transport_ = new Transport(this);
     std::cout << "Done\n";
     poolSynchronizer_ = new cs::PoolSynchronizer(&blockChain_);
+    syncWatchdog_ = std::make_unique<cs::SyncWatchdog>(blockChain_, *poolSynchronizer_, *this);
 
     cs::ExecutorSettings::set(cs::makeReference(blockChain_), cs::makeReference(solver_));
     auto& executor = cs::Executor::instance();
@@ -276,6 +278,19 @@ bool Node::init() {
     EventReport::sendRunningStatus(*this, Running::Status::Run);
     globalPublicKey_.fill(0);
     globalPublicKey_.at(31) = 7U;
+
+    // start the sync watchdog only after BlockChain::init succeeds, so the
+    // initial slow walk doesn't trigger it
+    if (syncWatchdog_) {
+        const auto& wd = cs::ConfigHolder::instance().config()->getWatchdogSettings();
+        if (wd.enabled) {
+            syncWatchdog_->setCheckInterval(std::chrono::seconds(wd.checkInterval));
+            syncWatchdog_->setStuckThreshold(std::chrono::minutes(wd.stuckThreshold));
+            syncWatchdog_->setTelemetryEnabled(wd.emitTelemetry);
+            syncWatchdog_->setKickEnabled(wd.kickEnabled);
+            syncWatchdog_->start();
+        }
+    }
     return true;
 }
 
@@ -310,7 +325,14 @@ void Node::run() {
     transport_->run();
 }
 
+void Node::kickSync() {
+    processSync();
+}
+
 void Node::stop() {
+    // stop watchdog first so its thread joins while subsystems still live
+    if (syncWatchdog_) syncWatchdog_->stop();
+
     dumpKnownPeersToFile();
     EventReport::sendRunningStatus(*this, Running::Status::Stop);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));

@@ -142,6 +142,14 @@ struct EventsReportData {
     bool alarm_invalid_block = true;
 };
 
+struct WatchdogData {
+    bool   enabled         = true;    // master switch
+    size_t checkInterval   = 60;      // seconds between samples
+    size_t stuckThreshold  = 10;      // minutes of no-progress before firing
+    bool   emitTelemetry   = true;    // send StuckDetected to event_report
+    bool   kickEnabled     = false;   // opt-in: call Node::processSync() on stuck
+};
+
 struct DbSQLData {
     // SQL server host name or ip address
     std::string host { "localhost" };
@@ -233,6 +241,10 @@ public:
 
     const StorageData& getStorageSettings() const {
         return storageData_;
+    }
+
+    const WatchdogData& getWatchdogSettings() const {
+        return watchdogData_;
     }
 
     const ApiData& getApiSettings() const {
@@ -370,6 +382,7 @@ private:
     void readConveyerData(const boost::property_tree::ptree& config);
     void readEventsReportData(const boost::property_tree::ptree& config);
     void readDbSQLData(const boost::property_tree::ptree& config);
+    void readWatchdogData(const boost::property_tree::ptree& config);
 
     bool readKeys(const std::string& pathToPk, const std::string& pathToSk, const bool encrypt);
     void showKeys(const std::string& pk58);
@@ -416,6 +429,7 @@ private:
     StorageData storageData_;
     ApiData apiData_;
     DbSQLData dbSQLData_;
+    WatchdogData watchdogData_;
 
     bool showBalanceChange_ = false;
     bool alwaysExecuteContracts_ = false;
