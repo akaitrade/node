@@ -29,7 +29,10 @@ using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::protocol;
 
 constexpr const int32_t kRestartThriftPause_ms = 200; // milliseconds
-const int32_t kStringLimit = static_cast<int32_t>(Consensus::MaxTransactionSize);
+// Was tied to MaxTransactionSize (100 KB), which rejected large contract
+// state/bytecode that the executor ships back over apiexec. Protocol limit
+// is a transport-level safety cap, not a consensus rule — decouple them.
+const int32_t kStringLimit = 16 * 1024 * 1024;   // 16 MB
 constexpr const int32_t kContainerLimit = 1 * 1024 * 1024; // max items per container; old 16K choked sync-time RPCs
 constexpr const bool kStrictRead = false; // use default Thrift value
 constexpr const bool kStrictWrite = true; // use default Thrift value
