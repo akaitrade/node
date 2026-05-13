@@ -47,6 +47,7 @@ public:
     static const size_t kCachedBlocksLimit = 10000;
     static const size_t kPerPeerCooldownMs = 5000;     // peer "busy" window after a request
     static const size_t kNoAnswerEntryTtlMs = 10000;   // NoAnswer entry GC after this
+    static const size_t kAwaitAnswerEntryTtlMs = 30000; // AwaitAnswer entry GC if peer ACK'd then went silent
 
     //void trySource(cs::Sequence finSeq, cs::PublicKey& source);
     //void showNeighbours();

@@ -316,6 +316,7 @@ void PoolSynchronizer::onNeighbourAdded(const cs::PublicKey& publicKey, cs::Sequ
 
 void PoolSynchronizer::onNeighbourRemoved(const cs::PublicKey& publicKey) {
     neighbours_.erase(publicKey);
+    removeSynchroLog(publicKey);   // drop in-flight tracking when peer disconnects
 }
 
 //
@@ -448,7 +449,7 @@ bool PoolSynchronizer::isPostSyncSoaking() const {
                                 ->getPoolSyncSettings().postSyncSoakRounds;
     if (soakRounds == 0) return false;
     const auto currentRound = cs::Conveyer::instance().currentRoundNumber();
-    return currentRound < finishedAt + soakRounds;
+    return currentRound <= finishedAt + soakRounds;   // inclusive: soakRounds=N protects N rounds
 }
 
 void PoolSynchronizer::stop() {
@@ -494,8 +495,10 @@ void PoolSynchronizer::updateSynchroLog() {
         auto msg = std::get<1>(it->second);
         auto timeEvent = std::get<2>(it->second);
         const bool stale =
-            (msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) ||
-            (msg == SyncroMessage::NoAnswer    && timeNow > timeEvent + kNoAnswerEntryTtlMs);
+            (msg == SyncroMessage::NoAnswer    && timeNow > timeEvent + kNoAnswerEntryTtlMs) ||
+            (msg == SyncroMessage::AwaitAnswer && timeNow > timeEvent + kAwaitAnswerEntryTtlMs) ||
+            (msg != SyncroMessage::NoAnswer && msg != SyncroMessage::AwaitAnswer
+                                            && timeNow > timeEvent + 50000);
         if (stale) {
             it = synchroLog_.erase(it);
         }

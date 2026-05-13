@@ -2,9 +2,11 @@
 #ifndef CONFIG_HPP
 #define CONFIG_HPP
 
+#include <map>
 #include <string>
 
 #include <boost/asio.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/log/utility/setup/settings.hpp>
 #include <boost/program_options.hpp>
 
@@ -56,7 +58,7 @@ enum BootstrapType {
 struct PoolSyncData {
     cs::Sequence blockPoolsCount = 100;              // max block count in one request: cannot be 0
     uint16_t sequencesVerificationFrequency = 350;   // sequences received verification frequency : 0-never; 1-once per round: other- in ms;
-    uint16_t postSyncSoakRounds = 3;                 // refuse Trusted role for N rounds after synchroFinished (0 = disable)
+    uint16_t postSyncSoakRounds = 5;                 // refuse Trusted role for N rounds after synchroFinished (0 = disable)
 };
 
 struct StorageData {
@@ -236,6 +238,10 @@ public:
         return loggerSettings_;
     }
 
+    const std::map<std::string, boost::log::trivial::severity_level>& getLogChannelLevels() const {
+        return logChannelLevels_;
+    }
+
     const PoolSyncData& getPoolSyncSettings() const {
         return poolSyncData_;
     }
@@ -377,6 +383,7 @@ private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
     void setLoggerSettingsFromFile(const std::string& fileName);
+    void readLogChannelLevels(const boost::property_tree::ptree& config);
     void readPoolSynchronizerData(const boost::property_tree::ptree& config);
     void readStorageData(const boost::property_tree::ptree& config);
     void readApiData(const boost::property_tree::ptree& config);
@@ -425,6 +432,7 @@ private:
     cs::PrivateKey privateKey_{};
 
     boost::log::settings loggerSettings_{};
+    std::map<std::string, boost::log::trivial::severity_level> logChannelLevels_;
 
     PoolSyncData poolSyncData_;
     StorageData storageData_;

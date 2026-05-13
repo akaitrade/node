@@ -254,6 +254,7 @@ if(CSDB_BUILD_MIGRATE)
 endif()
 
 add_subdirectory(tools/chain_integrity)
+add_subdirectory(tools/state_audit)
 
 if(NOT ${SKIP_SAMPLES})
     add_subdirectory(samples)

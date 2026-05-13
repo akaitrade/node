@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <optional>
 #include <regex>
 #include <stdexcept>
 #include <string>
@@ -889,6 +892,7 @@ Config Config::readFromFile(const std::string& fileName) {
         }
 
         result.setLoggerSettingsFromFile(fileName);
+        result.readLogChannelLevels(config);
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
         result.readApiData(config);
@@ -977,6 +981,31 @@ void Config::setLoggerSettingsFromFile(const std::string& fileName) {
         loggerSettings_ = boost::log::parse_settings(ss);
     } catch (...) {
         // fall back silently; logger::initialize() will surface the error
+    }
+}
+
+void Config::readLogChannelLevels(const boost::property_tree::ptree& config) {
+    const std::string block = "log_channels";
+    if (!config.count(block)) {
+        return;
+    }
+    auto parseLevel = [](std::string s) -> std::optional<boost::log::trivial::severity_level> {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (s == "trace")   return boost::log::trivial::trace;
+        if (s == "debug")   return boost::log::trivial::debug;
+        if (s == "info")    return boost::log::trivial::info;
+        if (s == "warning") return boost::log::trivial::warning;
+        if (s == "error")   return boost::log::trivial::error;
+        if (s == "fatal")   return boost::log::trivial::fatal;
+        return std::nullopt;
+    };
+    for (const auto& [key, value] : config.get_child(block)) {
+        if (auto lvl = parseLevel(value.data())) {
+            logChannelLevels_[key] = *lvl;
+        }
+        else {
+            cswarning() << "[log_channels] " << key << "=" << value.data() << " has unknown severity, ignored";
+        }
     }
 }
 

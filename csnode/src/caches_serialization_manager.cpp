@@ -643,18 +643,63 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
     pImpl_->loadedHead_.reset();
     pImpl_->loadedFromCompleted_ = false;
 
-    // try to load most recent version first
-    if (pImpl_->loadVersion(0, verify)) {
-        csinfo() << "CachesSerializationManager: successfully load version 0";
-        return true;
-    }
+    // Bug fix: previously qs/0 was tried first unconditionally — qs/0 is the
+    // "interim save" written on Ctrl+C and never refreshed during normal
+    // operation, so after a crash an OLD qs/0 could win over a much-newer
+    // qs/175000000/. Now we order all candidates by head.bin sequence
+    // (descending), with file mtime as a tiebreaker. Legacy checkpoints
+    // without head.bin sort to the bottom.
+    struct Candidate {
+        cs::Sequence headSeq = 0;
+        std::filesystem::file_time_type mtime{};
+        size_t version = 0;
+        bool hasHead = false;
+    };
 
     auto versions = pImpl_->getVersions();
+    std::vector<Candidate> candidates;
+    candidates.reserve(versions.size());
+    for (size_t v : versions) {
+        std::filesystem::path p(pImpl_->kQuickStartRoot);
+        p /= std::to_string(v);
+        Candidate c;
+        c.version = v;
+        auto head = pImpl_->loadHead(p);
+        if (head) {
+            c.headSeq = head->sequence;
+            c.hasHead = true;
+        }
+        std::error_code ec;
+        auto sentinelPath = p / pImpl_->kSentinelFile;
+        if (std::filesystem::exists(sentinelPath, ec)) {
+            c.mtime = std::filesystem::last_write_time(sentinelPath, ec);
+        } else {
+            c.mtime = std::filesystem::last_write_time(p, ec);
+        }
+        candidates.push_back(c);
+    }
 
-    // load versions starting from greatest numbers
-    for (auto it = versions.rbegin(); it != versions.rend(); ++it) {
-        if (pImpl_->loadVersion(*it, verify)) {
-            csinfo() << "CachesSerializationManager: successfully load version " << *it;
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.hasHead != b.hasHead) return a.hasHead;          // checkpoints with head.bin first
+        if (a.headSeq != b.headSeq) return a.headSeq > b.headSeq; // highest sequence first
+        return a.mtime > b.mtime;                              // newest mtime as tiebreaker
+    });
+
+    if (candidates.empty()) {
+        cserror() << "CachesSerializationManager: no checkpoint candidates found";
+        return false;
+    }
+
+    csinfo() << "CachesSerializationManager: checkpoint candidates (in order tried):";
+    for (const auto& c : candidates) {
+        csinfo() << "  qs/" << c.version
+                 << "  head.seq=" << (c.hasHead ? std::to_string(c.headSeq) : std::string("<legacy/missing>"));
+    }
+
+    for (const auto& c : candidates) {
+        if (pImpl_->loadVersion(c.version, verify)) {
+            csinfo() << "CachesSerializationManager: successfully loaded qs/" << c.version
+                     << " (head.seq=" << c.headSeq << ")";
             return true;
         }
     }
