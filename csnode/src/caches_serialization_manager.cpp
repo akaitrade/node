@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <vector>
 
 #ifdef _WIN32
@@ -643,32 +644,29 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
     pImpl_->loadedHead_.reset();
     pImpl_->loadedFromCompleted_ = false;
 
-    // Bug fix: previously qs/0 was tried first unconditionally — qs/0 is the
-    // "interim save" written on Ctrl+C and never refreshed during normal
-    // operation, so after a crash an OLD qs/0 could win over a much-newer
-    // qs/175000000/. Now we order all candidates by head.bin sequence
-    // (descending), with file mtime as a tiebreaker. Legacy checkpoints
-    // without head.bin sort to the bottom.
+    // Safe policy: only candidates with head.bin (chain-binding verifiable)
+    // are considered. Legacy checkpoints without head.bin are skipped — they
+    // cannot be cryptographically verified against the chain. If no
+    // verifiable candidate exists, fall through to slow start.
+    // Sort: highest head.seq first, mtime as tiebreaker.
     struct Candidate {
         cs::Sequence headSeq = 0;
         std::filesystem::file_time_type mtime{};
         size_t version = 0;
-        bool hasHead = false;
     };
 
     auto versions = pImpl_->getVersions();
-    std::vector<Candidate> candidates;
-    candidates.reserve(versions.size());
+    std::vector<Candidate> verifiable;
+    std::vector<size_t> legacy;
+    verifiable.reserve(versions.size());
     for (size_t v : versions) {
         std::filesystem::path p(pImpl_->kQuickStartRoot);
         p /= std::to_string(v);
+        auto head = pImpl_->loadHead(p);
+        if (!head) { legacy.push_back(v); continue; }
         Candidate c;
         c.version = v;
-        auto head = pImpl_->loadHead(p);
-        if (head) {
-            c.headSeq = head->sequence;
-            c.hasHead = true;
-        }
+        c.headSeq = head->sequence;
         std::error_code ec;
         auto sentinelPath = p / pImpl_->kSentinelFile;
         if (std::filesystem::exists(sentinelPath, ec)) {
@@ -676,27 +674,34 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
         } else {
             c.mtime = std::filesystem::last_write_time(p, ec);
         }
-        candidates.push_back(c);
+        verifiable.push_back(c);
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-        if (a.hasHead != b.hasHead) return a.hasHead;          // checkpoints with head.bin first
-        if (a.headSeq != b.headSeq) return a.headSeq > b.headSeq; // highest sequence first
-        return a.mtime > b.mtime;                              // newest mtime as tiebreaker
+    if (!legacy.empty()) {
+        std::ostringstream os;
+        for (auto v : legacy) os << " qs/" << v;
+        cswarning() << "CachesSerializationManager: skipping" << legacy.size()
+                    << " legacy checkpoint(s) without head.bin:" << os.str()
+                    << " — cannot cryptographically verify against chain";
+    }
+
+    std::sort(verifiable.begin(), verifiable.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.headSeq != b.headSeq) return a.headSeq > b.headSeq;
+        return a.mtime > b.mtime;
     });
 
-    if (candidates.empty()) {
-        cserror() << "CachesSerializationManager: no checkpoint candidates found";
+    if (verifiable.empty()) {
+        cswarning() << "CachesSerializationManager: no verifiable checkpoint (no head.bin); "
+                       "slow start will rebuild caches from chain";
         return false;
     }
 
-    csinfo() << "CachesSerializationManager: checkpoint candidates (in order tried):";
-    for (const auto& c : candidates) {
-        csinfo() << "  qs/" << c.version
-                 << "  head.seq=" << (c.hasHead ? std::to_string(c.headSeq) : std::string("<legacy/missing>"));
+    csinfo() << "CachesSerializationManager: verifiable checkpoint candidates (in order tried):";
+    for (const auto& c : verifiable) {
+        csinfo() << "  qs/" << c.version << "  head.seq=" << c.headSeq;
     }
 
-    for (const auto& c : candidates) {
+    for (const auto& c : verifiable) {
         if (pImpl_->loadVersion(c.version, verify)) {
             csinfo() << "CachesSerializationManager: successfully loaded qs/" << c.version
                      << " (head.seq=" << c.headSeq << ")";
@@ -736,19 +741,40 @@ void CachesSerializationManager::pruneCheckpoints(size_t keep) {
     if (versions.size() <= keep) {
         return;
     }
-    const size_t toRemove = versions.size() - keep;
-    size_t removed = 0;
-    for (auto it = versions.begin(); removed < toRemove && it != versions.end(); ++it) {
-        // Remove only the directory. Per-serializer clear() resets live
-        // in-memory state, which would corrupt the running node.
+    // Prune by mtime, not by directory-name-number. Otherwise old high-numbered
+    // legacy checkpoints (from a previous binary's walk) survive forever while
+    // recent low-numbered saves from the current walk get pruned.
+    struct V {
+        size_t version;
+        std::filesystem::file_time_type mtime;
+    };
+    std::vector<V> ordered;
+    ordered.reserve(versions.size());
+    for (size_t v : versions) {
         std::filesystem::path p(pImpl_->kQuickStartRoot);
-        p /= std::to_string(*it);
+        p /= std::to_string(v);
+        std::error_code ec;
+        auto sentinel = p / pImpl_->kSentinelFile;
+        auto mt = std::filesystem::exists(sentinel, ec)
+            ? std::filesystem::last_write_time(sentinel, ec)
+            : std::filesystem::last_write_time(p, ec);
+        ordered.push_back({v, mt});
+    }
+    // Newest mtime first; keep the first `keep`, prune the rest.
+    std::sort(ordered.begin(), ordered.end(),
+              [](const V& a, const V& b) { return a.mtime > b.mtime; });
+
+    for (size_t i = keep; i < ordered.size(); ++i) {
+        std::filesystem::path p(pImpl_->kQuickStartRoot);
+        p /= std::to_string(ordered[i].version);
         std::error_code ec;
         std::filesystem::remove_all(p, ec);
         if (ec) {
             cswarning() << "CachesSerializationManager: prune failed for " << p << ": " << ec.message();
+        } else {
+            csinfo() << "CachesSerializationManager: pruned old qs/" << ordered[i].version
+                     << " (older mtime than kept set)";
         }
-        ++removed;
     }
 }
 
