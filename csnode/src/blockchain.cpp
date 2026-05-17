@@ -1,5 +1,8 @@
 #define CS_LOG_CHANNEL "blockchain"
 #include <chrono>
+#include <cstdlib>
+#include <sstream>
+#include <string_view>
 #include <base58.h>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
@@ -163,6 +166,15 @@ bool BlockChain::init(
 
         csinfo() << "QUICK START! lastSequence_   is " << lastSequence_.load();
         csinfo() << "QUICK START! first block to read in database is " << firstBlockToReadInDatabase;
+
+#ifdef CS_MAINNET_UUID
+        // QS bypasses onReadFromDB(block#1); check uuid_ here too.
+        if (uuid_.load() == CS_MAINNET_UUID) {
+            cserror() << kLogPrefix << "CS_REFUSE_MAINNET build detected mainnet UUID "
+                      << uuid_.load() << " (via QuickStart) — refusing to run.";
+            std::exit(2);
+        }
+#endif
     }
     else {
         cslog() << "SLOW START...";
@@ -219,6 +231,8 @@ bool BlockChain::init(
     }
 
     if (newBlockchainTop != cs::kWrongSequence) {
+        // chain was just trimmed; align trxIndex if it was ahead.
+        if (trxIndex_) trxIndex_->trimToFloor(newBlockchainTop);
         return true;
     }
 
@@ -290,6 +304,13 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
         cs::Lock lock(dbLock_);
         uuid_ = uuidFromBlock(block);
         csdebug() << kLogPrefix << "UUID = " << uuid_;
+#ifdef CS_MAINNET_UUID
+        if (uuid_ == CS_MAINNET_UUID) {
+            cserror() << kLogPrefix << "CS_REFUSE_MAINNET build detected mainnet UUID "
+                      << uuid_ << " — refusing to run.";
+            std::exit(2);
+        }
+#endif
     }
 
     if (!updateWalletIds(block, *walletsCacheUpdater_.get())) {
@@ -1745,6 +1766,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
     }
 
     if (poolSequence == lastSequence + 1) {
+        debugRecomputeBlockDiff(pool);
         if (pool.previous_hash() != getLastHash()) {
             csdebug() << "BLOCKCHAIN> new pool\'s prev. hash does not equal to current last hash";
             if (getLastHash().is_empty()) {
@@ -2219,6 +2241,106 @@ cs::Sequence BlockChain::getLastSeq() const {
 
 const MultiWallets& BlockChain::multiWallets() const {
     return walletsCacheStorage_->multiWallets();
+}
+
+namespace {
+bool debugRecomputeOn() {
+    static const bool en = [] {
+        const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+        return v && *v && std::string_view(v) != "0";
+    }();
+    return en;
+}
+
+std::string amtToString(const csdb::Amount& a) {
+    std::ostringstream os;
+    os << a.integral() << "." << a.fraction();
+    return os.str();
+}
+} // namespace
+
+void BlockChain::debugRecomputeBlockDiff(const csdb::Pool& rx) const {
+    if (!debugRecomputeOn()) return;
+
+    std::ostringstream ss;
+    ss << "\n=== RECOMPUTE_DIFF seq=" << rx.sequence() << " ===\n";
+
+    {
+        const auto myPrev = getLastHash();
+        const auto rxPrev = rx.previous_hash();
+        ss << "  prev_hash    rx="    << rxPrev.to_string()
+           << " local=" << myPrev.to_string()
+           << (myPrev == rxPrev ? "  OK" : "  DIVERGE") << "\n";
+    }
+    {
+        const auto mySeq = getLastSeq() + 1;
+        ss << "  sequence     rx="    << rx.sequence()
+           << " local_next=" << mySeq
+           << (mySeq == rx.sequence() ? "  OK" : "  DIVERGE") << "\n";
+    }
+    {
+        std::string ts;
+        if (rx.user_field_ids().count(kFieldTimestamp) > 0) {
+            ts = rx.user_field(kFieldTimestamp).value<std::string>();
+        }
+        ss << "  timestamp    rx=\"" << ts << "\"\n";
+    }
+    {
+        std::string rxR;
+        if (rx.user_field_ids().count(kFieldBlockReward) > 0) {
+            rxR = rx.user_field(kFieldBlockReward).value<std::string>();
+        }
+        ss << "  blockReward  rx_size=" << rxR.size()
+           << " rx_hex=" << cs::Utils::byteStreamToHex(
+                  reinterpret_cast<const uint8_t*>(rxR.data()), rxR.size())
+           << "\n";
+    }
+    {
+        const auto& conf = rx.confidants();
+        ss << "  numberTrusted rx=" << static_cast<int>(rx.numberTrusted())
+           << "  confidants_count=" << conf.size() << "\n";
+        ss << "  realTrusted   rx=0x" << std::hex << rx.realTrusted() << std::dec << "\n";
+    }
+    {
+        const auto& nw = rx.newWallets();
+        const size_t cnt = nw.size();
+        cs::WalletsIds::WalletId myNext = 0;
+        {
+            std::lock_guard lock(cacheMutex_);
+            myNext = walletIds_->getNextId();
+        }
+        ss << "  newWallets    rx_count=" << cnt
+           << "  local_nextId=" << myNext << "\n";
+    }
+    {
+        ss << "  numberConfirmations rx=" << static_cast<int>(rx.numberConfirmations())
+           << "  confirmationMask rx=0x" << std::hex << rx.roundConfirmationMask() << std::dec
+           << "  confirmations_size=" << rx.roundConfirmations().size() << "\n";
+    }
+    {
+        ss << "  pool_hash   rx=" << rx.hash().to_string() << "\n";
+    }
+
+    // Per-confidant local WalletData (inputs to setBlockReward).
+    ss << "  -- per-confidant local WalletData --\n";
+    for (size_t i = 0; i < rx.confidants().size(); ++i) {
+        const auto& pk = rx.confidants()[i];
+        WalletData wd;
+        const bool found = findWalletData(csdb::Address::from_public_key(pk), wd);
+        const size_t srcCount = (wd.delegateSources_ ? wd.delegateSources_->size() : 0u);
+        const size_t tgtCount = (wd.delegateTargets_ ? wd.delegateTargets_->size() : 0u);
+        ss << "    [" << i << "] "
+           << cs::Utils::byteStreamToHex(pk.data(), pk.size()).substr(0, 16) << "...  "
+           << (found ? "found" : "MISSING")
+           << "  bal="   << amtToString(wd.balance_)
+           << "  deleg=" << amtToString(wd.delegated_)
+           << "  srcN="  << srcCount
+           << "  tgtN="  << tgtCount
+           << "  trxN="  << wd.transNum_ << "\n";
+    }
+    ss << "=== END_RECOMPUTE_DIFF seq=" << rx.sequence() << " ===";
+
+    csdebug() << ss.str();
 }
 
 void BlockChain::setBlocksToBeRemoved(cs::Sequence number) {

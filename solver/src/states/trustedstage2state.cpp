@@ -123,6 +123,8 @@ Result TrustedStage2State::onStage1(SolverContext& context, const cs::StageOne& 
     ++cnt_recv_stages;
     if (cnt_recv_stages == context.cnt_trusted()) {
         csdebug() << name() << ": enough stage-1 received";
+        // Freeze stage1 set for chooseTimeStamp; late stage1s won't shift the average.
+        context.snapshot_stage1_for_timestamp();
         /*signing of the second stage should be placed here*/
         csdebug() << name() << ": --> stageTwo [" << static_cast<int>(stage.sender) << "]";
         stage.toBytes();

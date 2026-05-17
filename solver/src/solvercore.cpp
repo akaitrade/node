@@ -13,10 +13,15 @@
 #include <csnode/walletsstate.hpp>
 #include <lib/system/logger.hpp>
 
+#include <csnode/blockchain.hpp>
+#include <lib/system/utils.hpp>
+
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <list>
 #include <iomanip>
 
@@ -230,6 +235,20 @@ uint64_t SolverCore::lastTimeStamp() {
 }
 
 std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
+    static const bool s_recomp = [] {
+        const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+        return v && *v && std::string_view(v) != "0";
+    }();
+    // Use frozen snapshot if set this round; fall back to live storage otherwise.
+    const auto& src = !stageOneSnapshot.empty() ? stageOneSnapshot : stageOneStorage;
+    std::ostringstream tsd;
+    if (s_recomp) {
+        tsd << "\n=== CHOOSE_TS_DUMP seq=" << (pnode->getBlockChain().getLastSeq() + 1)
+            << " mask=" << cs::Utils::byteStreamToHex(mask.data(), mask.size())
+            << " src=" << (!stageOneSnapshot.empty() ? "snapshot" : "live")
+            << " src.size=" << src.size()
+            << " (live=" << stageOneStorage.size() << ")\n";
+    }
     int64_t lastTimeStamp;
     try {
       lastTimeStamp = std::stoll(pnode->getBlockChain().getLastTimeStamp());
@@ -237,20 +256,31 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
         csdebug() << "ChooseTimeStamp - Timestamp was announced as zero";
       return std::to_string(0);
     }
+    if (s_recomp) tsd << "  lastTimeStamp=" << lastTimeStamp << "\n";
 
     std::list<double> stamps;
     double sx = 0, sx2 = 0;
     double mean = 0.0;
     int N = 0;
-    for (auto& it : stageOneStorage) {
+    for (auto& it : src) {
         if (it.sender >= cs::Conveyer::instance().confidantsCount()) {
+            if (s_recomp) tsd << "  sender=" << (int)it.sender << " out-of-range, skip\n";
             continue;
+        }
+        const bool maskOK = mask[it.sender] != cs::ConfidantConsts::InvalidConfidantIndex;
+        const bool tsOK = !it.roundTimeStamp.empty();
+        if (s_recomp) {
+            tsd << "  sender=" << (int)it.sender
+                << " mask[" << (int)it.sender << "]=" << (int)mask[it.sender]
+                << " ts=\"" << it.roundTimeStamp << "\""
+                << " tsOK=" << tsOK << " maskOK=" << maskOK;
         }
         if (!it.roundTimeStamp.empty() && mask[it.sender] != cs::ConfidantConsts::InvalidConfidantIndex) {
             int64_t tStamp;
             try {
                 tStamp = std::stoll(it.roundTimeStamp);
             } catch(...) {
+                if (s_recomp) tsd << " PARSE_FAIL\n";
                 cswarning() << log_prefix << "incompatible timestamp received from [" << (int)it.sender << "]";
                 continue;
             }
@@ -261,11 +291,18 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
                     sx += x;
                     sx2 += x * x;
                     ++N;
+                    if (s_recomp) tsd << " counted x=" << x << "\n";
+                } else if (s_recomp) {
+                    tsd << " skip(x<eps)\n";
                 }
+            } else if (s_recomp) {
+                tsd << " skip(tStamp<=lastTS,diff=" << (tStamp - lastTimeStamp) << ")\n";
             }
-
+        } else if (s_recomp) {
+            tsd << " NOT_COUNTED\n";
         }
     }
+    if (s_recomp) tsd << "  pre-drop N=" << N << " sx=" << sx << "\n";
 
     bool isDrop = true;
     while (isDrop) {
@@ -273,7 +310,7 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
             csdebug() << "There is no nodes with valid TimeStamp";
             int64_t N0 = 0;
             int64_t sx0 = 0;
-            for (auto& it : stageOneStorage) {
+            for (auto& it : src) {
                 int64_t tStamp;
                 try {
                     tStamp = std::stoull(it.roundTimeStamp);
@@ -306,12 +343,19 @@ std::string SolverCore::chooseTimeStamp(cs::Bytes mask) {
                 sx -= x; sx2 -= x * x; --N;
                 stamps.erase(it_);
                 isDrop = true;
+                if (s_recomp) tsd << "  dropped outlier x=" << x << " mean=" << mean << "\n";
             }
         }
     }
 
     auto meanTimeStamp = static_cast<int64_t>(lastTimeStamp + mean + 0.5);
     //csdebug() << "finish: " << meanTimeStamp;
+    if (s_recomp) {
+        tsd << "  post-drop N=" << N << " mean=" << mean
+            << " result=" << meanTimeStamp << "\n";
+        tsd << "=== END_CHOOSE_TS_DUMP ===";
+        cslog() << tsd.str();
+    }
     return std::to_string(meanTimeStamp);
 }
 
@@ -577,6 +621,58 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
 
     std::copy(lastHashBin.cbegin(), lastHashBin.cend(), stage3.blockHash.begin());
 	stage3.blockSignature = cscrypto::generateSignature(private_key, stage3.blockHash.data(), stage3.blockHash.size());
+
+    // CS_DEBUG_RECOMPUTE: dump signed-blockHash inputs for cross-node diffing.
+    {
+        static const bool s_recomp = [] {
+            const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+            return v && *v && std::string_view(v) != "0";
+        }();
+        if (s_recomp) {
+            std::ostringstream ss;
+            ss << "\n=== TRUSTED_SIGN_DUMP seq=" << deferredBlock_.sequence() << " ===\n";
+            ss << "  prev_hash      " << deferredBlock_.previous_hash().to_string() << "\n";
+            ss << "  sequence       " << deferredBlock_.sequence() << "\n";
+            ss << "  deferred.hash  " << deferredBlock_.hash().to_string() << "\n";
+            ss << "  stage3.blockHash " << cs::Utils::byteStreamToHex(stage3.blockHash.data(), stage3.blockHash.size()) << "\n";
+            std::string ts;
+            if (deferredBlock_.user_field_ids().count(BlockChain::kFieldTimestamp) > 0) {
+                ts = deferredBlock_.user_field(BlockChain::kFieldTimestamp).value<std::string>();
+            }
+            ss << "  timestamp      \"" << ts << "\"\n";
+            std::string br;
+            if (deferredBlock_.user_field_ids().count(BlockChain::kFieldBlockReward) > 0) {
+                br = deferredBlock_.user_field(BlockChain::kFieldBlockReward).value<std::string>();
+            }
+            ss << "  blockReward    size=" << br.size()
+               << " hex=" << cs::Utils::byteStreamToHex(reinterpret_cast<const uint8_t*>(br.data()), br.size()) << "\n";
+            ss << "  numberTrusted  " << static_cast<int>(deferredBlock_.numberTrusted()) << "\n";
+            ss << "  realTrusted    0x" << std::hex << deferredBlock_.realTrusted() << std::dec << "\n";
+            const auto& maskBytes = stage3.realTrustedMask;
+            ss << "  realTrustedMask " << cs::Utils::byteStreamToHex(maskBytes.data(), maskBytes.size()) << "\n";
+            ss << "  numberConfirmations " << static_cast<int>(deferredBlock_.numberConfirmations())
+               << "  confirmationMask 0x" << std::hex << deferredBlock_.roundConfirmationMask() << std::dec
+               << "  confirmations_size=" << deferredBlock_.roundConfirmations().size() << "\n";
+            ss << "  -- per-confidant local WalletData (inputs to setBlockReward) --\n";
+            const auto& conf = deferredBlock_.confidants();
+            for (size_t i = 0; i < conf.size(); ++i) {
+                BlockChain::WalletData wd;
+                const bool found = pnode->getBlockChain().findWalletData(csdb::Address::from_public_key(conf[i]), wd);
+                const size_t srcN = (wd.delegateSources_ ? wd.delegateSources_->size() : 0u);
+                const size_t tgtN = (wd.delegateTargets_ ? wd.delegateTargets_->size() : 0u);
+                ss << "    [" << i << "] "
+                   << cs::Utils::byteStreamToHex(conf[i].data(), conf[i].size()).substr(0, 16) << "...  "
+                   << (found ? "found" : "MISSING")
+                   << "  bal="   << wd.balance_.integral()   << "." << wd.balance_.fraction()
+                   << "  deleg=" << wd.delegated_.integral() << "." << wd.delegated_.fraction()
+                   << "  srcN="  << srcN
+                   << "  tgtN="  << tgtN
+                   << "  trxN="  << wd.transNum_ << "\n";
+            }
+            ss << "=== END_TRUSTED_SIGN_DUMP seq=" << deferredBlock_.sequence() << " ===";
+            cslog() << ss.str();
+        }
+    }
 
 
     //pnode->prepareRoundTable(table, poolMetaInfo, stage3);

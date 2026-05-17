@@ -261,6 +261,13 @@ private:
         return find_stage<>(stageOneStorage, sender);
     }
 
+    // Freeze the current stageOneStorage into stageOneSnapshot. Called once per
+    // round at the moment Trusted-1 transitions out, so subsequent late stage1
+    // arrivals don't perturb chooseTimeStamp on this node.
+    void snapshotStage1ForTimestamp() {
+        stageOneSnapshot = stageOneStorage;
+    }
+
     /**
      * @fn  cs::StageTwo* SolverCore::find_stage2(uint8_t sender);
      *
@@ -323,6 +330,9 @@ private:
     std::array<uint8_t, Consensus::MaxTrustedNodes> markUntrusted;
 
     std::vector<cs::StageOne> stageOneStorage;
+    // Frozen view of stageOneStorage taken when Trusted-1 transitions out.
+    // Used by chooseTimeStamp to avoid sign-time non-determinism from late stage1 arrivals.
+    std::vector<cs::StageOne> stageOneSnapshot;
     std::vector<cs::StageTwo> stageTwoStorage;
     std::vector<cs::StageThree> stageThreeStorage;
     std::vector<cs::StageThree> trueStageThreeStorage;

@@ -113,6 +113,9 @@ public:
         increaseSize_ = size;
     }
 
+    lmdb::env& env() { return *env_; }
+    const lmdb::env& env() const { return *env_; }
+
     // returns current map size
     size_t mapSize() const {
         if (!isOpen()) {

@@ -253,6 +253,11 @@ public:
 
     void add_stage3(cs::StageThree& stage);
 
+    // Freeze current stage1 set; called from Trusted-1::off().
+    void snapshot_stage1_for_timestamp() {
+        core.snapshotStage1ForTimestamp();
+    }
+
     const std::vector<cs::StageOne>& stage1_data() const {
         return core.stageOneStorage;
     }

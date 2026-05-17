@@ -37,6 +37,13 @@ if(CSDB_BUILD_MIGRATE)
     message(STATUS "csdb migrate tool: enabled (both backends will be compiled)")
 endif()
 
+# OFF by default; ON aborts at startup if loaded chain UUID matches mainnet.
+option(CS_REFUSE_MAINNET "Abort at startup if chain UUID matches known mainnet" OFF)
+if(CS_REFUSE_MAINNET)
+    add_compile_definitions(CS_MAINNET_UUID=11024959585341937636ULL)
+    message(STATUS "CS_REFUSE_MAINNET: ON — build will refuse to run on mainnet UUID 11024959585341937636")
+endif()
+
 IF(DBSQL)
     ADD_DEFINITIONS(-DDBSQL)
 ENDIF(DBSQL)

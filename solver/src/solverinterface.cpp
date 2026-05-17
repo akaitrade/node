@@ -164,6 +164,7 @@ void SolverCore::nextRound(bool updateRound) {
     }
     deferredBlock_ = csdb::Pool{};
     stageOneStorage.clear();
+    stageOneSnapshot.clear();
     stageTwoStorage.clear();
     stageThreeStorage.clear();
     trueStageThreeStorage.clear();

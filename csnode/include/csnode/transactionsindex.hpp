@@ -29,6 +29,9 @@ public:
 
     void pinFloor(Sequence floor);
 
+    // Delete trxIndex entries with curr_seq > floor; rewrite prev_seq>floor at curr==floor to kWrongSequence.
+    void trimToFloor(Sequence floor);
+
     bool recreate() const;
 
     // false while pinFloor lifted past unwalked blocks; cleared by a slow-start walk.

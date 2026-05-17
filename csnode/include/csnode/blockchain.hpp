@@ -204,6 +204,10 @@ public:
 
     const cs::MultiWallets& multiWallets() const;
 
+    // Debug diff: when a block arrives, dump our local view of every consensus
+    // input vs. what the received block claims. Gated by env CS_DEBUG_RECOMPUTE.
+    void debugRecomputeBlockDiff(const csdb::Pool& received) const;
+
     /**
      * @fn    std::size_t BlockChain::getCachedBlocksSize() const;
      *

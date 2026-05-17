@@ -2,7 +2,9 @@
 #include <transactionsindex.hpp>
 
 #include <algorithm>
+#include <cstring>
 #include <set>
+#include <string>
 #include <vector>
 
 #include <csdb/internal/utils.hpp>
@@ -15,9 +17,13 @@
 namespace {
 constexpr const char* kDbPath = "/indexdb";
 // Reserved keys; lengths can't collide with the 40-byte (pubkey + sequence) entries.
-constexpr const char* kLastIndexedKey = "__last_indexed__";
-constexpr const char* kIncompleteKey  = "__incomplete__";
-constexpr const char* kCompleteKey    = "__walked_complete__";
+constexpr const char* kLastIndexedKey   = "__last_indexed__";
+constexpr const char* kIncompleteKey    = "__incomplete__";
+constexpr const char* kCompleteKey      = "__walked_complete__";
+constexpr const char* kSchemaVersionKey = "__schema_version__";
+constexpr uint32_t    kCurrentSchema    = 2;  // bumped when trimToFloor was added
+constexpr size_t      kTrimBatchSize    = 50000;
+constexpr size_t      kTrxIndexKeySize  = 40;  // 32 (pubkey) + 8 (seq)
 
 auto getTrxIndexKey(const cs::PublicKey& _pubKey, cs::Sequence _seq) {
     cs::Bytes ret(_pubKey.begin(), _pubKey.end());
@@ -45,6 +51,9 @@ TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, 
     }
     loadIncompleteFromDb();
     loadCompleteFlagFromDb();
+    if (db_->isOpen() && !db_->isKeyExists(kSchemaVersionKey)) {
+        db_->insert(kSchemaVersionKey, kCurrentSchema);
+    }
     if (indexIncomplete_) {
         cslog() << "TRACE: trxIndex __incomplete__ flag set on load — Trusted role gated until slow-start rebuilds the index";
     }
@@ -60,14 +69,12 @@ bool TransactionsIndex::recreate() const {
 bool TransactionsIndex::isReady() const {
     if (indexIncomplete_) return false;
     if (lastIndexedPool_ == kWrongSequence) return false;
-    if (lastIndexedPool_ < 1000) return true;
-    return indexComplete_;
+    return true;
 }
 
 bool TransactionsIndex::looksEmpty() const {
     if (!db_->isOpen()) return false;
-    if (lastIndexedPool_ == kWrongSequence || lastIndexedPool_ < 1000) return false;
-    return !indexComplete_;
+    return lastIndexedPool_ == kWrongSequence;
 }
 
 void TransactionsIndex::forceRebuild() {
@@ -100,20 +107,8 @@ void TransactionsIndex::onStartReadFromDb(Sequence _lastWrittenPoolSeq) {
     if (lastIndexedPool_ <= _lastWrittenPoolSeq) {
         return;
     }
-    constexpr Sequence kMaxRollbackGap = 10000;
-    const Sequence aheadGap = lastIndexedPool_ - _lastWrittenPoolSeq;
-    if (aheadGap > kMaxRollbackGap) {
-        cslog() << "TRACE: trxIndex gap " << aheadGap << " > " << kMaxRollbackGap << ", recreate";
-        recreate_ = true;
-        return;
-    }
-    cslog() << "TRACE: trxIndex roll back lastIndexedPool " << lastIndexedPool_
-            << " -> " << _lastWrittenPoolSeq;
-    lastIndexedPool_ = _lastWrittenPoolSeq;
-    updateLastIndexed();
-    if (db_->isOpen()) {
-        db_->flush();
-    }
+    // trxIndex ahead of chain head; trim entries above the floor.
+    trimToFloor(_lastWrittenPoolSeq);
 }
 
 void TransactionsIndex::onReadFromDb(const csdb::Pool& _pool) {
@@ -231,6 +226,100 @@ void TransactionsIndex::pinFloor(Sequence floor) {
             db_->flush();
         }
     }
+}
+
+void TransactionsIndex::trimToFloor(Sequence floor) {
+    if (!db_->isOpen()) return;
+    if (floor == kWrongSequence) return;
+    if (lastIndexedPool_ != kWrongSequence && lastIndexedPool_ <= floor) return;
+
+    cslog() << "trxIndex: trimToFloor " << lastIndexedPool_ << " -> " << floor
+            << " (deleting entries with curr_seq > floor)";
+
+    auto& env = db_->env();
+    size_t deleted = 0;
+    size_t rewrittenAtFloor = 0;
+
+    // Phase 1: collect keys to delete (curr_seq > floor) and keys at floor with prev_seq > floor.
+    std::vector<std::vector<uint8_t>> toDelete;
+    std::vector<std::vector<uint8_t>> toRewrite;
+    try {
+        auto txn = lmdb::txn::begin(env, nullptr, MDB_RDONLY);
+        auto dbi = lmdb::dbi::open(txn, nullptr);
+        auto cur = lmdb::cursor::open(txn, dbi);
+        lmdb::val k, v;
+        if (cur.get(k, v, MDB_FIRST)) {
+            do {
+                if (k.size() != kTrxIndexKeySize) continue;
+                Sequence seq = 0;
+                std::memcpy(&seq, reinterpret_cast<const uint8_t*>(k.data()) + 32, sizeof(Sequence));
+                if (seq > floor) {
+                    toDelete.emplace_back(reinterpret_cast<const uint8_t*>(k.data()),
+                                          reinterpret_cast<const uint8_t*>(k.data()) + k.size());
+                } else if (seq == floor) {
+                    Sequence prev = 0;
+                    try { prev = std::stoull(std::string(static_cast<const char*>(v.data()), v.size())); }
+                    catch (...) { continue; }
+                    if (prev != kWrongSequence && prev > floor) {
+                        toRewrite.emplace_back(reinterpret_cast<const uint8_t*>(k.data()),
+                                               reinterpret_cast<const uint8_t*>(k.data()) + k.size());
+                    }
+                }
+            } while (cur.get(k, v, MDB_NEXT));
+        }
+        cur.close();
+        txn.abort();
+    } catch (const std::exception& e) {
+        cserror() << "trxIndex: trimToFloor scan failed: " << e.what();
+        return;
+    }
+
+    cslog() << "trxIndex: trimToFloor will delete " << toDelete.size()
+            << " entries, rewrite " << toRewrite.size() << " prev_seq pointers";
+
+    // Phase 2: batched deletes.
+    for (size_t i = 0; i < toDelete.size(); i += kTrimBatchSize) {
+        const size_t end = std::min(i + kTrimBatchSize, toDelete.size());
+        try {
+            auto txn = lmdb::txn::begin(env);
+            auto dbi = lmdb::dbi::open(txn, nullptr);
+            for (size_t j = i; j < end; ++j) {
+                lmdb::val key(toDelete[j].data(), toDelete[j].size());
+                dbi.del(txn, key);
+                ++deleted;
+            }
+            txn.commit();
+        } catch (const std::exception& e) {
+            cserror() << "trxIndex: trimToFloor delete batch failed at " << i << ": " << e.what();
+            return;
+        }
+    }
+
+    // Phase 3: rewrite boundary prev_seq to kWrongSequence (use ASCII via wrapper).
+    for (const auto& key : toRewrite) {
+        try {
+            db_->insert(key, kWrongSequence);
+            ++rewrittenAtFloor;
+        } catch (const std::exception& e) {
+            cswarning() << "trxIndex: trimToFloor rewrite failed: " << e.what();
+        }
+    }
+
+    lastIndexedPool_ = floor;
+    recreate_ = false;
+    if (indexComplete_) {
+        indexComplete_ = false;
+        updateCompleteFlag();
+    }
+    if (indexIncomplete_) {
+        indexIncomplete_ = false;
+        updateIncompleteFlag();
+    }
+    updateLastIndexed();
+    db_->flush();
+
+    cslog() << "trxIndex: trimToFloor done, deleted=" << deleted
+            << " rewritten=" << rewrittenAtFloor << " lastIndexedPool_=" << lastIndexedPool_;
 }
 
 void TransactionsIndex::updateFromNextBlock(const csdb::Pool& _pool) {
