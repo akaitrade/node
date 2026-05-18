@@ -282,6 +282,40 @@ void EventReport::sendConsensusProblem(Node& node, Id problem_id, const cs::Publ
 }
 
 /*static*/
+void EventReport::sendStateRootMismatch(Node& node,
+                                        cs::Sequence sequence,
+                                        const cs::Bytes& local,
+                                        const cs::Bytes& embedded) {
+    const auto& config = cs::ConfigHolder::instance().config()->getEventsReportData();
+    if (!config.is_active) {
+        return;
+    }
+    cs::Bytes bin_pack;
+    bin_pack.reserve(1 + sizeof(sequence) + local.size() + embedded.size());
+    cs::ODataStream out(bin_pack);
+    out << Id::StateRootMismatch << sequence << local << embedded;
+    node.reportEvent(bin_pack);
+}
+
+/*static*/
+bool EventReport::parseStateRootMismatch(const cs::Bytes& bin_pack,
+                                         cs::Sequence& sequence,
+                                         cs::Bytes& local,
+                                         cs::Bytes& embedded) {
+    if (bin_pack.empty()) {
+        return false;
+    }
+    cs::IDataStream in(bin_pack.data(), bin_pack.size());
+    Id id = Id::None;
+    in >> id;
+    if (id != Id::StateRootMismatch) {
+        return false;
+    }
+    in >> sequence >> local >> embedded;
+    return in.isValid();
+}
+
+/*static*/
 EventReport::Id EventReport::parseConsensusProblem(const cs::Bytes& bin_pack, cs::PublicKey& problem_source) {
     if (bin_pack.empty()) {
         return Id::None;

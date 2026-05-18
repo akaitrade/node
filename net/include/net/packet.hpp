@@ -62,6 +62,8 @@ enum MsgTypes : uint8_t {
     TransactionPacketHash,
     TransactionsPacketBaseRequest,
     TransactionsPacketBaseReply,
+    AnchorListRequest,  // Phase 2.5b: ask peer for its recent-anchor window.
+    AnchorListReply,    // Phase 2.5b: peer's anchor window.
     NodeStopRequest = 255
 };
 

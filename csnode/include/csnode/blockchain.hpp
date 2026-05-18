@@ -1,6 +1,8 @@
 #ifndef BLOCKCHAIN_HPP
 #define BLOCKCHAIN_HPP
 
+#include <atomic>
+#include <deque>
 #include <list>
 #include <map>
 #include <memory>
@@ -23,6 +25,7 @@
 #include <csnode/walletsids.hpp>
 #include <csnode/poolcache.hpp>
 #include <csnode/caches_serialization_manager.hpp>
+#include <csnode/anchorblock.hpp>
 
 #include <roundpackage.hpp>
 
@@ -52,6 +55,8 @@ using OrderNecessaryBlockSignal = cs::Signal<void(csdb::PoolHash, cs::Sequence)>
 using ChangeBlockSignal = cs::Signal<void(const cs::Sequence)>;
 using RemoveBlockSignal = cs::Signal<void(const csdb::Pool&)>;
 using AlarmSignal = cs::Signal<void(const cs::Sequence)>;
+using StateRootMismatchSignal =
+    cs::Signal<void(const cs::Sequence, const cs::Bytes& /*local*/, const cs::Bytes& /*embedded*/)>;
 using ReadBlockSignal = csdb::ReadBlockSignal;
 using StartReadingBlocksSignal = csdb::BlockReadingStartedSingal;
 using StopReadingBlocksSignal = cs::Signal<void(uint64_t, bool)>;
@@ -185,12 +190,62 @@ public:
     static inline const csdb::user_field_id_t kFieldTimestamp = 0;
     static inline const csdb::user_field_id_t kFieldServiceInfo = 1;
     static inline const csdb::user_field_id_t kFieldBlockReward = 3;
+    // Phase 1 advisory state-root: 32-byte ECMH digest over the post-block
+    // wallet set. See STATE_ROOT_PROPOSAL.md.
+    static inline const csdb::user_field_id_t kFieldStateRoot = 4;
+    // Phase 2.5a advisory anchor block: serialised AnchorPayload emitted on
+    // sequences where seq % kAnchorCadence == 0.
+    static inline const csdb::user_field_id_t kFieldAnchorBlock = 5;
+    // Anchor cadence K (rounds between anchors). Suggested K=100 (~5 min).
+    static constexpr cs::Sequence kAnchorCadence = 100;
+    // Window of most-recent anchors retained per node (for handshake).
+    static constexpr size_t kAnchorWindow = 10;
+
+    // Phase 2 hard-activation sequence threshold. From this sequence forward,
+    // a missing or mismatched kFieldStateRoot causes applyBlockToCaches to
+    // fail (block rejected). Default: never activated; set via the static
+    // setter so operators can coordinate the cut-over.
+    static cs::Sequence stateRootActivationSeq();
+    static void setStateRootActivationSeq(cs::Sequence seq);
+
+    // Phase 2.5c hard-activation: from this sequence forward, an anchor-list
+    // handshake that finds the local node ahead of the deepest shared anchor
+    // (and the peer's anchor list reaches further) triggers automatic rewind.
+    static cs::Sequence anchorReconciliationActivationSeq();
+    static void setAnchorReconciliationActivationSeq(cs::Sequence seq);
+
+    // Phase 2.5c: rewind the chain down to `target` (target is retained).
+    // Returns the number of blocks removed. Bounded by kAnchorCadence * kAnchorWindow
+    // by callers; this method itself loops removeLastBlock.
+    cs::Sequence removeToSequence(cs::Sequence target);
 
     static void setTimestamp(csdb::Pool& block, const std::string& timestamp);
     static void setBootstrap(csdb::Pool& block, bool is_bootstrap);
     static bool isBootstrap(const csdb::Pool& block);
 
     const cs::MultiWallets& multiWallets() const;
+
+    uint64_t stateRootMismatchCount() const { return stateRootMismatchCount_.load(); }
+
+    // Phase 2.5a anchor blocks. The writer calls previewAnchorPayload() to
+    // build the payload to embed in the current block when its sequence is
+    // an anchor sequence. Receivers parse and push the payload via
+    // onAnchorObserved(). recentAnchors() returns the rolling window used by
+    // the Phase 2.5b common-ancestor handshake.
+    static bool isAnchorSequence(cs::Sequence seq) {
+        return seq != 0 && (seq % kAnchorCadence) == 0;
+    }
+    cs::AnchorPayload previewAnchorPayload(const csdb::Pool& pool,
+                                           const std::vector<cs::PublicKey>& trustedSet) const;
+    void onAnchorObserved(const cs::AnchorPayload& anchor);
+    std::vector<cs::AnchorPayload> recentAnchors() const;
+    cs::Hash latestAnchorHash() const;
+
+    // Phase 2.5b: given a peer's anchor list, return the deepest anchor we
+    // share. Empty payload sequence==0 means no shared anchor in our window.
+    // Counts misses via segmentDivergenceCount().
+    cs::AnchorPayload deepestCommonAnchor(const std::vector<cs::AnchorPayload>& theirs) const;
+    uint64_t segmentDivergenceCount() const { return segmentDivergenceCount_.load(); }
 
     /**
      * @fn    std::size_t BlockChain::getCachedBlocksSize() const;
@@ -270,6 +325,9 @@ public signals:
 
     /** @brief Alarm event. Uncertain that last block is valid */
     cs::AlarmSignal uncertainBlock;
+
+    /** @brief Phase 1b: post-apply ECMH disagreed with the embedded state-root. */
+    cs::StateRootMismatchSignal stateRootMismatch;
 
     const cs::ReadBlockSignal& readBlockEvent() const;
     const cs::StartReadingBlocksSignal& startReadingBlocksEvent() const;
@@ -442,6 +500,15 @@ private:
     std::unique_ptr<cs::WalletsCache::Updater> walletsCacheUpdater_;
 
     mutable cs::SpinLock cacheMutex_{ATOMIC_FLAG_INIT};
+
+    // Phase 1 advisory: count blocks whose embedded state-root disagreed
+    // with our locally computed one. Exposed via stateRootMismatchCount().
+    mutable std::atomic<uint64_t> stateRootMismatchCount_{0};
+
+    // Phase 2.5a anchor block window (most-recent kAnchorWindow entries).
+    mutable std::mutex anchorMutex_;
+    std::deque<cs::AnchorPayload> recentAnchors_;
+    mutable std::atomic<uint64_t> segmentDivergenceCount_{0};
 
     uint64_t totalTransactionsCount_ = 0;
 

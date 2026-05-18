@@ -40,6 +40,14 @@ uint64_t WalletsCache::getCount() const {
     return multiWallets_->size();
 }
 
+cscrypto::MultisetDigest WalletsCache::stateDigest() const {
+    return multiWallets_->stateDigest();
+}
+
+void WalletsCache::rebuildStateDigest() {
+    multiWallets_->rebuildStateDigest();
+}
+
 std::unique_ptr<WalletsCache::Updater> WalletsCache::createUpdater() {
     return std::make_unique<Updater>(*this);
 }

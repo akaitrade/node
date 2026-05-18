@@ -30,6 +30,7 @@ void WalletsCache_Serializer::bind(WalletsCache& wCache) {
 #endif
     currentDelegations_ = reinterpret_cast<decltype(currentDelegations_)>(&wCache.staking_->currentDelegations_);
     miningDelegations_ = reinterpret_cast<decltype(miningDelegations_)>(&wCache.staking_->miningDelegations_);
+    wCache_ = &wCache;
     csdebug() << "WalletsCaches bindings made";
 }
 
@@ -107,5 +108,8 @@ void WalletsCache_Serializer::load(const std::filesystem::path& rootDir) {
 #endif
     ia >> *currentDelegations_;
     ia >> *miningDelegations_;
+    if (wCache_) {
+        wCache_->rebuildStateDigest();
+    }
 }
 }  // namespace cs

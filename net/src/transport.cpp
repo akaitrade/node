@@ -377,6 +377,10 @@ void Transport::dispatchNodeMessage(const cs::PublicKey& sender, const MsgTypes 
             return node_->getPacketHashRequest(data, size, rNum, sender);
         case MsgTypes::TransactionsPacketBaseReply:
             return node_->getPacketHashesBaseReply(data, size, rNum, sender);
+        case MsgTypes::AnchorListRequest:
+            return node_->getAnchorListRequest(data, size, rNum, sender);
+        case MsgTypes::AnchorListReply:
+            return node_->getAnchorListReply(data, size, rNum, sender);
         default:
             break;
     }

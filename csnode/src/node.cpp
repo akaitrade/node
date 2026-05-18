@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <cctype>
 #include <csignal>
+#include <cstdlib>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <numeric>
@@ -51,6 +54,21 @@ Packet formPacket(BaseFlags flags, MsgTypes msgType, cs::RoundNumber round, Args
     stream << round;
     (void)(stream << ... << std::forward<Args>(args));
     return Packet(std::move(packetBytes));
+}
+
+// Local override for Consensus::TimeMinStage1. When set (via env var
+// CS_TIME_MIN_STAGE1), all setter sites — startup-from-blockchain,
+// onSuccessQS, and the order-23 control-tx handler — keep the override
+// value instead of accepting the on-chain or runtime value. Use this to
+// rescue a node when the admin key has set TimeMinStage1 too low.
+std::optional<uint32_t> g_timeMinStage1Override;
+
+void applyTimeMinStage1Override(const char* source) {
+    if (g_timeMinStage1Override) {
+        Consensus::TimeMinStage1 = *g_timeMinStage1Override;
+        cslog() << "NODE: TimeMinStage1 pinned to " << Consensus::TimeMinStage1
+                << " ms by CS_TIME_MIN_STAGE1 override (source=" << source << ")";
+    }
 }
 } // namespace
 
@@ -107,6 +125,44 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&blockChain_.stopNode, this, &Node::stop);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::processSpecialInfo);
     cs::Connector::connect(&blockChain_.uncertainBlock, this, &Node::sendBlockRequestToConfidants);
+    cs::Connector::connect(&blockChain_.stateRootMismatch, this, &Node::onStateRootMismatch);
+
+    // State-root activation control via env var. Default behaviour is fully
+    // backward-compatible (UINT64_MAX). To enable on a testnet without a
+    // coordinated cutover sequence, set CS_STATEROOT=on (== activation 0,
+    // active for every block written/received from now). A numeric value
+    // sets a specific activation sequence. MISSING-field is non-fatal in
+    // any case; only an actual digest MISMATCH rejects a block.
+    if (const char* sr = std::getenv("CS_STATEROOT")) {
+        const std::string v(sr);
+        if (v == "on" || v == "1" || v == "true" || v == "yes") {
+            BlockChain::setStateRootActivationSeq(0);
+            cslog() << "NODE: state-root active from sequence 0 (env CS_STATEROOT=" << v << ")";
+        }
+        else if (!v.empty() && std::all_of(v.begin(), v.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
+            const auto seq = static_cast<cs::Sequence>(std::stoull(v));
+            BlockChain::setStateRootActivationSeq(seq);
+            cslog() << "NODE: state-root activation_seq=" << seq << " (env CS_STATEROOT=" << v << ")";
+        }
+        else {
+            cswarning() << "NODE: ignoring unrecognised CS_STATEROOT=" << v;
+        }
+    }
+
+    // Local TimeMinStage1 override (rescue switch when on-chain value is bad
+    // and the admin key is unavailable). Set CS_TIME_MIN_STAGE1=500 (or any
+    // ms value) to pin Consensus::TimeMinStage1 regardless of the chain.
+    if (const char* tms = std::getenv("CS_TIME_MIN_STAGE1")) {
+        const std::string v(tms);
+        if (!v.empty() && std::all_of(v.begin(), v.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
+            const auto ms = static_cast<uint32_t>(std::stoul(v));
+            g_timeMinStage1Override = ms;
+            applyTimeMinStage1Override("env-init");
+        }
+        else {
+            cswarning() << "NODE: ignoring unrecognised CS_TIME_MIN_STAGE1=" << v;
+        }
+    }
     cs::Connector::connect(&blockChain_.orderNecessaryBlock, this, &Node::sendNecessaryBlockRequest);
     cs::Connector::connect(&stat_.accountInitiationRequest, this, &Node::accountInitiationRequest);
     cs::Connector::connect(&blockChain_.successfullQuickStartEvent, this, &Node::onSuccessQS);
@@ -173,6 +229,7 @@ bool Node::init() {
             return false;
         }
         Consensus::TimeMinStage1 = blockChain_.getTimeMinStage1();
+        applyTimeMinStage1Override("startup");
         Consensus::stakingOn = blockChain_.getStakingOn();
         Consensus::miningOn = blockChain_.getMiningOn();
         Consensus::blockReward = blockChain_.getBlockReward();
@@ -316,6 +373,9 @@ void Node::onNeighbourAdded(const cs::PublicKey& neighbour, cs::Sequence lastSeq
     cslog() << "NODE: new neighbour added " << EncodeBase58(neighbour.data(), neighbour.data() + neighbour.size())
         << " last seq " << lastSeq << " last round " << lastRound;
 
+    // Phase 2.5b: kick off anchor-list handshake with the new peer.
+    sendAnchorListRequest(neighbour);
+
     if (lastRound > cs::Conveyer::instance().currentRoundNumber()) {
         roundPackRequest(neighbour, lastRound);
         return;
@@ -332,6 +392,7 @@ void Node::onSuccessQS(csdb::Amount blockReward, csdb::Amount miningCoeff, bool 
     Consensus::blockReward = blockReward;
     Consensus::miningCoefficient = miningCoeff;
     Consensus::TimeMinStage1 = stageOneHashesTime;
+    applyTimeMinStage1Override("quick-start");
     std::string msg;
     std::string miningStr = Consensus::miningOn ? "true" : "false";
     std::string stakingStr = Consensus::stakingOn ? "true" : "false";
@@ -1039,6 +1100,76 @@ void Node::getCharacteristic(cs::RoundPackage& rPackage) {
 
 void Node::sendBlockAlarmSignal(cs::Sequence seq) {
     sendBlockAlarm(cs::Zero::key, seq);
+}
+
+void Node::onStateRootMismatch(cs::Sequence seq, const cs::Bytes& local, const cs::Bytes& embedded) {
+    EventReport::sendStateRootMismatch(*this, seq, local, embedded);
+}
+
+void Node::sendAnchorListRequest(const cs::PublicKey& target) {
+    const auto round = cs::Conveyer::instance().currentRoundNumber();
+    sendDirect(target, MsgTypes::AnchorListRequest, round);
+}
+
+void Node::getAnchorListRequest(const uint8_t* /*data*/, std::size_t /*size*/, cs::RoundNumber rNum, const cs::PublicKey& sender) {
+    const auto anchors = blockChain_.recentAnchors();
+    cs::Bytes serialised;
+    cs::ODataStream out(serialised);
+    out << static_cast<uint16_t>(anchors.size());
+    for (const auto& a : anchors) {
+        auto bytes = a.serialize();
+        out << bytes;
+    }
+    sendDirect(sender, MsgTypes::AnchorListReply, rNum, serialised);
+}
+
+void Node::getAnchorListReply(const uint8_t* data, std::size_t size, cs::RoundNumber /*rNum*/, const cs::PublicKey& sender) {
+    cs::IDataStream in(data, size);
+    cs::Bytes payload;
+    in >> payload;
+    if (!in.isValid()) {
+        cswarning() << "anchor-list reply from "
+                    << EncodeBase58(sender.data(), sender.data() + sender.size()) << " malformed";
+        return;
+    }
+    cs::IDataStream pin(payload.data(), payload.size());
+    uint16_t n = 0;
+    pin >> n;
+    std::vector<cs::AnchorPayload> theirs;
+    theirs.reserve(n);
+    for (uint16_t i = 0; i < n; ++i) {
+        cs::Bytes ab;
+        pin >> ab;
+        cs::AnchorPayload p;
+        if (cs::AnchorPayload::deserialize(ab, p)) {
+            theirs.push_back(std::move(p));
+        }
+    }
+    auto deepest = blockChain_.deepestCommonAnchor(theirs);
+    if (deepest.sequence != 0) {
+        csdebug() << "anchor handshake with "
+                  << EncodeBase58(sender.data(), sender.data() + sender.size())
+                  << ": deepest shared anchor seq=" << deepest.sequence;
+
+        // Phase 2.5c: if enforced and the peer's chain extends past a more
+        // recent anchor than ours, rewind the local chain to the deepest
+        // shared anchor and re-sync from there.
+        const auto enforce = BlockChain::anchorReconciliationActivationSeq();
+        const auto lastSeq = blockChain_.getLastSeq();
+        if (lastSeq >= enforce && !theirs.empty()) {
+            const auto theirNewest = theirs.back().sequence;
+            const auto myNewest = blockChain_.recentAnchors().empty()
+                                      ? 0
+                                      : blockChain_.recentAnchors().back().sequence;
+            if (theirNewest > myNewest && deepest.sequence < lastSeq) {
+                cslog() << "anchor reconciliation: peer is ahead (their_newest="
+                        << theirNewest << ", mine=" << myNewest
+                        << "), rewinding to deepest shared anchor seq="
+                        << deepest.sequence;
+                blockChain_.removeToSequence(deepest.sequence);
+            }
+        }
+    }
 }
 
 void Node::sendBlockAlarm(const cs::PublicKey& source_node, cs::Sequence seq) {
@@ -2030,6 +2161,8 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         case MsgTypes::BlockAlarm:
         case MsgTypes::EventReport:
         case MsgTypes::SyncroMsg:
+        case MsgTypes::AnchorListRequest:
+        case MsgTypes::AnchorListReply:
             return MessageActions::Process;
 
         default:
@@ -4085,6 +4218,7 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
                 Consensus::TimeMinStage1 = value;
                 cslog() << "TimeMinStage1 changed to: " << Consensus::TimeMinStage1;
                 saveConsensusSettingsToChain();
+                applyTimeMinStage1Override("order-23");
             }
 
             if (order == 24U) {// Gray list punishment set

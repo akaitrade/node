@@ -556,6 +556,40 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
     if (pnode->isBootstrapRound()) {
         BlockChain::setBootstrap(deferredBlock_, true);
     }
+
+    // State-root + anchor embedding using "prev-state-root" semantics:
+    // the digest written into this block is the wallet ECMH AS-OF the
+    // current cache state, which is post-apply of block N-1. Every
+    // confidant runs this same code at the same point in spawn_next_round,
+    // reads the same local digest (because all have applied N-1
+    // identically), and produces an identical pool hash so all signatures
+    // verify. The block's digest is validated by receivers BEFORE they
+    // apply this block. See STATE_ROOT_PROPOSAL.md.
+    //
+    // ACTIVATION GATE: embedding only happens at/after stateRootActivationSeq.
+    // Default is UINT64_MAX so an upgraded binary produces byte-identical
+    // blocks to the legacy binary until operators coordinate the cutover.
+    if (deferredBlock_.sequence() >= BlockChain::stateRootActivationSeq()) {
+        const auto stateRoot = pnode->getBlockChain().multiWallets().stateDigest();
+        std::string srBytes(reinterpret_cast<const char*>(stateRoot.data()), stateRoot.size());
+        deferredBlock_.add_user_field(BlockChain::kFieldStateRoot, csdb::UserField(srBytes));
+
+        // Anchor block (Phase 2.5a) at anchor sequences. Same prev-state-root
+        // discipline applies — every confidant produces an identical anchor
+        // payload because the inputs are identical at this point.
+        if (BlockChain::isAnchorSequence(deferredBlock_.sequence())) {
+            cs::AnchorPayload anchor;
+            anchor.sequence = deferredBlock_.sequence();
+            anchor.stateRootWallets = stateRoot;
+            anchor.prevAnchorHash = pnode->getBlockChain().latestAnchorHash();
+            anchor.trustedSetSnapshot = deferredBlock_.confidants();
+            anchor.wideQuorumSig.clear();  // Phase 2.5b/c populates real aggregate.
+            auto raw = anchor.serialize();
+            std::string abBytes(reinterpret_cast<const char*>(raw.data()), raw.size());
+            deferredBlock_.add_user_field(BlockChain::kFieldAnchorBlock, csdb::UserField(abBytes));
+        }
+    }
+
     deferredBlock_.to_byte_stream(binSize);
     //csdebug() << log_prefix << "pool #" << deferredBlock_.sequence() << ": " << cs::Utils::byteStreamToHex(deferredBlock_.to_binary().data(), deferredBlock_.to_binary().size());
 

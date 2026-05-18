@@ -83,7 +83,8 @@ public:
         EraseFromList,
         RejectTransactions,
         RejectContractExecution,
-        RunningStatus
+        RunningStatus,
+        StateRootMismatch  // Phase 1b: confidant's ECMH disagrees with the embedded state-root.
     };
 
     static Id getId(const cs::Bytes& bin_pack);
@@ -278,6 +279,17 @@ public:
      */
 
     static bool parseRunningStatus(const cs::Bytes& bin_pack, Running::Status& status);
+
+    // Phase 1b: confidant gossips ECMH-vs-embedded mismatch for a block.
+    // bin_pack layout: Id::StateRootMismatch | sequence(8) | local(32) | embedded(32)
+    static void sendStateRootMismatch(Node& node,
+                                      cs::Sequence sequence,
+                                      const cs::Bytes& local,
+                                      const cs::Bytes& embedded);
+    static bool parseStateRootMismatch(const cs::Bytes& bin_pack,
+                                       cs::Sequence& sequence,
+                                       cs::Bytes& local,
+                                       cs::Bytes& embedded);
 
 private:
 

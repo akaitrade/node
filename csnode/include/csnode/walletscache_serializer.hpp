@@ -213,6 +213,7 @@ private:
 #endif
     CurrentDelegations *currentDelegations_ = nullptr;
     MiningDelegations *miningDelegations_ = nullptr;
+    WalletsCache *wCache_ = nullptr;
 };
 } // namespace cs
 #endif // WALLETS_CACHE_SERIALIZER_HPP

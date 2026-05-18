@@ -271,19 +271,47 @@ cs::Hash TrustedStage1State::build_vector(SolverContext& context, cs::Transactio
     cs::Conveyer& conveyer = cs::Conveyer::instance();
     conveyer.setCharacteristic(characteristic, conveyer.currentRoundNumber());
 
-    return formHashFromCharacteristic(characteristic);
+    return formHashFromCharacteristic(context, characteristic);
 }
 
-cs::Hash TrustedStage1State::formHashFromCharacteristic(const cs::Characteristic& characteristic) {
+cs::Hash TrustedStage1State::formHashFromCharacteristic(SolverContext& context, const cs::Characteristic& characteristic) {
+    // Fold the wallet ECMH state-root digest into the stage1 hash so that
+    // any prior-state divergence between confidants surfaces as a stage1
+    // hash mismatch. The digest is the post-apply state of block N-1
+    // (prev-state-root semantics); every honest confidant has applied N-1
+    // identically and reads the same digest here. See STATE_ROOT_PROPOSAL.md.
+    //
+    // ACTIVATION GATE: only fold the digest in at/after the activation
+    // sequence. Default UINT64_MAX so the stage1 hash is byte-identical
+    // to the legacy binary's output until operators coordinate the cutover.
     cs::Hash hash;
+    cs::Conveyer& conveyer = cs::Conveyer::instance();
+    const auto nextSeq = static_cast<cs::Sequence>(conveyer.currentRoundNumber());
+    const bool gateOn = nextSeq >= BlockChain::stateRootActivationSeq();
 
-    if (characteristic.mask.empty()) {
-        cs::Conveyer& conveyer = cs::Conveyer::instance();
-        auto round = conveyer.currentRoundNumber();
-        hash = cscrypto::calculateHash(reinterpret_cast<cs::Byte*>(&round), sizeof(cs::RoundNumber));
+    if (characteristic.mask.empty() && !gateOn) {
+        const auto round = conveyer.currentRoundNumber();
+        hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(&round), sizeof(cs::RoundNumber));
+    }
+    else if (!gateOn) {
+        hash = cscrypto::calculateHash(characteristic.mask.data(), characteristic.mask.size());
     }
     else {
-        hash = cscrypto::calculateHash(characteristic.mask.data(), characteristic.mask.size());
+        const auto digest = context.blockchain().multiWallets().stateDigest();
+        cs::Bytes input;
+        if (characteristic.mask.empty()) {
+            const auto round = conveyer.currentRoundNumber();
+            input.insert(input.end(),
+                         reinterpret_cast<const cs::Byte*>(&round),
+                         reinterpret_cast<const cs::Byte*>(&round) + sizeof(cs::RoundNumber));
+        }
+        else {
+            input.insert(input.end(), characteristic.mask.begin(), characteristic.mask.end());
+        }
+        input.insert(input.end(), digest.begin(), digest.end());
+        hash = cscrypto::calculateHash(input.data(), input.size());
+        csdebug() << name() << ": stateDigest folded into stage1 hash: "
+                  << cs::Utils::byteStreamToHex(digest.data(), digest.size());
     }
 
     csdebug() << name() << ": generated hash: " << cs::Utils::byteStreamToHex(hash.data(), hash.size());

@@ -390,6 +390,15 @@ public slots:
     void validateBlock(const csdb::Pool& block, bool* shouldStop);
     void deepBlockValidation(const csdb::Pool& block, bool* shouldStop);
     void sendBlockAlarmSignal(cs::Sequence seq);
+    void onStateRootMismatch(cs::Sequence seq, const cs::Bytes& local, const cs::Bytes& embedded);
+
+public:
+    // Phase 2.5b common-ancestor handshake handlers.
+    void getAnchorListRequest(const uint8_t* data, std::size_t size, cs::RoundNumber rNum, const cs::PublicKey& sender);
+    void getAnchorListReply(const uint8_t* data, std::size_t size, cs::RoundNumber rNum, const cs::PublicKey& sender);
+    void sendAnchorListRequest(const cs::PublicKey& target);
+
+private:
     void onRoundTimeElapsed();
     void onNeighbourAdded(const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber lastRound);
     void onNeighbourRemoved(const cs::PublicKey& neighbour);

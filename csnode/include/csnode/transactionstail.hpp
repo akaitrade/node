@@ -67,6 +67,11 @@ public:
         return os.str();
     }
 
+    // Canonical bytes for state-root digest. Forwards to the underlying BitHeap.
+    std::vector<uint8_t> serializeDigestBytes() const {
+        return heap_.serializeDigestBytes();
+    }
+
     std::string printHeap() const {
         if (heap_.empty()) {
             return "0";

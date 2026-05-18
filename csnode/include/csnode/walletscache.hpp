@@ -74,6 +74,15 @@ public:
 
     const MultiWallets& multiWallets() const { return *(multiWallets_.get()); }
 
+    // ECMH commitment over the wallet set (Phase 1 advisory). Forwards to
+    // MultiWallets::stateDigest. All-zeros when the set is empty.
+    cscrypto::MultisetDigest stateDigest() const;
+
+    // Recompute the ECMH from scratch. Call after any path that mutates
+    // wallets without routing through onWalletCacheUpdated (e.g. cache
+    // deserialisation).
+    void rebuildStateDigest();
+
 private:
     WalletsIds& walletsIds_;
 

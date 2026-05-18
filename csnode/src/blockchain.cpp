@@ -766,7 +766,84 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
         std::lock_guard lock(cacheMutex_);
         // currently block stores own round confidants, not next round:
         const auto& currentRoundConfidants = pool.confidants();
+
+        // Prev-state-root validation BEFORE applying this block.
+        //
+        // kFieldStateRoot in block N carries the wallet ECMH digest AFTER
+        // block N-1 was applied. Every confidant applied N-1 before stage1
+        // of round N — so this value must equal the receiver's current digest
+        // right now (still pre-apply for N). Compare, then apply.
+        //
+        // Before activation_seq H: advisory log + event_report on mismatch.
+        // At/after H: block rejected on mismatch or missing field.
+        if (walletsCacheStorage_) {
+            const auto local = walletsCacheStorage_->stateDigest();
+            const auto activation = BlockChain::stateRootActivationSeq();
+            const bool enforced = pool.sequence() >= activation;
+            csdebug() << kLogPrefix << "stateRoot[wallets] seq=" << pool.sequence()
+                      << " local=" << cs::Utils::byteStreamToHex(local.data(), local.size())
+                      << (enforced ? " [enforced]" : " [advisory]");
+
+            const auto field = pool.user_field(BlockChain::kFieldStateRoot);
+            const bool fieldPresent = field.is_valid() && field.type() == csdb::UserField::String;
+            std::string embedded;
+            if (fieldPresent) {
+                embedded = field.value<std::string>();
+            }
+            const bool mismatch = fieldPresent
+                                  && embedded.size() == local.size()
+                                  && std::memcmp(embedded.data(), local.data(), local.size()) != 0;
+            const bool missing = enforced && !fieldPresent;
+
+            if (mismatch) {
+                ++stateRootMismatchCount_;
+                cswarning() << kLogPrefix << "stateRoot MISMATCH seq=" << pool.sequence()
+                            << " local=" << cs::Utils::byteStreamToHex(local.data(), local.size())
+                            << " embedded=" << cs::Utils::byteStreamToHex(
+                                   reinterpret_cast<const uint8_t*>(embedded.data()), embedded.size())
+                            << " total_mismatches=" << stateRootMismatchCount_;
+                cs::Bytes localBytes(local.begin(), local.end());
+                cs::Bytes embeddedBytes(embedded.begin(), embedded.end());
+                emit stateRootMismatch(pool.sequence(), localBytes, embeddedBytes);
+            }
+            if (missing) {
+                // Non-fatal: legacy block being synced or writer hasn't yet
+                // started emitting. Real divergence shows as MISMATCH, not
+                // MISSING — so we log and continue instead of rejecting.
+                csdebug() << kLogPrefix << "stateRoot MISSING seq=" << pool.sequence()
+                          << " (no kFieldStateRoot; activation_seq=" << activation << ")";
+            }
+
+            if (enforced && mismatch) {
+                cserror() << kLogPrefix << "stateRoot enforcement: rejecting block #"
+                          << pool.sequence() << " (digest mismatch)";
+                return false;
+            }
+        }
+
+        // Now apply the block to the wallet cache (post-prev-validation).
         walletsCacheUpdater_->loadNextBlock(pool, currentRoundConfidants, *this);
+
+        // Phase 2.5a: if this block is at an anchor sequence and carries an
+        // anchor payload, parse it and push onto the rolling window.
+        if (BlockChain::isAnchorSequence(pool.sequence())) {
+            const auto anchorField = pool.user_field(BlockChain::kFieldAnchorBlock);
+            if (anchorField.is_valid() && anchorField.type() == csdb::UserField::String) {
+                const auto str = anchorField.value<std::string>();
+                cs::Bytes raw(str.begin(), str.end());
+                cs::AnchorPayload payload;
+                if (cs::AnchorPayload::deserialize(raw, payload)) {
+                    onAnchorObserved(payload);
+                    csdebug() << kLogPrefix << "anchor[" << payload.sequence << "] received,"
+                              << " trustedSet.size=" << payload.trustedSetSnapshot.size()
+                              << " prevHash=" << cs::Utils::byteStreamToHex(
+                                     payload.prevAnchorHash.data(), payload.prevAnchorHash.size());
+                } else {
+                    cswarning() << kLogPrefix << "anchor block #" << pool.sequence()
+                                << " failed to deserialise";
+                }
+            }
+        }
 
         if (!blockHashes_->onNextBlock(pool)) {
             cslog() << kLogPrefix << "Error updating block hashes storage";
@@ -1988,6 +2065,118 @@ cs::Sequence BlockChain::getLastSeq() const {
 
 const MultiWallets& BlockChain::multiWallets() const {
     return walletsCacheStorage_->multiWallets();
+}
+
+namespace {
+std::atomic<cs::Sequence> g_stateRootActivationSeq{std::numeric_limits<cs::Sequence>::max()};
+}
+
+/*static*/ cs::Sequence BlockChain::stateRootActivationSeq() {
+    return g_stateRootActivationSeq.load();
+}
+
+/*static*/ void BlockChain::setStateRootActivationSeq(cs::Sequence seq) {
+    g_stateRootActivationSeq.store(seq);
+}
+
+namespace {
+std::atomic<cs::Sequence> g_anchorReconciliationActivationSeq{std::numeric_limits<cs::Sequence>::max()};
+}
+
+/*static*/ cs::Sequence BlockChain::anchorReconciliationActivationSeq() {
+    return g_anchorReconciliationActivationSeq.load();
+}
+
+/*static*/ void BlockChain::setAnchorReconciliationActivationSeq(cs::Sequence seq) {
+    g_anchorReconciliationActivationSeq.store(seq);
+}
+
+cs::Sequence BlockChain::removeToSequence(cs::Sequence target) {
+    cs::Sequence removed = 0;
+    // Bounded loop: never rewind more than kAnchorCadence * kAnchorWindow blocks
+    // — the maximum window an honest minority segment could have produced.
+    const cs::Sequence maxRewind = kAnchorCadence * kAnchorWindow;
+    while (getLastSeq() > target) {
+        if (removed >= maxRewind) {
+            cswarning() << kLogPrefix << "removeToSequence: hit safety bound "
+                        << maxRewind << " at seq " << getLastSeq()
+                        << " (target " << target << ")";
+            break;
+        }
+        removeLastBlock();
+        ++removed;
+    }
+    cslog() << kLogPrefix << "removeToSequence(" << target << "): removed "
+            << removed << " blocks; lastSeq=" << getLastSeq();
+    return removed;
+}
+
+cs::AnchorPayload BlockChain::previewAnchorPayload(const csdb::Pool& pool,
+                                                   const std::vector<cs::PublicKey>& trustedSet) const {
+    cs::AnchorPayload a;
+    a.sequence = pool.sequence();
+    // Prev-state-root semantics: the anchor at block N carries the digest of
+    // state AFTER block N-1 was applied. Every confidant has already applied
+    // N-1 by stage1 of round N, so reading the current digest is deterministic
+    // and identical across all confidants without speculative apply.
+    a.stateRootWallets = walletsCacheStorage_ ? walletsCacheStorage_->stateDigest() : cscrypto::MultisetDigest{};
+    a.prevAnchorHash = latestAnchorHash();
+    a.trustedSetSnapshot = trustedSet;
+    a.wideQuorumSig.clear();  // Phase 2.5b/c populates this.
+    return a;
+}
+
+void BlockChain::onAnchorObserved(const cs::AnchorPayload& anchor) {
+    std::lock_guard lock(anchorMutex_);
+    recentAnchors_.push_back(anchor);
+    while (recentAnchors_.size() > kAnchorWindow) {
+        recentAnchors_.pop_front();
+    }
+}
+
+std::vector<cs::AnchorPayload> BlockChain::recentAnchors() const {
+    std::lock_guard lock(anchorMutex_);
+    return std::vector<cs::AnchorPayload>(recentAnchors_.begin(), recentAnchors_.end());
+}
+
+cs::Hash BlockChain::latestAnchorHash() const {
+    std::lock_guard lock(anchorMutex_);
+    cs::Hash h{};
+    h.fill(0);
+    if (!recentAnchors_.empty()) {
+        h = recentAnchors_.back().contentHash();
+    }
+    return h;
+}
+
+cs::AnchorPayload BlockChain::deepestCommonAnchor(const std::vector<cs::AnchorPayload>& theirs) const {
+    cs::AnchorPayload deepest;
+    std::lock_guard lock(anchorMutex_);
+    // Build a map (sequence -> contentHash) from ours; scan theirs from the
+    // newest backwards to find the deepest where hashes match.
+    std::map<cs::Sequence, cs::Hash> ours;
+    for (const auto& a : recentAnchors_) {
+        ours[a.sequence] = a.contentHash();
+    }
+    for (auto it = theirs.rbegin(); it != theirs.rend(); ++it) {
+        auto oi = ours.find(it->sequence);
+        if (oi != ours.end() && oi->second == it->contentHash()) {
+            if (it->sequence > deepest.sequence) {
+                deepest = *it;
+            }
+            break;
+        }
+    }
+    if (deepest.sequence == 0 && !theirs.empty() && !recentAnchors_.empty()) {
+        ++segmentDivergenceCount_;
+        cswarning() << kLogPrefix << "segment divergence: no shared anchor in window"
+                    << " (ours_oldest=" << recentAnchors_.front().sequence
+                    << " ours_newest=" << recentAnchors_.back().sequence
+                    << " theirs_oldest=" << theirs.front().sequence
+                    << " theirs_newest=" << theirs.back().sequence
+                    << " total=" << segmentDivergenceCount_ << ")";
+    }
+    return deepest;
 }
 
 void BlockChain::setBlocksToBeRemoved(cs::Sequence number) {

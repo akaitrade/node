@@ -3,7 +3,9 @@
 
 #include <bitset>
 #include <climits>
+#include <cstdint>
 #include <limits>
+#include <vector>
 
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/bitset.hpp>
@@ -99,6 +101,29 @@ public:
 
     T getGreatest() {
         return greatest_;
+    }
+
+    // Canonical fixed-layout byte serialisation for state-root digest.
+    // Layout: greatest_ (sizeof(T) bytes, little-endian) | isValueSet_ (1 byte) | bits_ (BitSize/8 bytes, lo-to-hi).
+    // Empty state is deterministic (greatest_=numeric_limits::max(), isValueSet_=0, bits_=0).
+    std::vector<uint8_t> serializeDigestBytes() const {
+        std::vector<uint8_t> out;
+        out.reserve(sizeof(T) + 1 + BitSize / 8);
+        const auto u = static_cast<uint64_t>(greatest_);
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            out.push_back(static_cast<uint8_t>((u >> (i * 8)) & 0xFF));
+        }
+        out.push_back(isValueSet_ ? uint8_t{1} : uint8_t{0});
+        for (size_t byteIdx = 0; byteIdx < BitSize / 8; ++byteIdx) {
+            uint8_t v = 0;
+            for (size_t b = 0; b < 8; ++b) {
+                if (bits_.test(byteIdx * 8 + b)) {
+                    v |= static_cast<uint8_t>(1u << b);
+                }
+            }
+            out.push_back(v);
+        }
+        return out;
     }
 
 private:

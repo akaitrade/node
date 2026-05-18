@@ -9,6 +9,7 @@
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/hashed_index.hpp>
 
+#include <cscrypto/multisethash.hpp>
 #include <csnode/walletscache.hpp>
 
 using namespace boost::multi_index;
@@ -58,6 +59,15 @@ public:
 
     csdb::Amount checkWallets();
     void iterate(std::function<bool(const PublicKey& key, const InternalData& data)> func);
+
+    // ECMH commitment over the wallet set. Updated incrementally on each
+    // onWalletCacheUpdated call. All-zeros when the set is empty.
+    // See STATE_ROOT_PROPOSAL.md / Phase 1 advisory.
+    cscrypto::MultisetDigest stateDigest() const;
+
+    // Recompute the ECMH from scratch over the current wallet set.
+    // Use after deserialisation paths that bypass onWalletCacheUpdated.
+    void rebuildStateDigest();
 
 protected:
     template <Order order, typename Bucket>
@@ -111,6 +121,7 @@ private:
 
     mutable std::mutex mutex_;
     Container indexes_;
+    cscrypto::MultisetHash stateHash_;
 };
 }
 

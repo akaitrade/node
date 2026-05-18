@@ -19,6 +19,8 @@ if (MSVC)
     add_definitions(-D_WINSOCK_DEPRECATED_NO_WARNINGS)
 endif()
 
+add_definitions(-DBOOST_ALL_NO_LIB)
+
 option(LEVELDB_BUILD_TESTS "" OFF)
 option(LEVELDB_AUTORUN_TESTS "" OFF)
 option(DBSQL "Enable PostgeSQL server connection" OFF)
