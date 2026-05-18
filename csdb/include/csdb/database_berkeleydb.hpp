@@ -28,6 +28,19 @@ public:
 public:
     bool open(const std::string& path);
 
+    // On-demand checkpoint + log archive; used by migrate at progress ticks.
+    bool force_checkpoint();
+
+    // Migration-only knob; must be called before open(). Bumps mpool cache and
+    // moves the txn log into memory (no log files on disk). Sacrifices crash
+    // recovery — only safe for one-shot, re-runnable workloads.
+    void tune_for_bulk(size_t cache_bytes, uint32_t log_buf_bytes);
+
+    // Direct write to blockchain.db with arbitrary RECNO key. Bypasses the
+    // hash index. Used by migrate's experimental --bundle-size mode where
+    // one record stores N concatenated blocks. dst becomes non-loadable.
+    bool put_recno(uint32_t recno_key, const cs::Bytes& value);
+
 private:
     bool is_open() const final;
     bool put(const cs::Bytes& key, uint32_t seq_no, const cs::Bytes& value) final;
@@ -56,6 +69,7 @@ private:
     std::unique_ptr<Db> db_contracts_;
     std::thread logfile_thread_;
     bool quit_ = false;
+    bool bulk_mode_ = false;
 };
 
 }  // namespace csdb

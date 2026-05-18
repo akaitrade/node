@@ -21,6 +21,7 @@ target_include_directories(csdb_migrate PRIVATE
 
 target_link_libraries(csdb_migrate
   csdb
+  lz4
   Boost::system
   Boost::filesystem
   Boost::disable_autolinking

@@ -151,11 +151,23 @@ bool DatabaseBerkeleyDB::open(const std::string &path) {
     db_seq_no_.reset(nullptr);
     db_contracts_.reset(nullptr);
 
-    env_.log_set_config(DB_LOG_AUTO_REMOVE, 1);
+    // DB_LOG_IN_MEMORY and DB_LOG_AUTO_REMOVE are mutually exclusive.
+    if (bulk_mode_) {
+        env_.log_set_config(DB_LOG_IN_MEMORY, 1);
+    } else {
+        env_.log_set_config(DB_LOG_AUTO_REMOVE, 1);
+    }
 
-    uint32_t db_env_open_flags = DB_CREATE | DB_INIT_MPOOL | DB_THREAD | DB_RECOVER | DB_INIT_TXN | DB_INIT_LOCK;
+    uint32_t db_env_open_flags = DB_CREATE | DB_INIT_MPOOL | DB_THREAD | DB_INIT_TXN | DB_INIT_LOCK;
+    if (!bulk_mode_) {
+        db_env_open_flags |= DB_RECOVER;
+    }
     int status = env_.open(path.c_str(), db_env_open_flags, 0);
-    status = status ? status : env_.set_flags(DB_TXN_NOSYNC, 1);
+    // DB_TXN_NOSYNC conflicts with DB_LOG_IN_MEMORY (BDB1559); in-memory log
+    // has nothing to sync to disk regardless.
+    if (!bulk_mode_) {
+        status = status ? status : env_.set_flags(DB_TXN_NOSYNC, 1);
+    }
 
     env_.txn_checkpoint(1024 * 1024, 0, 0);
 
@@ -196,8 +208,52 @@ bool DatabaseBerkeleyDB::open(const std::string &path) {
         return false;
     }
 
-    logfile_thread_ = std::thread(&DatabaseBerkeleyDB::logfile_routine, this);
+    // In bulk mode there are no on-disk log files; the periodic sweep is a no-op
+    // and the background thread would just contend on env mutexes for nothing.
+    if (!bulk_mode_) {
+        logfile_thread_ = std::thread(&DatabaseBerkeleyDB::logfile_routine, this);
+    }
 
+    set_last_error();
+    return true;
+}
+
+void DatabaseBerkeleyDB::tune_for_bulk(size_t cache_bytes, uint32_t log_buf_bytes) {
+    bulk_mode_ = true;
+    if (cache_bytes > 0) {
+        const uint32_t gbytes = static_cast<uint32_t>(cache_bytes >> 30);
+        const uint32_t bytes  = static_cast<uint32_t>(cache_bytes & ((1ULL << 30) - 1));
+        env_.set_cachesize(gbytes, bytes, 1);
+    }
+    if (log_buf_bytes > 0) {
+        env_.set_lg_bsize(log_buf_bytes);
+    }
+}
+
+bool DatabaseBerkeleyDB::put_recno(uint32_t recno_key, const cs::Bytes& value) {
+    if (!db_blocks_) {
+        set_last_error(NotOpen);
+        return false;
+    }
+    DbTxn* tid = nullptr;
+    int status = env_.txn_begin(nullptr, &tid, DB_READ_UNCOMMITTED);
+    if (status) {
+        set_last_error_from_berkeleydb(status);
+        return false;
+    }
+    Dbt_copy<uint32_t> db_key(recno_key);
+    Dbt_copy<cs::Bytes> db_value(value);
+    status = db_blocks_->put(tid, &db_key, &db_value, 0);
+    if (status) {
+        tid->abort();
+        set_last_error_from_berkeleydb(status);
+        return false;
+    }
+    int commit_status = tid->commit(0);
+    if (commit_status) {
+        set_last_error_from_berkeleydb(commit_status);
+        return false;
+    }
     set_last_error();
     return true;
 }
@@ -353,6 +409,28 @@ bool DatabaseBerkeleyDB::remove(const cs::Bytes &key) {
         return false;
     }
 
+    set_last_error();
+    return true;
+}
+
+// Force a checkpoint + archive log sweep on demand (migrate progress ticks).
+bool DatabaseBerkeleyDB::force_checkpoint() {
+    if (!db_blocks_) {
+        set_last_error(NotOpen);
+        return false;
+    }
+    int status = env_.txn_checkpoint(0, 0, DB_FORCE);
+    if (status) {
+        set_last_error_from_berkeleydb(status);
+        return false;
+    }
+    char** list = nullptr;
+    if (env_.log_archive(&list, DB_ARCH_ABS) == 0 && list != nullptr) {
+        for (char** p = list; *p != nullptr; ++p) {
+            ::remove(*p);
+        }
+        free(list);
+    }
     set_last_error();
     return true;
 }

@@ -525,6 +525,7 @@ void Storage::priv::write_routine() {
                 (useEmptyPoolStubs_ && pool.transactions().empty()) ? build_empty_pool_stub(pool) : pool.to_binary()
             });
         }
+
         db->put_batch(requests);
 
         lock.lock();

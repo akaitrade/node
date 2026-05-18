@@ -18,6 +18,8 @@
 
 #include <boost/filesystem.hpp>
 
+#include <lz4.h>
+
 #include <csdb/amount_commission.hpp>
 #include <csdb/database_berkeleydb.hpp>
 #include <csdb/database_rocksdb.hpp>
@@ -46,7 +48,16 @@ struct Args {
     bool verify_balances = false; // replay both DBs through simplified balance accounting
     size_t mismatch_print_limit = 20; // first N mismatching wallets printed in detail
     std::string dst_backend = "rocksdb"; // "rocksdb" or "berkeley"
+    bool confidant_indirection = false;  // experimental: dedup confidants into a side table
+    std::string confidant_sets_out;      // side-file path for the set table (default: <dst>/confidant_sets.bin)
+    size_t bundle_size = 0;              // experimental: pack N blocks per BDB record (0 = disabled)
+    bool bundle_compress = false;        // LZ4-compress each bundle value before put_recno
+    bool pubkey_remap = false;           // experimental: rewrite tx src/tgt + confidants as wallet_id refs
 };
+
+// Reserved user_field id for the experimental confidant-set reference. Out of
+// the existing range (kFieldTimestamp=0, kFieldServiceInfo=1, kFieldBlockReward=3).
+constexpr csdb::user_field_id_t kFieldConfidantSetIdExp = 99;
 
 void print_usage() {
     std::cerr <<
@@ -65,7 +76,12 @@ void print_usage() {
         "  --validate-only  Skip migration; just run --cross-verify against an existing dst (src and dst must both exist)\n"
         "  --no-stubs       Write empty pools as full Pool::to_binary() instead of compact stubs (default: stubs enabled)\n"
         "  --dst-backend B  Destination backend: 'rocksdb' (default) or 'berkeley'. Use 'berkeley' to apply v4 stubs in-place to a BerkeleyDB chain without changing storage engine.\n"
-        "  --verify-balances Replay src and dst through simplified native-coin accounting and compare end-state wallet maps. Catches lossy on-disk format bugs that affect balances (e.g. dropped realTrusted_ in stubs). Skips smart-contract execution and delegation.\n";
+        "  --verify-balances Replay src and dst through simplified native-coin accounting and compare end-state wallet maps. Catches lossy on-disk format bugs that affect balances (e.g. dropped realTrusted_ in stubs). Skips smart-contract execution and delegation.\n"
+        "  --confidant-indirection  Experimental: replace each block's confidants vector with a 4-byte set id (user_field 99) and emit a side file 'confidant_sets.bin' with the dedup table. Use --dst-backend berkeley. The dst chain is for size measurement only and is NOT node-loadable.\n"
+        "  --confidant-sets-out F   Override the side-file path (default: <dst>/confidant_sets.bin)\n"
+        "  --bundle-size N          Experimental: pack N consecutive blocks into one BDB record (key = first_seq/N + 1). Requires --dst-backend berkeley. Skips Storage. dst is NOT node-loadable.\n"
+        "  --bundle-compress        LZ4-compress each bundle value before write (use with --bundle-size).\n"
+        "  --pubkey-remap           Experimental: rewrite every transaction's source/target as wallet-id Address (4B) and pack confidants into user_field 99 as a [count:2][ids:n*4] blob. Pass 1 scans src to build the dict; pass 2 rewrites and writes. Emits 'pubkey_dict.bin'. Combine with --bundle-size and/or --bundle-compress. dst is NOT node-loadable.\n";
 }
 
 bool parse_size(const char* s, size_t& out) {
@@ -102,6 +118,11 @@ bool parse_args(int argc, char** argv, Args& a) {
             }
         }
         else if (k == "--verify-balances") { a.verify_balances = true; }
+        else if (k == "--confidant-indirection") { a.confidant_indirection = true; }
+        else if (k == "--confidant-sets-out") { auto v = need_value("--confidant-sets-out"); if (!v) return false; a.confidant_sets_out = v; }
+        else if (k == "--bundle-size") { auto v = need_value("--bundle-size"); if (!v) return false; if (!parse_size(v, a.bundle_size)) return false; }
+        else if (k == "--bundle-compress") { a.bundle_compress = true; }
+        else if (k == "--pubkey-remap") { a.pubkey_remap = true; }
         else if (k == "--help" || k == "-h") { print_usage(); return false; }
         else { std::cerr << "unknown argument: " << k << "\n"; print_usage(); return false; }
     }
@@ -533,6 +554,456 @@ bool verify_balances(csdb::Database& src, csdb::Database& dst, const Args& args)
     return mismatches == 0 && srcOnly == 0 && dstOnly == 0;
 }
 
+// Confidant-set deduplication. Key = byte-concat of all 32B pubkeys in order.
+// Sets are assigned IDs 0..N-1 in first-seen order. Reused across blocks.
+struct ConfidantInterner {
+    std::map<std::string, uint32_t> dedup;
+    std::vector<std::vector<cs::PublicKey>> sets;
+    uint64_t blocks_with_conf = 0;
+    uint64_t blocks_empty_conf = 0;
+    uint64_t inline_bytes_today = 0;  // sum of n*32 across all blocks (what we remove)
+
+    uint32_t intern(const std::vector<cs::PublicKey>& pks) {
+        if (pks.empty()) { ++blocks_empty_conf; return 0; }
+        ++blocks_with_conf;
+        inline_bytes_today += pks.size() * 32;
+        std::string key;
+        key.reserve(pks.size() * 32);
+        for (const auto& pk : pks) {
+            key.append(reinterpret_cast<const char*>(pk.data()), pk.size());
+        }
+        auto it = dedup.find(key);
+        if (it != dedup.end()) return it->second;
+        const uint32_t id = static_cast<uint32_t>(sets.size());
+        dedup.emplace(std::move(key), id);
+        sets.push_back(pks);
+        return id;
+    }
+
+    uint64_t table_bytes() const {
+        // Side-file layout: [magic:4='CSET'][version:1=1][set_count:4 LE]
+        //   per set: [n_conf:1][conf:n*32]
+        uint64_t bytes = 4 + 1 + 4;
+        for (const auto& s : sets) bytes += 1 + s.size() * 32;
+        return bytes;
+    }
+
+    bool dump(const std::string& path) const {
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) return false;
+        const char magic[4] = {'C', 'S', 'E', 'T'};
+        const uint8_t version = 1;
+        const uint32_t count = static_cast<uint32_t>(sets.size());
+        std::fwrite(magic, 1, 4, f);
+        std::fwrite(&version, 1, 1, f);
+        std::fwrite(&count, 4, 1, f);
+        for (const auto& s : sets) {
+            const uint8_t n = static_cast<uint8_t>(s.size());
+            std::fwrite(&n, 1, 1, f);
+            for (const auto& pk : s) {
+                std::fwrite(pk.data(), 1, pk.size(), f);
+            }
+        }
+        std::fclose(f);
+        return true;
+    }
+};
+
+// Block-bundling encoder. Buffers up to N serialized blocks, then writes one
+// BDB record per group. Layout per bundle value:
+//   [tag:1][version:1=1][count:2 LE][offsets:count*4 LE][block_bytes...]
+// tag = 0xB0 raw / 0xB1 LZ4-compressed (everything after the tag is compressed).
+// Group key (RECNO) is (first_seq / bundle_size) + 1.
+struct Bundler {
+    size_t bundle_size = 0;
+    bool compress = false;
+    csdb::DatabaseBerkeleyDB* db = nullptr;
+    std::vector<cs::Bytes> buf;
+    uint64_t next_group_id = 0;
+    uint64_t bundles_written = 0;
+    uint64_t blocks_written = 0;
+    uint64_t raw_payload_bytes = 0;   // sum of block bytes (inner payload only)
+    uint64_t inner_bundle_bytes = 0;  // sum of bundle-encoded sizes before compression
+    uint64_t stored_bytes = 0;        // sum of bytes actually written to BDB
+
+    bool push(cs::Bytes block_bytes) {
+        raw_payload_bytes += block_bytes.size();
+        buf.push_back(std::move(block_bytes));
+        if (buf.size() >= bundle_size) {
+            return flush();
+        }
+        return true;
+    }
+
+    bool flush() {
+        if (buf.empty()) return true;
+        const uint16_t count = static_cast<uint16_t>(buf.size());
+        const size_t header_in = 1 /*version*/ + 2 /*count*/ + count * 4 /*offsets*/;
+        size_t total_blocks = 0;
+        for (const auto& b : buf) total_blocks += b.size();
+
+        cs::Bytes inner;
+        inner.reserve(header_in + total_blocks);
+        inner.push_back(1);  // version
+        inner.push_back(static_cast<uint8_t>(count & 0xFF));
+        inner.push_back(static_cast<uint8_t>((count >> 8) & 0xFF));
+        uint32_t off = static_cast<uint32_t>(header_in);
+        for (const auto& b : buf) {
+            for (int i = 0; i < 4; ++i) inner.push_back(static_cast<uint8_t>((off >> (i * 8)) & 0xFF));
+            off += static_cast<uint32_t>(b.size());
+        }
+        for (const auto& b : buf) inner.insert(inner.end(), b.begin(), b.end());
+        inner_bundle_bytes += inner.size();
+
+        cs::Bytes value;
+        if (!compress) {
+            value.reserve(1 + inner.size());
+            value.push_back(0xB0);
+            value.insert(value.end(), inner.begin(), inner.end());
+        } else {
+            const int bound = LZ4_compressBound(static_cast<int>(inner.size()));
+            value.resize(1 + static_cast<size_t>(bound));
+            value[0] = 0xB1;
+            const int written = LZ4_compress_default(
+                reinterpret_cast<const char*>(inner.data()),
+                reinterpret_cast<char*>(value.data() + 1),
+                static_cast<int>(inner.size()),
+                bound);
+            if (written <= 0) {
+                std::cerr << "bundle: LZ4_compress_default failed (in=" << inner.size() << ")\n";
+                return false;
+            }
+            value.resize(1 + static_cast<size_t>(written));
+        }
+        stored_bytes += value.size();
+
+        const uint32_t recno_key = static_cast<uint32_t>(next_group_id + 1);
+        if (!db->put_recno(recno_key, value)) {
+            std::cerr << "bundle: put_recno failed at group=" << next_group_id
+                      << ": " << db->last_error_message() << "\n";
+            return false;
+        }
+        ++next_group_id;
+        ++bundles_written;
+        blocks_written += buf.size();
+        buf.clear();
+        return true;
+    }
+};
+
+// Drives the bundling write path end-to-end without using csdb::Storage.
+int run_bundling_migration(csdb::Database& src,
+                           csdb::DatabaseBerkeleyDB& dst_bdb,
+                           const Args& args) {
+    auto it = src.new_iterator();
+    if (!it) {
+        std::cerr << "src iterator unavailable\n";
+        return 1;
+    }
+    if (args.from > 0) it->seek(static_cast<uint32_t>(args.from));
+    else it->seek_to_first();
+
+    Bundler bundler;
+    bundler.bundle_size = args.bundle_size;
+    bundler.compress = args.bundle_compress;
+    bundler.db = &dst_bdb;
+
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    auto last_log = t0;
+    size_t saved = 0;
+    uint64_t empty_blocks = 0;
+    uint64_t tx_blocks = 0;
+
+    while (it->is_valid()) {
+        const uint32_t seq_key = it->key();
+        if (static_cast<cs::Sequence>(seq_key) > args.to) break;
+        cs::Bytes raw = it->value();
+        csdb::Pool pool = csdb::Pool::from_binary(std::move(raw));
+        if (!pool.is_valid()) {
+            std::cerr << "src seq=" << seq_key << " not parseable; aborting\n";
+            return 1;
+        }
+        if (pool.sequence() != static_cast<cs::Sequence>(seq_key)) {
+            std::cerr << "src seq mismatch: key=" << seq_key
+                      << " pool.sequence=" << pool.sequence() << "\n";
+            return 1;
+        }
+        if (pool.transactions().empty()) ++empty_blocks; else ++tx_blocks;
+
+        cs::Bytes serialized =
+            (args.use_stubs && pool.transactions().empty())
+                ? csdb::build_empty_pool_stub(pool)
+                : pool.to_binary();
+        if (!bundler.push(std::move(serialized))) {
+            return 1;
+        }
+        ++saved;
+        it->next();
+
+        if (saved % args.progress_every == 0) {
+            const auto now = clock::now();
+            const auto since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+            const double rate = since_last > 0
+                ? (1000.0 * static_cast<double>(args.progress_every) / static_cast<double>(since_last))
+                : 0.0;
+            std::cout << "  seq=" << seq_key
+                      << "  saved=" << saved
+                      << "  bundles=" << bundler.bundles_written
+                      << "  raw=" << bundler.raw_payload_bytes
+                      << "  stored=" << bundler.stored_bytes
+                      << "  ratio=" << (bundler.raw_payload_bytes > 0
+                          ? (100.0 * static_cast<double>(bundler.stored_bytes) /
+                             static_cast<double>(bundler.raw_payload_bytes))
+                          : 0.0) << "%"
+                      << "  rate=" << static_cast<uint64_t>(rate) << "/s"
+                      << "  elapsed=" << format_duration(elapsed)
+                      << std::endl;
+            last_log = now;
+        }
+    }
+
+    if (!bundler.flush()) return 1;
+
+    const auto total = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0);
+    std::cout << "bundling done"
+              << "  saved=" << saved
+              << "  empty=" << empty_blocks
+              << "  tx=" << tx_blocks
+              << "  bundles=" << bundler.bundles_written
+              << "  raw_payload_bytes=" << bundler.raw_payload_bytes
+              << "  inner_bundle_bytes=" << bundler.inner_bundle_bytes
+              << "  stored_bytes=" << bundler.stored_bytes
+              << "  vs_raw=" << (bundler.raw_payload_bytes > 0
+                  ? (100.0 * static_cast<double>(bundler.stored_bytes) /
+                     static_cast<double>(bundler.raw_payload_bytes)) : 0.0) << "%"
+              << "  elapsed=" << format_duration(total)
+              << std::endl;
+    return 0;
+}
+
+// Pubkey dictionary: pubkey -> uint32 wallet-id. Built in pass 1, used in
+// pass 2 to rewrite tx source/target and confidants. Dumped as a side file.
+struct WalletDict {
+    std::map<cs::PublicKey, uint32_t> map;
+
+    uint32_t intern(const cs::PublicKey& pk) {
+        auto it = map.find(pk);
+        if (it != map.end()) return it->second;
+        const uint32_t id = static_cast<uint32_t>(map.size());
+        map.emplace(pk, id);
+        return id;
+    }
+
+    bool dump(const std::string& path) const {
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) return false;
+        const char magic[4] = {'P','D','I','C'};
+        const uint8_t version = 1;
+        const uint32_t count = static_cast<uint32_t>(map.size());
+        std::fwrite(magic, 1, 4, f);
+        std::fwrite(&version, 1, 1, f);
+        std::fwrite(&count, 4, 1, f);
+        std::vector<const cs::PublicKey*> by_id(map.size(), nullptr);
+        for (const auto& kv : map) by_id[kv.second] = &kv.first;
+        for (const auto* pk : by_id) {
+            std::fwrite(pk->data(), 1, pk->size(), f);
+        }
+        std::fclose(f);
+        return true;
+    }
+};
+
+// Two-pass remap. PASS 1 walks src and interns every pubkey it sees
+// (confidants + tx source + tx target). PASS 2 rewrites and writes — using
+// either direct put_recno (one block per record) or the Bundler (N per
+// record, optional LZ4) depending on args.bundle_size / args.bundle_compress.
+int run_pubkey_remap(csdb::Database& src,
+                     csdb::DatabaseBerkeleyDB& dst_bdb,
+                     const Args& args) {
+    using clock = std::chrono::steady_clock;
+    const auto t_total = clock::now();
+
+    // PASS 1
+    std::cout << "pubkey-remap pass 1: scanning src to build dict..." << std::endl;
+    WalletDict dict;
+    {
+        auto it = src.new_iterator();
+        if (!it) { std::cerr << "src iterator unavailable\n"; return 1; }
+        if (args.from > 0) it->seek(static_cast<uint32_t>(args.from));
+        else it->seek_to_first();
+        uint64_t scanned = 0;
+        const auto t0 = clock::now();
+        auto last_log = t0;
+        while (it->is_valid()) {
+            const uint32_t seq_key = it->key();
+            if (static_cast<cs::Sequence>(seq_key) > args.to) break;
+            cs::Bytes raw = it->value();
+            csdb::Pool pool = csdb::Pool::from_binary(std::move(raw));
+            if (!pool.is_valid()) { std::cerr << "pass1: src seq=" << seq_key << " unparseable\n"; return 1; }
+            for (const auto& pk : pool.confidants()) dict.intern(pk);
+            for (const auto& tx : pool.transactions()) {
+                const auto& s = tx.source().public_key();
+                const auto& t = tx.target().public_key();
+                if (s.size() == 32) { cs::PublicKey pk{}; std::memcpy(pk.data(), s.data(), 32); dict.intern(pk); }
+                if (t.size() == 32) { cs::PublicKey pk{}; std::memcpy(pk.data(), t.data(), 32); dict.intern(pk); }
+            }
+            ++scanned;
+            it->next();
+            if (scanned % args.progress_every == 0) {
+                const auto now = clock::now();
+                const auto since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count();
+                const double rate = since_last > 0
+                    ? (1000.0 * static_cast<double>(args.progress_every) / static_cast<double>(since_last))
+                    : 0.0;
+                std::cout << "  pass1 seq=" << seq_key
+                          << "  scanned=" << scanned
+                          << "  unique_pk=" << dict.map.size()
+                          << "  rate=" << static_cast<uint64_t>(rate) << "/s"
+                          << std::endl;
+                last_log = now;
+            }
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0);
+        std::cout << "pass1 done  scanned=" << scanned
+                  << "  unique_pubkeys=" << dict.map.size()
+                  << "  elapsed=" << format_duration(elapsed) << std::endl;
+    }
+
+    // PASS 2
+    std::cout << "pubkey-remap pass 2: rewriting + writing dst..." << std::endl;
+    Bundler bundler;
+    const bool use_bundle = (args.bundle_size > 0);
+    if (use_bundle) {
+        bundler.bundle_size = args.bundle_size;
+        bundler.compress = args.bundle_compress;
+        bundler.db = &dst_bdb;
+    }
+
+    auto it = src.new_iterator();
+    if (!it) { std::cerr << "src iterator unavailable\n"; return 1; }
+    if (args.from > 0) it->seek(static_cast<uint32_t>(args.from));
+    else it->seek_to_first();
+
+    uint64_t written = 0;
+    uint64_t raw_today_bytes = 0;
+    uint64_t direct_stored_bytes = 0;  // for non-bundle path
+    const auto t0 = clock::now();
+    auto last_log = t0;
+
+    while (it->is_valid()) {
+        const uint32_t seq_key = it->key();
+        if (static_cast<cs::Sequence>(seq_key) > args.to) break;
+        cs::Bytes raw = it->value();
+        raw_today_bytes += raw.size();
+        csdb::Pool pool = csdb::Pool::from_binary(std::move(raw), /*makeReadOnly=*/false);
+        if (!pool.is_valid()) { std::cerr << "pass2: src seq=" << seq_key << " unparseable\n"; return 1; }
+
+        auto& txs = pool.transactions();
+        for (auto& tx : txs) {
+            const auto& s = tx.source().public_key();
+            const auto& t = tx.target().public_key();
+            if (s.size() == 32) {
+                cs::PublicKey pk{}; std::memcpy(pk.data(), s.data(), 32);
+                tx.set_source(csdb::Address::from_wallet_id(dict.intern(pk)));
+            }
+            if (t.size() == 32) {
+                cs::PublicKey pk{}; std::memcpy(pk.data(), t.data(), 32);
+                tx.set_target(csdb::Address::from_wallet_id(dict.intern(pk)));
+            }
+        }
+
+        const auto& confidants = pool.confidants();
+        if (!confidants.empty()) {
+            std::string blob;
+            blob.reserve(2 + confidants.size() * 4);
+            const uint16_t n = static_cast<uint16_t>(confidants.size());
+            blob.push_back(static_cast<char>(n & 0xFF));
+            blob.push_back(static_cast<char>((n >> 8) & 0xFF));
+            for (const auto& pk : confidants) {
+                const uint32_t id = dict.intern(pk);
+                for (int i = 0; i < 4; ++i) blob.push_back(static_cast<char>((id >> (i * 8)) & 0xFF));
+            }
+            pool.set_confidants({});
+            pool.add_user_field(kFieldConfidantSetIdExp, blob);
+        }
+
+        cs::Bytes encoded = pool.to_binary();
+        if (encoded.empty()) {
+            std::cerr << "pass2: pool.to_binary() returned empty at seq=" << seq_key << "\n";
+            return 1;
+        }
+
+        if (use_bundle) {
+            if (!bundler.push(std::move(encoded))) return 1;
+        } else {
+            direct_stored_bytes += encoded.size();
+            if (!dst_bdb.put_recno(seq_key + 1, encoded)) {
+                std::cerr << "put_recno failed at seq=" << seq_key << ": "
+                          << dst_bdb.last_error_message() << "\n";
+                return 1;
+            }
+        }
+        ++written;
+        it->next();
+
+        if (written % args.progress_every == 0) {
+            const auto now = clock::now();
+            const auto since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+            const double rate = since_last > 0
+                ? (1000.0 * static_cast<double>(args.progress_every) / static_cast<double>(since_last))
+                : 0.0;
+            const uint64_t stored_so_far = use_bundle ? bundler.stored_bytes : direct_stored_bytes;
+            std::cout << "  pass2 seq=" << seq_key
+                      << "  written=" << written
+                      << "  raw=" << raw_today_bytes
+                      << "  stored=" << stored_so_far
+                      << "  ratio=" << (raw_today_bytes > 0
+                          ? 100.0 * static_cast<double>(stored_so_far) / static_cast<double>(raw_today_bytes)
+                          : 0.0) << "%"
+                      << "  rate=" << static_cast<uint64_t>(rate) << "/s"
+                      << "  elapsed=" << format_duration(elapsed)
+                      << std::endl;
+            last_log = now;
+        }
+    }
+    if (use_bundle && !bundler.flush()) return 1;
+
+    const std::string dict_path = (fs::path(args.dst) / "pubkey_dict.bin").string();
+    if (!dict.dump(dict_path)) {
+        std::cerr << "failed to dump pubkey_dict.bin\n";
+        return 1;
+    }
+    const uint64_t dict_bytes = 4 + 1 + 4 + dict.map.size() * 32;
+    const uint64_t final_stored = use_bundle ? bundler.stored_bytes : direct_stored_bytes;
+    const uint64_t plus_dict   = final_stored + dict_bytes;
+    const auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t_total);
+
+    std::cout << "pubkey-remap done\n"
+              << "  blocks_written        = " << written << "\n"
+              << "  unique_pubkeys        = " << dict.map.size() << "\n"
+              << "  raw_today_bytes       = " << raw_today_bytes
+              << "  (" << (raw_today_bytes / (1024.0 * 1024.0)) << " MiB)\n"
+              << "  stored_payload_bytes  = " << final_stored
+              << "  (" << (final_stored / (1024.0 * 1024.0)) << " MiB)\n"
+              << "  pubkey_dict_bytes     = " << dict_bytes
+              << "  (" << (dict_bytes / (1024.0 * 1024.0)) << " MiB)  -> " << dict_path << "\n"
+              << "  stored + dict         = " << plus_dict
+              << "  (" << (plus_dict / (1024.0 * 1024.0)) << " MiB)\n"
+              << "  vs_raw                = " << (raw_today_bytes > 0
+                  ? 100.0 * static_cast<double>(plus_dict) / static_cast<double>(raw_today_bytes)
+                  : 0.0) << "%\n"
+              << "  bundle_size           = " << args.bundle_size << "\n"
+              << "  bundle_compress       = " << (args.bundle_compress ? "lz4" : "off") << "\n"
+              << "  elapsed               = " << format_duration(total_elapsed) << "\n"
+              << "  note: stored_bytes is the BDB record payload; on-disk size also\n"
+              << "        includes BDB page padding — compare actual dst folder size\n"
+              << "        against a baseline run (no --pubkey-remap, same other flags).\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -589,12 +1060,36 @@ int main(int argc, char** argv) {
         }
         return ok ? 0 : 1;
     }
+    if (args.confidant_indirection && args.dst_backend != "berkeley") {
+        std::cerr << "--confidant-indirection currently requires --dst-backend berkeley "
+                     "(the produced dst is a measurement artifact, not node-loadable)\n";
+        return 2;
+    }
+    if (args.bundle_size > 0 && args.dst_backend != "berkeley") {
+        std::cerr << "--bundle-size currently requires --dst-backend berkeley\n";
+        return 2;
+    }
+    if (args.bundle_size > 0 && args.confidant_indirection) {
+        std::cerr << "--bundle-size and --confidant-indirection are mutually exclusive\n";
+        return 2;
+    }
+    if (args.pubkey_remap && args.dst_backend != "berkeley") {
+        std::cerr << "--pubkey-remap currently requires --dst-backend berkeley\n";
+        return 2;
+    }
+    if (args.pubkey_remap && args.confidant_indirection) {
+        std::cerr << "--pubkey-remap and --confidant-indirection both use user_field 99; pick one\n";
+        return 2;
+    }
     if (!args.force && !dst_dir_empty(args.dst)) {
         std::cerr << "dst is not empty: " << args.dst
                   << "\n  Pass --force to override (note: chain check requires a fresh dst).\n";
         return 2;
     }
     fs::create_directories(args.dst);
+    if (args.confidant_indirection && args.confidant_sets_out.empty()) {
+        args.confidant_sets_out = (fs::path(args.dst) / "confidant_sets.bin").string();
+    }
 
     csdb::DatabaseBerkeleyDB src_db;
     if (!src_db.open(args.src)) {
@@ -610,16 +1105,20 @@ int main(int argc, char** argv) {
     // base shared_ptr.
     std::shared_ptr<csdb::Database> dst_db;
     csdb::DatabaseRocksDB* dst_rocks = nullptr;
+    csdb::DatabaseBerkeleyDB* dst_bdb = nullptr;
     if (args.dst_backend == "berkeley") {
         auto bdb = std::make_shared<csdb::DatabaseBerkeleyDB>();
+        // 256 MB mpool + 64 MB in-memory log; no on-disk log files.
+        bdb->tune_for_bulk(256ULL * 1024 * 1024, 64u * 1024 * 1024);
         if (args.bulk_load) {
-            std::cout << "note: --dst-backend berkeley does not support bulk-load; ignoring\n";
+            std::cout << "note: --dst-backend berkeley uses in-memory log instead of bulk_load\n";
         }
         if (!bdb->open(args.dst)) {
             std::cerr << "failed to open dst (berkeley) at " << args.dst
                       << ": " << bdb->last_error_message() << "\n";
             return 1;
         }
+        dst_bdb = bdb.get();
         dst_db = std::move(bdb);
     } else {
         auto rocks = std::make_shared<csdb::DatabaseRocksDB>();
@@ -633,6 +1132,34 @@ int main(int argc, char** argv) {
         }
         dst_rocks = rocks.get();
         dst_db = std::move(rocks);
+    }
+
+    if (args.pubkey_remap) {
+        std::cout << "csdb_migrate (PUBKEY-REMAP)"
+                  << "\n  src: "       << args.src
+                  << "\n  dst: "       << args.dst
+                  << "\n  from: "      << args.from
+                  << "\n  to: "        << (args.to == std::numeric_limits<cs::Sequence>::max() ? std::string("end") : std::to_string(args.to))
+                  << "\n  bundle-size: " << args.bundle_size
+                  << "\n  bundle-compress: " << (args.bundle_compress ? "lz4" : "off")
+                  << "\n  note: dst is NOT node-loadable; emits pubkey_dict.bin"
+                  << std::endl;
+        csdb::Database& src_base_p = src_db;
+        return run_pubkey_remap(src_base_p, *dst_bdb, args);
+    }
+    if (args.bundle_size > 0) {
+        std::cout << "csdb_migrate (BUNDLING)"
+                  << "\n  src: "       << args.src
+                  << "\n  dst: "       << args.dst
+                  << "\n  from: "      << args.from
+                  << "\n  to: "        << (args.to == std::numeric_limits<cs::Sequence>::max() ? std::string("end") : std::to_string(args.to))
+                  << "\n  bundle-size: " << args.bundle_size
+                  << "\n  bundle-compress: " << (args.bundle_compress ? "lz4" : "off")
+                  << "\n  stubs: "     << (args.use_stubs ? "enabled" : "disabled (full pools)")
+                  << "\n  note: dst is NOT node-loadable"
+                  << std::endl;
+        csdb::Database& src_base_b = src_db;
+        return run_bundling_migration(src_base_b, *dst_bdb, args);
     }
 
     csdb::Storage::OpenOptions opt;
@@ -660,9 +1187,10 @@ int main(int argc, char** argv) {
               << "\n  batch: "     << args.batch
               << "\n  progress: "  << args.progress_every
               << "\n  stubs: "     << (args.use_stubs ? "enabled" : "disabled (full pools)")
+              << "\n  confidant-indirection: " << (args.confidant_indirection ? "ENABLED (dst NOT node-loadable)" : "disabled")
               << std::endl;
 
-    csdb::Database& src_base = src_db;          // new_iterator is public on Database
+    csdb::Database& src_base = src_db;
     auto it = src_base.new_iterator();
     if (!it) {
         std::cerr << "src iterator unavailable\n";
@@ -689,6 +1217,8 @@ int main(int argc, char** argv) {
     // measures the queue-push critical section.
     int64_t ns_read = 0, ns_parse = 0, ns_save = 0;
 
+    ConfidantInterner interner;
+
     while (it->is_valid()) {
         const auto ts_a = clock::now();
         const uint32_t seq_key = it->key();
@@ -696,7 +1226,8 @@ int main(int argc, char** argv) {
         cs::Bytes raw = it->value();
         const auto ts_b = clock::now();
 
-        csdb::Pool pool = csdb::Pool::from_binary(std::move(raw));
+        csdb::Pool pool = csdb::Pool::from_binary(std::move(raw),
+                                                  /*makeReadOnly=*/!args.confidant_indirection);
         const auto ts_c = clock::now();
 
         if (!pool.is_valid()) {
@@ -710,6 +1241,13 @@ int main(int argc, char** argv) {
         }
         if (pool.transactions().empty()) ++empty_blocks; else ++tx_blocks;
 
+        if (args.confidant_indirection) {
+            const uint32_t set_id = interner.intern(pool.confidants());
+            pool.set_confidants({});
+            pool.add_user_field(kFieldConfidantSetIdExp,
+                                static_cast<uint64_t>(set_id));
+        }
+
         if (!dst.pool_save(pool)) {
             std::cerr << "dst pool_save failed at seq=" << seq_key << ": "
                       << dst.last_error_message()
@@ -719,7 +1257,6 @@ int main(int argc, char** argv) {
         const auto ts_d = clock::now();
         ++saved;
 
-        // Advance the cursor (BDB disk read happens here for next iter).
         const auto ts_e = clock::now();
         it->next();
         const auto ts_f = clock::now();
@@ -773,6 +1310,44 @@ int main(int argc, char** argv) {
               << "  elapsed=" << format_duration(total)
               << std::endl;
 
+    if (args.confidant_indirection) {
+        if (!interner.dump(args.confidant_sets_out)) {
+            std::cerr << "confidant-indirection: failed to write side file "
+                      << args.confidant_sets_out << "\n";
+            return 1;
+        }
+        // Per-block ref cost: user_field 99 of integer type. obstream writes
+        // [id:varint ~2B][type:1B][value:varint ~1-5B] -> typically ~5-7 bytes
+        // and the enclosing user_fields map gains 1B for its count byte going
+        // from 0 to 1 (only when the block had no other user fields).
+        const uint64_t per_block_ref_bytes = 6;
+        const uint64_t inline_today = interner.inline_bytes_today;
+        const uint64_t per_block_new = interner.blocks_with_conf * per_block_ref_bytes;
+        const uint64_t table_bytes = interner.table_bytes();
+        const int64_t  net_savings  = static_cast<int64_t>(inline_today) -
+                                      static_cast<int64_t>(per_block_new) -
+                                      static_cast<int64_t>(table_bytes);
+        std::cout << "confidant-indirection summary:\n"
+                  << "  blocks_with_conf    = " << interner.blocks_with_conf << "\n"
+                  << "  blocks_empty_conf   = " << interner.blocks_empty_conf << "\n"
+                  << "  unique_sets         = " << interner.sets.size() << "\n"
+                  << "  reuse_factor        = "
+                  << (interner.sets.empty() ? 0.0
+                          : static_cast<double>(interner.blocks_with_conf) /
+                            static_cast<double>(interner.sets.size()))
+                  << "x\n"
+                  << "  inline_today_bytes  = " << inline_today << "\n"
+                  << "  per_block_ref_bytes = " << per_block_new
+                  << "  (~" << per_block_ref_bytes << " B/block, see note in code)\n"
+                  << "  set_table_bytes     = " << table_bytes
+                  << "  (side file: " << args.confidant_sets_out << ")\n"
+                  << "  projected_savings   = " << net_savings << " bytes ("
+                  << (net_savings / (1024.0 * 1024.0)) << " MiB)\n"
+                  << "  note: actual on-disk delta also depends on BDB page packing;\n"
+                  << "        compare the dst directory size against a baseline run\n"
+                  << "        with --no-stubs vs --confidant-indirection.\n";
+    }
+
     if (args.verify) {
         std::cout << "verify: scanning destination ..." << std::endl;
         // Storage::close() dropped its shared_ptr but the migrate tool still
@@ -798,11 +1373,16 @@ int main(int argc, char** argv) {
     }
 
     if (args.cross_verify) {
-        std::cout << "cross-verify: comparing src vs dst per-block ..." << std::endl;
-        csdb::Database& cv_src = src_db;
-        csdb::Database& cv_dst = *dst_db;
-        if (!validate_chain(cv_src, cv_dst, args)) {
-            return 1;
+        if (args.confidant_indirection) {
+            std::cout << "cross-verify: skipped (--confidant-indirection mutates blocks; "
+                         "dst confidants are empty by design)" << std::endl;
+        } else {
+            std::cout << "cross-verify: comparing src vs dst per-block ..." << std::endl;
+            csdb::Database& cv_src = src_db;
+            csdb::Database& cv_dst = *dst_db;
+            if (!validate_chain(cv_src, cv_dst, args)) {
+                return 1;
+            }
         }
     }
 
