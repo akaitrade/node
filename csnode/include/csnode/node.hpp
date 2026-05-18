@@ -30,6 +30,7 @@ class SolverCore;
 namespace cs {
 class PoolSynchronizer;
 class BlockValidator;
+class SyncWatchdog;
 }  // namespace cs
 
 namespace cs::config {
@@ -285,6 +286,9 @@ public:
         return myLevel_;
     }
 
+    // public entry point for SyncWatchdog's optional kick
+    void kickSync();
+
     uint8_t getConfidantNumber() const {
         return myConfidantIndex_;
     }
@@ -476,6 +480,7 @@ private:
     static const size_t kLastPoolSynchroDelay_ = 30000;
 
     cs::PoolSynchronizer* poolSynchronizer_;
+    std::unique_ptr<cs::SyncWatchdog> syncWatchdog_;
 
     // sends transactions blocks to network
     cs::Timer sendingTimer_;

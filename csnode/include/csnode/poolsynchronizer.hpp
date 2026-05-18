@@ -1,6 +1,8 @@
 #ifndef POOLSYNCHRONIZER_HPP
 #define POOLSYNCHRONIZER_HPP
 
+#include <chrono>
+
 #include <csdb/pool.hpp>
 
 #include <csnode/blockchain.hpp>
@@ -24,12 +26,28 @@ public:
     void getBlockReply(PoolsBlock&& poolsBlock, const cs::PublicKey& sender);
     bool isSyncroStarted() const;
 
+    // True for postSyncSoakRounds rounds after the last synchroFinished(). Lets a
+    // freshly-synced node prove it can keep up in Normal role before being
+    // eligible for Trusted, preventing the "slow node elected Trusted, fails
+    // round, falls behind, repeats" cycle.
+    bool isPostSyncSoaking() const;
+
+    // Idempotent shutdown hook. Called by Node::stop() BEFORE transport_ is
+    // torn down so the watchdog timer cannot fire onTimeOut() against an
+    // already-freed transport. After stop() returns, sync()/syncLastPool()/
+    // onTimeOut() become no-ops; the timer is stopped and the synchroLog is
+    // cleared. Safe to call multiple times.
+    void stop();
+
     cs::Sequence getMaxNeighbourSequence();
     static const RoundNumber kRoundDifferentForSync = values::kDefaultMetaStorageMaxSize;
     void getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg);
 
     static const size_t kFreeBlocksTimeoutMs = 10000;
     static const size_t kCachedBlocksLimit = 10000;
+    static const size_t kPerPeerCooldownMs = 5000;     // peer "busy" window after a request
+    static const size_t kNoAnswerEntryTtlMs = 10000;   // NoAnswer entry GC after this
+    static const size_t kAwaitAnswerEntryTtlMs = 30000; // AwaitAnswer entry GC if peer ACK'd then went silent
 
     //void trySource(cs::Sequence finSeq, cs::PublicKey& source);
     //void showNeighbours();
@@ -41,7 +59,7 @@ public signals:
 public slots:
     void onStoreBlockTimeElapsed();
     void onPingReceived(Sequence sequence, const PublicKey& publicKey);
-    void onNeighbourAdded(const PublicKey&, Sequence) {}
+    void onNeighbourAdded(const PublicKey&, Sequence);
     void onNeighbourRemoved(const PublicKey& publicKey);
 
 private slots:
@@ -60,21 +78,18 @@ private:
     bool showSyncronizationProgress(Sequence lastWrittenSequence) const;
     void manageSyncBlocks(cs::PoolsBlock&& poolsBlock);
 
-    std::vector<Sequence> getNeededSequences(
-        const std::vector<BlockChain::SequenceInterval>& requiredBlocks,
-        Sequence neighbourLastSeq
-    );
-
     void synchroFinished();
     size_t nextIndex(size_t index) const;
 
     BlockChain* blockChain_;
 
     std::atomic<bool> isSyncroStarted_ = false;
+    std::atomic<bool> stopped_ = false;
+    std::atomic<cs::RoundNumber> syncFinishedAtRound_ = 0;   // 0 = never finished a sync
 
-    Sequence maxRequestedSequence_ = kWrongSequence;
     std::unordered_map<PublicKey, Sequence> neighbours_;
 
+    // Single-threaded: all callers run via CallQueuePolicy.
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
     Timer timer_;
 };

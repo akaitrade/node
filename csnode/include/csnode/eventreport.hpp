@@ -83,7 +83,8 @@ public:
         EraseFromList,
         RejectTransactions,
         RejectContractExecution,
-        RunningStatus
+        RunningStatus,
+        StuckDetected
     };
 
     static Id getId(const cs::Bytes& bin_pack);
@@ -264,6 +265,12 @@ public:
      */
 
     static void sendRunningStatus(Node& node, Running::Status status);
+
+    // Sync-watchdog stuck-detected event.
+    static void sendStuckDetected(Node& node, cs::Sequence seq, uint32_t stuckForSec,
+                                  bool syncActive, uint32_t cachedBlocks);
+    static bool parseStuckDetected(const cs::Bytes& bin_pack, cs::Sequence& seq, uint32_t& stuckForSec,
+                                   bool& syncActive, uint32_t& cachedBlocks);
 
     /**
      * Parse running status

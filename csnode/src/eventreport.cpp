@@ -371,6 +371,28 @@ EventReport::Id EventReport::parseContractsProblem(const cs::Bytes& bin_pack, cs
     node.reportEvent(bin_pack);
 }
 
+/*static*/ void EventReport::sendStuckDetected(Node& node, cs::Sequence seq, uint32_t stuckForSec,
+                                               bool syncActive, uint32_t cachedBlocks) {
+    cs::Bytes bin_pack;
+    cs::ODataStream out(bin_pack);
+    out << Id::StuckDetected << seq << stuckForSec << uint8_t(syncActive ? 1 : 0) << cachedBlocks;
+    node.reportEvent(bin_pack);
+}
+
+/*static*/ bool EventReport::parseStuckDetected(const cs::Bytes& bin_pack, cs::Sequence& seq,
+                                                uint32_t& stuckForSec, bool& syncActive,
+                                                uint32_t& cachedBlocks) {
+    if (bin_pack.empty()) return false;
+    cs::IDataStream in(bin_pack.data(), bin_pack.size());
+    Id id = Id::None;
+    in >> id;
+    if (id != Id::StuckDetected) return false;
+    uint8_t active = 0;
+    in >> seq >> stuckForSec >> active >> cachedBlocks;
+    syncActive = (active != 0);
+    return in.isValid() && in.isEmpty();
+}
+
 /*static*/
 bool EventReport::parseRunningStatus(const cs::Bytes& bin_pack, Running::Status& status) {
     if (bin_pack.empty()) {

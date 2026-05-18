@@ -107,7 +107,7 @@ bool Peer::onInit(const char*) {
     signal(SIGUSR1, sigUsr1Handler);
 #endif
 
-    logger::initialize(config_.getLoggerSettings());
+    logger::initialize(config_.getLoggerSettings(), config_.getLogChannelLevels());
     observer_ = std::make_unique<config::Observer>(config_, vm_);
     cs::ConfigHolder::instance().setConfig(config_);
     cs::Connector::connect(
@@ -138,6 +138,7 @@ bool Peer::onRun(const char*) {
     }
 
     cslog() << "Node stopped";
+    node_->stop();   // idempotent; ensures stop ordering even if run() returned via a non-stop path
     cslog() << "Destroying Node";
     node_->destroy();
     node_.reset(nullptr);

@@ -1822,46 +1822,45 @@ std::size_t BlockChain::getCachedBlocksSizeSynced() const {
     return cachedBlocks_->sizeSynced();
 }
 
+cs::Sequence BlockChain::getCachedBlocksMinSequence() const {
+    cs::Lock lock(cachedBlocksMutex_);
+    return cachedBlocks_->isEmpty() ? cs::kWrongSequence : cachedBlocks_->minSequence();
+}
+
 void BlockChain::clearBlockCache() {
     cs::Lock lock(cachedBlocksMutex_);
     cachedBlocks_->clear();
 }
 
-std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks() const {
+std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequence maxSequence) const {
     cs::Sequence seq = getLastSeq();
     const auto firstSequence = seq + 1;
-    const auto currentRoundNumber = cs::Conveyer::instance().currentRoundNumber()-1;
+    const cs::Sequence inclusiveLast = (maxSequence != cs::kWrongSequence)
+        ? maxSequence
+        : (cs::Conveyer::instance().currentRoundNumber() >= 1
+            ? cs::Conveyer::instance().currentRoundNumber() - 1
+            : cs::Sequence{0});
 
-    if (firstSequence >= currentRoundNumber) {
+    if (firstSequence > inclusiveLast) {
         return std::vector<SequenceInterval>();
     }
 
-    const auto roundNumber = currentRoundNumber > 0 ? std::max(firstSequence, currentRoundNumber - 1) : 0;
+    const auto roundNumber = inclusiveLast;
 
-    // return at least [next, 0] or [next, currentRoundNumber]:
     if (cachedBlocks_->isEmpty()) {
         return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
     }
 
     auto ranges = cachedBlocks_->ranges();
+    const auto minCached = cachedBlocks_->minSequence();
+    const auto maxCached = cachedBlocks_->maxSequence();
 
-    if (ranges.empty()) {
-        return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
+    if (firstSequence < minCached) {
+        ranges.emplace_back(firstSequence, minCached - 1);
     }
-    bool emplaceLater = false;
-    if (firstSequence < ranges.front().first) {
-        ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
-        emplaceLater = true;
+    if (maxCached < roundNumber) {
+        ranges.emplace_back(maxCached + 1, roundNumber);
     }
-    //TODO: this piece of code should be precisely examined
-    if (ranges.back().second < roundNumber) {
-        ranges.emplace_back(cachedBlocks_->maxSequence() + 1, roundNumber);
-    }
-    if (emplaceLater) {
-        ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
-    }
-
-
     return ranges;
 }
 

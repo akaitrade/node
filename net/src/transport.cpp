@@ -1,3 +1,4 @@
+#define CS_LOG_CHANNEL "net"
 /* Send blaming letters to @yrtimd */
 #include "transport.hpp"
 
@@ -132,16 +133,34 @@ Transport::~Transport() {
 void Transport::run() {
     host_.Run();
     processorThread_ = std::thread(&Transport::processorRoutine, this);
-    std::this_thread::sleep_for(Neighbourhood::kPingInterval);
 
-    while (Transport::gSignalStatus == 0) {
+    {
+        std::unique_lock<std::mutex> lock(shutdownMux_);
+        shutdownCv_.wait_for(lock, Neighbourhood::kPingInterval,
+                             [this] { return stopped_.load(std::memory_order_acquire); });
+    }
+
+    while (!stopped_.load(std::memory_order_acquire) && Transport::gSignalStatus == 0) {
         pollSignalFlag();
+        if (stopped_.load(std::memory_order_acquire) || Transport::gSignalStatus != 0) break;
 
         neighbourhood_.pingNeighbours();
-
         emit mainThreadIterated();
-        std::this_thread::sleep_for(Neighbourhood::kPingInterval);
+
+        std::unique_lock<std::mutex> lock(shutdownMux_);
+        shutdownCv_.wait_for(lock, Neighbourhood::kPingInterval,
+                             [this] { return stopped_.load(std::memory_order_acquire); });
     }
+}
+
+void Transport::stop() {
+    stopped_.store(true, std::memory_order_release);
+    Transport::gSignalStatus = 1;   // also flip legacy flag for any code still gating on it
+    {
+        std::lock_guard<std::mutex> lock(shutdownMux_);
+    }
+    shutdownCv_.notify_all();
+    newPacketsReceived_.notify_all();
 }
 
 void Transport::OnMessageReceived(const net::NodeId& id, net::ByteVector&& data) {
@@ -234,13 +253,14 @@ void Transport::clearInbox() {
 void Transport::processorRoutine() {
     constexpr size_t kRoutineWaitTimeMs = 50;
 
-    while (Transport::gSignalStatus == 0) {
+    while (!stopped_.load(std::memory_order_acquire) && Transport::gSignalStatus == 0) {
         process();
 
         std::unique_lock lock(inboxMux_);
         newPacketsReceived_.wait_for(lock, std::chrono::milliseconds{kRoutineWaitTimeMs}, [this]() {
-            return !inboxQueue_.empty();
+            return !inboxQueue_.empty() || stopped_.load(std::memory_order_acquire);
         });
+        if (stopped_.load(std::memory_order_acquire)) break;
 
         while (!inboxQueue_.empty()) {
             PacketsQueue::SenderAndPacket senderAndPack;

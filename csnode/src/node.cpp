@@ -16,6 +16,7 @@
 #include <csnode/nodecore.hpp>
 #include <csnode/nodeutils.hpp>
 #include <csnode/poolsynchronizer.hpp>
+#include <csnode/syncwatchdog.hpp>
 #include <csnode/itervalidator.hpp>
 #include <csnode/blockvalidator.hpp>
 #include <csnode/roundpackage.hpp>
@@ -71,6 +72,7 @@ Node::Node(cs::config::Observer& observer)
     transport_ = new Transport(this);
     std::cout << "Done\n";
     poolSynchronizer_ = new cs::PoolSynchronizer(&blockChain_);
+    syncWatchdog_ = std::make_unique<cs::SyncWatchdog>(blockChain_, *poolSynchronizer_, *this);
 
     cs::ExecutorSettings::set(cs::makeReference(blockChain_), cs::makeReference(solver_));
     auto& executor = cs::Executor::instance();
@@ -238,6 +240,19 @@ bool Node::init() {
     EventReport::sendRunningStatus(*this, Running::Status::Run);
     globalPublicKey_.fill(0);
     globalPublicKey_.at(31) = 7U;
+
+    // start the sync watchdog only after BlockChain::init succeeds, so the
+    // initial slow walk doesn't trigger it
+    if (syncWatchdog_) {
+        const auto& wd = cs::ConfigHolder::instance().config()->getWatchdogSettings();
+        if (wd.enabled) {
+            syncWatchdog_->setCheckInterval(std::chrono::seconds(wd.checkInterval));
+            syncWatchdog_->setStuckThreshold(std::chrono::minutes(wd.stuckThreshold));
+            syncWatchdog_->setTelemetryEnabled(wd.emitTelemetry);
+            syncWatchdog_->setKickEnabled(wd.kickEnabled);
+            syncWatchdog_->start();
+        }
+    }
     return true;
 }
 
@@ -272,10 +287,25 @@ void Node::run() {
     transport_->run();
 }
 
+void Node::kickSync() {
+    processSync();
+}
+
 void Node::stop() {
+    // stop watchdog first so its thread joins while subsystems still live
+    if (syncWatchdog_) syncWatchdog_->stop();
+
     dumpKnownPeersToFile();
     EventReport::sendRunningStatus(*this, Running::Status::Stop);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Stop the pool synchronizer FIRST. Its watchdog timer fires onTimeOut()
+    // every ~sequencesVerificationFrequency ms; if the timer is still live
+    // when transport_->stop() runs, a pending onTimeOut iteration can call
+    // sendBlockRequest() against a half-torn-down transport and segfault.
+    if (poolSynchronizer_) {
+        poolSynchronizer_->stop();
+    }
 
     // stopping transport stops the node (see Node::run() method)
     transport_->stop();
@@ -1729,16 +1759,15 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
 }
 
 void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
-    csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
-
     bool isSyncOn = poolSynchronizer_->isSyncroStarted();
     bool isBlockchainUncertain = blockChain_.isLastBlockUncertain();
 
     if (!isSyncOn && !isBlockchainUncertain/* && poolSynchronizer_->getTargetSequence() == 0ULL*/) {
-        csdebug() << "NODE> Get block reply> Pool sync has already finished";
+        csdebug() << "NODE> Get block reply (dropped, not syncing) from " << cs::Utils::byteStreamToHex(sender);
         return;
     }
 
+    csinfo() << __func__ << " from " << cs::Utils::byteStreamToHex(sender);
     csdebug() << "NODE> Get Block Reply";
 
     cs::IDataStream stream(data, size);
@@ -1841,7 +1870,15 @@ void Node::processPacketsReply(cs::PacketsVector&& packets, const cs::RoundNumbe
         if (roundPackageCache_.size() > 0) {
             auto rPackage = roundPackageCache_.back();
             csdebug() << "NODE> Run characteristic meta";
-            getCharacteristic(rPackage);
+            const auto pkgSeq = rPackage.poolMetaInfo().sequenceNumber;
+            const auto reach = blockChain_.getLastSeq() + cs::PoolSynchronizer::kCachedBlocksLimit;
+            if (pkgSeq > reach) {
+                csdebug() << "NODE> drop far-forward roundPackage #" << pkgSeq
+                          << " (last=" << blockChain_.getLastSeq() << ")";
+            }
+            else {
+                getCharacteristic(rPackage);
+            }
         }
         else {
             csdebug() << "NODE> There is no roundPackage in the list, return and await any";
@@ -1956,6 +1993,22 @@ void Node::processTimer() {
     }
 
     conveyer.flushTransactions();
+
+    // Sync self-probe: kick processSync() when the chain falls behind the
+    // round counter and sync isn't already engaged. processSync's only known
+    // entry points were getRoundTable / getEmptyRoundPack — if those packets
+    // stop arriving cleanly (peer churn, neighbours_ drained, etc.), the node
+    // gets stuck with no way back into sync. Throttled to once per second.
+    static int syncProbeTick = 0;
+    if (++syncProbeTick >= 4) {
+        syncProbeTick = 0;
+        const auto lastSeq = blockChain_.getLastSeq();
+        if (poolSynchronizer_
+            && !poolSynchronizer_->isSyncroStarted()
+            && round > lastSeq + cs::PoolSynchronizer::kRoundDifferentForSync) {
+            processSync();
+        }
+    }
 }
 
 void Node::onTransactionsPacketFlushed(const cs::TransactionsPacket& packet) {
@@ -2107,6 +2160,8 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
                 // not on the very start
                 cswarning() << "NODE> detect round lag (global " << rNum << ", local " << round << ")";
                 roundPackRequest(sender, rNum);
+                // No sync kick here — that turned every incoming packet into
+                // a fan-out during long syncs. Sync drives itself.
             }
 
             return MessageActions::Drop;
@@ -3128,7 +3183,11 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
     }
 
     if (poolSynchronizer_->isSyncroStarted() && !iMode) {
-        getCharacteristic(rPackage);
+        const auto pkgSeq = rPackage.poolMetaInfo().sequenceNumber;
+        const auto reach = blockChain_.getLastSeq() + cs::PoolSynchronizer::kCachedBlocksLimit;
+        if (pkgSeq <= reach) {
+            getCharacteristic(rPackage);
+        }
     }
 
     //if (iMode && poolSynchronizer_->getTargetSequence() > 0ULL) {
@@ -3278,9 +3337,12 @@ void Node::performRoundPackage(cs::RoundPackage& rPackage, const cs::PublicKey& 
     // first change conveyer state
     cs::Conveyer::instance().setTable(roundTable);
 
-    // create pool by previous round, then change conveyer state.
     if (!cs::ConfigHolder::instance().config()->isIdleMode()) {
-        getCharacteristic(rPackage);
+        const auto pkgSeq = rPackage.poolMetaInfo().sequenceNumber;
+        const auto reach = blockChain_.getLastSeq() + cs::PoolSynchronizer::kCachedBlocksLimit;
+        if (!poolSynchronizer_->isSyncroStarted() || pkgSeq <= reach) {
+            getCharacteristic(rPackage);
+        }
     }
 
 
@@ -3688,18 +3750,27 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 }
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
+    const bool postSyncSoak  = poolSynchronizer_ && poolSynchronizer_->isPostSyncSoaking();
+    const bool deferConfidant = postSyncSoak;
+
+    if (postSyncSoak) {
+        cswarning() << "post-sync soak — refusing Trusted role this round";
+    }
+
     bool found = false;
     uint8_t confidantIndex = 0;
 
-    for (auto& conf : roundTable.confidants) {
-        if (conf == nodeIdKey_) {
-            myLevel_ = Level::Confidant;
-            myConfidantIndex_ = confidantIndex;
-            found = true;
-            break;
-        }
+    if (!deferConfidant) {
+        for (auto& conf : roundTable.confidants) {
+            if (conf == nodeIdKey_) {
+                myLevel_ = Level::Confidant;
+                myConfidantIndex_ = confidantIndex;
+                found = true;
+                break;
+            }
 
-        confidantIndex++;
+            confidantIndex++;
+        }
     }
 
     if (!found) {
@@ -3751,11 +3822,12 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     line1 << " R-" << WithDelimiters(cs::Conveyer::instance().currentRoundNumber()) << "." << cs::numeric_cast<int>(subRound_) << " ";
 
     if (Level::Normal == myLevel_) {
-        line1 << "NORMAL";
         if (getBlockChain().getLastSeq() + 1ULL == cs::Conveyer::instance().currentRoundNumber()) {
+            line1 << "NORMAL";
             status_ = cs::NodeStatus::InRound;
         }
         else {
+            line1 << "SYNCING";
             status_ = cs::NodeStatus::Synchronization;
         }
     }
@@ -3808,7 +3880,9 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     stat_.onRoundStart(cs::Conveyer::instance().currentRoundNumber(), false /*skip_logs*/);
     csdebug() << line2.str();
 
-    solver_->nextRound(updateRound);
+    if (!deferConfidant) {
+        solver_->nextRound(updateRound);
+    }
     if (cacheLBs_) {
         getBlockChain().cacheLastBlocks();
         if (getBlockChain().getIncorrectBlockNumbers()->empty()) {

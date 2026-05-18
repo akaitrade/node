@@ -1,3 +1,4 @@
+#define CS_LOG_CHANNEL "sync"
 #include "poolsynchronizer.hpp"
 
 #include <chrono>
@@ -43,8 +44,12 @@ PoolSynchronizer::PoolSynchronizer(BlockChain* blockChain)
 }
 
 void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference) {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (neighbours_.empty()) {
-        csdebug() << "SYNC: no actual neighbours to start sync";
+        cswarning() << "SYNC: no actual neighbours to start sync (lastSeq="
+                    << blockChain_->getLastSeq() << ", round=" << roundNum << ")";
         return;
     }
     cs::Sequence lastWrittenSequence = blockChain_->getLastSeq();
@@ -56,10 +61,6 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
     if (!isSyncroStarted_ && roundNum < (lastWrittenSequence + difference)) {
         return;
     }
-    if (maxRequestedSequence_ != kWrongSequence && maxRequestedSequence_ > lastWrittenSequence) {
-        return;
-    }
-
     if (isSyncroStarted_ && roundNum > 0) {
         --roundNum;
     }
@@ -85,7 +86,9 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
               << "\n Total blocks: "      << totalBlocks;
     cslog() << "SYNC: Blocks remaining: " << blocksRemaining;
 
-    if (blocksRemaining == 0) {
+    // 1-block gap with empty cache = in-flight round; treat as caught up.
+    if (blocksRemaining == 0
+        || (cachedBlocksSize == 0 && blocksRemaining <= 1)) {
         showSyncronizationProgress(lastWrittenSequence);
         csdebug() << __func__ << ": call SyncroFinished";
         synchroFinished();
@@ -105,15 +108,24 @@ void PoolSynchronizer::sync(cs::RoundNumber roundNum, cs::RoundNumber difference
 }
 
 void PoolSynchronizer::syncLastPool() {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (neighbours_.empty()) {
         csdebug() << "SYNC: (last pool) no actual neighbours to request the last block";
+        return;
+    }
+    // Skip if caught up; setting the flag here strands it (no reliable clear path).
+    const auto lastSeq = blockChain_->getLastSeq();
+    const auto round = cs::Conveyer::instance().currentRoundNumber();
+    if (lastSeq + 1 >= round) {
         return;
     }
     if (!isSyncroStarted_) {
         isSyncroStarted_ = true;
     }
     cs::PublicKey target = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1))->first;
-    emit sendRequest(target, PoolsRequestedSequences{blockChain_->getLastSeq() + 1});
+    emit sendRequest(target, PoolsRequestedSequences{lastSeq + 1});
 }
 
 void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
@@ -124,20 +136,23 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
 
     for (auto& pool : poolsBlock) {
         const auto sequence = pool.sequence();
-        
+
         if (lastWrittenSequence > sequence) {
             csdebug() << "skip seq " << sequence;
             continue;
         }
 
-        if (pool.signatures().size() == 0) {
-            cserror() << "SYNC: No signatures in pool #" << pool.sequence();
+        if (pool.signatures().size() == 0 && pool.transactions_count() > 0) {
+            cserror() << "SYNC: No signatures in non-empty pool #" << sequence;
             continue;
         }
 
         if (blockChain_->storeBlock(pool, cs::PoolStoreType::Synced)) {
             blockChain_->testCachedBlocks();
             lastWrittenSequence = blockChain_->getLastSeq();
+        }
+        else {
+            cswarning() << "SYNC: storeBlock failed for #" << sequence;
         }
     }
 
@@ -152,12 +167,14 @@ void PoolSynchronizer::manageSyncBlocks(cs::PoolsBlock&& poolsBlock) {
 }
 
 void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::PublicKey& sender) {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     csdebug() << "SYNC: Get Block Reply <<<<<<< : count: " << poolsBlock.size()
         << ", seqs: [" << poolsBlock.front().sequence()
         << ", " << poolsBlock.back().sequence() << "]";
+
     removeSynchroLog(sender);
-    //std::thread sThread(&PoolSynchronizer::manageSyncBlocks, this, std::move(poolsBlock));;
-    //sThread.detach();
     manageSyncBlocks(std::move(poolsBlock));
 }
 
@@ -170,21 +187,37 @@ bool PoolSynchronizer::isSyncroStarted() const {
 //
 
 void PoolSynchronizer::onTimeOut() {
+    if (stopped_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (!isSyncroStarted_) {
         return;
     }
 
+    // Recovery handled by: per-peer cooldowns expire (kPerPeerCooldownMs),
+    // NoAnswer entries time out (kNoAnswerEntryTtlMs) and requeue into
+    // rejectedSequences_, rejected drain runs every sendBlockRequest tick.
     auto currentRound = cs::Conveyer::instance().currentRoundNumber();
-
-    if (blockChain_->getLastSeq() < currentRound) {
-        csdebug() << __func__ << ": call SyncroFinished";
+    const auto last = blockChain_->getLastSeq();
+    // Effective catch-up: 1-block gap with empty cache = in-flight round.
+    if (last + 1 >= currentRound && blockChain_->getCachedBlocksSize() == 0) {
         synchroFinished();
-        sync(currentRound);
+    }
+    else if (last < currentRound) {
+        sendBlockRequest();
+    }
+    else {
+        synchroFinished();
     }
 }
 
 void PoolSynchronizer::onStoreBlockTimeElapsed() {
-    if (isSyncroStarted()) {
+    if (!isSyncroStarted()) {
+        return;
+    }
+    // Only finish if genuinely caught up; the no-block-stored timeout otherwise
+    // ends an active sync that's just temporarily blocked.
+    if (blockChain_->getRequiredBlocks(getMaxNeighbourSequence()).empty()) {
         synchroFinished();
     }
 }
@@ -274,16 +307,16 @@ cs::Sequence PoolSynchronizer::getMaxNeighbourSequence() {
 }
 
 void PoolSynchronizer::onPingReceived(cs::Sequence sequence, const cs::PublicKey& publicKey) {
-    if (sequence > blockChain_->getLastSeq()) {
-        neighbours_[publicKey] = sequence;
-    }
-    else {
-        neighbours_.erase(publicKey);
-    }
+    neighbours_[publicKey] = sequence;
+}
+
+void PoolSynchronizer::onNeighbourAdded(const cs::PublicKey& publicKey, cs::Sequence sequence) {
+    neighbours_[publicKey] = sequence;
 }
 
 void PoolSynchronizer::onNeighbourRemoved(const cs::PublicKey& publicKey) {
     neighbours_.erase(publicKey);
+    removeSynchroLog(publicKey);   // drop in-flight tracking when peer disconnects
 }
 
 //
@@ -331,30 +364,60 @@ void PoolSynchronizer::sendBlockRequest() {
         return;
     }
 
-    maxRequestedSequence_ = blockChain_->getLastSeq();
-
-    auto requiredBlocks = blockChain_->getRequiredBlocks();
-    auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
-    auto end = neighbour;
     updateSynchroLog();
+
+    auto requiredBlocks = blockChain_->getRequiredBlocks(getMaxNeighbourSequence());
+    if (requiredBlocks.empty()) {
+        return;
+    }
+
+    const auto lastWritten = blockChain_->getLastSeq();
+    const auto cursorCap = lastWritten + kCachedBlocksLimit;
+    const size_t batchCap =
+        cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount;
+    const size_t maxCandidates = batchCap * neighbours_.size();
+
+    auto inFlight = [this](cs::Sequence s) {
+        for (const auto& entry : synchroLog_) {
+            const auto& seqs = std::get<0>(entry.second);
+            if (std::find(seqs.begin(), seqs.end(), s) != seqs.end()) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<cs::Sequence> candidates;
+    candidates.reserve(maxCandidates);
+    for (const auto& interval : requiredBlocks) {
+        for (auto s = interval.first; s <= interval.second && s <= cursorCap; ++s) {
+            if (candidates.size() >= maxCandidates) break;
+            if (!inFlight(s)) candidates.push_back(s);
+        }
+        if (candidates.size() >= maxCandidates) break;
+    }
+
+    if (candidates.empty()) {
+        return;
+    }
+
+    auto neighbour = std::next(neighbours_.begin(), getRandomIndex(neighbours_.size() - 1));
+    const auto end = neighbour;
+    auto seqIt = candidates.begin();
     do {
-        auto neededSequences = getNeededSequences(requiredBlocks, neighbour->second);
-
-        if (neededSequences.empty()) {
-            csdetails() << "SYNC: All sequences already requested";
-            break;
+        if (seqIt == candidates.end()) break;
+        std::vector<cs::Sequence> batch;
+        while (batch.size() < batchCap && seqIt != candidates.end() && *seqIt <= neighbour->second) {
+            batch.push_back(*seqIt);
+            ++seqIt;
         }
-        else {
-            maxRequestedSequence_ = neededSequences.back();
-        }
-        if (checkSynchroLog(neighbour->first)) {
-            cslog() << "SYNC: requesting for " << neededSequences.size()
-                << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
+        if (!batch.empty() && checkSynchroLog(neighbour->first)) {
+            cslog() << "SYNC: requesting for " << batch.size()
+                << " blocks [" << batch.front() << ", " << batch.back()
                 << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
-            emit sendRequest(neighbour->first, neededSequences);
-            addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
+            emit sendRequest(neighbour->first, batch);
+            addSynchroLog(neighbour->first, batch, SyncroMessage::NoAnswer);
         }
-
         ++neighbour;
         if (neighbour == neighbours_.end()) {
             neighbour = neighbours_.begin();
@@ -362,68 +425,46 @@ void PoolSynchronizer::sendBlockRequest() {
     } while (neighbour != end);
 }
 
-std::vector<Sequence> PoolSynchronizer::getNeededSequences(
-    const std::vector<BlockChain::SequenceInterval>& requiredBlocks,
-    Sequence neighbourLastSeq
-) {
-    if (requiredBlocks.empty()) {
-        csdebug() << "SYNC: Required blocks is empty !!!";
-        return {};
-    }
-
-    Sequence sequence = maxRequestedSequence_;
-    std::vector<Sequence> neededSequences;
-
-    for (size_t i = 0; i < cs::ConfigHolder::instance().config()->getPoolSyncSettings().blockPoolsCount; ++i) {
-        ++sequence;
-
-        // max sequence
-        if (requiredBlocks.back().second != 0 && sequence > requiredBlocks.back().second) {
-            break;
-        }
-
-        // current neighbour has no more
-        if (sequence > neighbourLastSeq) {
-            break;
-        }
-
-        //the blocks already requested
-        auto it = synchroLog_.begin();
-        while (it != synchroLog_.end()) {
-            auto& tmpSet = std::get<0>(it->second);
-            if (std::find(tmpSet.begin(), tmpSet.end(), sequence) != tmpSet.end()) {
-                break;
-            }
-            ++it;
-        }
-
-        for (size_t j = 1; j <= requiredBlocks.size(); ++j) {
-            // Within a valid pair
-            if (sequence >= requiredBlocks[j - 1].first && sequence <= requiredBlocks[j - 1].second) {
-                break;
-            }
-            // Between pairs
-            if (sequence > requiredBlocks[j - 1].second && j < requiredBlocks.size() && sequence < requiredBlocks[j].first) {
-                sequence = requiredBlocks[j].first;
-                break;
-            }
-        }
-        neededSequences.push_back(sequence);
-    }
-    return neededSequences;
-}
-
 void PoolSynchronizer::synchroFinished() {
+    const auto neighbourMax = getMaxNeighbourSequence();
+    const auto lastWritten = blockChain_->getLastSeq();
+    if (neighbourMax > lastWritten + 1) {
+        auto required = blockChain_->getRequiredBlocks(neighbourMax);
+        if (!required.empty()) {
+            cswarning() << "SYNC: synchroFinished but " << required.size()
+                        << " required-block range(s) still reported by blockchain";
+        }
+    }
     timer_.stop();
     isSyncroStarted_ = false;
-    maxRequestedSequence_ = kWrongSequence;
+    syncFinishedAtRound_.store(cs::Conveyer::instance().currentRoundNumber(),
+                               std::memory_order_release);
     csdebug() << "SYNC: Synchro finished";
 }
 
-void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+bool PoolSynchronizer::isPostSyncSoaking() const {
+    const auto finishedAt = syncFinishedAtRound_.load(std::memory_order_acquire);
+    if (finishedAt == 0) return false;   // never finished a sync — no soak
+    const auto soakRounds = cs::ConfigHolder::instance().config()
+                                ->getPoolSyncSettings().postSyncSoakRounds;
+    if (soakRounds == 0) return false;
+    const auto currentRound = cs::Conveyer::instance().currentRoundNumber();
+    return currentRound <= finishedAt + soakRounds;   // inclusive: soakRounds=N protects N rounds
+}
+
+void PoolSynchronizer::stop() {
+    // Idempotent: subsequent calls observe stopped_ already true and no-op.
+    bool expected = false;
+    if (!stopped_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return;
     }
+    timer_.stop();
+    isSyncroStarted_ = false;
+    synchroLog_.clear();
+    cslog() << "SYNC: shutdown — pool synchronizer stopped";
+}
+
+void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg) {
     csdebug() << __func__;
     if (msg == SyncroMessage::AwaitAnswer) {
         changeSynchroLog(sender, msg);
@@ -434,19 +475,11 @@ void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessa
 }
 
 void PoolSynchronizer::addSynchroLog(const cs::PublicKey& sender, cs::PoolsRequestedSequences& sequences, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
-    //csdebug() << __func__;
     synchroLog_.emplace(sender, std::make_tuple(sequences, msg, cs::Utils::currentTimestamp()));
     //csdebug() << __func__ << " -> " << synchroLog_.size() << ": key " << cs::Utils::byteStreamToHex(sender) << " added as " << static_cast<int>(msg) << " at " << std::get<2>(synchroLog_[sender]);
 }
 
 bool PoolSynchronizer::changeSynchroLog(const cs::PublicKey& sender, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return true;
-    }
-    //csdebug() << __func__;
     if (synchroLog_.find(sender) == synchroLog_.end()) {
         return false;
     }
@@ -456,32 +489,26 @@ bool PoolSynchronizer::changeSynchroLog(const cs::PublicKey& sender, SyncroMessa
 }
 
 void PoolSynchronizer::updateSynchroLog() {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
-    //csdebug() << __func__ << ":";
     auto timeNow = cs::Utils::currentTimestamp();
     auto it = synchroLog_.begin();
     while (it != synchroLog_.end()) {
         auto msg = std::get<1>(it->second);
         auto timeEvent = std::get<2>(it->second);
-        //csdebug() << cs::Utils::byteStreamToHex(it->first) << ": " << std::get<0>(it->second).back() << ", time: " << timeEvent << ", status: " << static_cast<int>(msg);
-        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + 2000))) {
-            //csdebug() << __func__ << " -> " << synchroLog_.size() << ": key " << cs::Utils::byteStreamToHex(it->first) << " erased";
+        const bool stale =
+            (msg == SyncroMessage::NoAnswer    && timeNow > timeEvent + kNoAnswerEntryTtlMs) ||
+            (msg == SyncroMessage::AwaitAnswer && timeNow > timeEvent + kAwaitAnswerEntryTtlMs) ||
+            (msg != SyncroMessage::NoAnswer && msg != SyncroMessage::AwaitAnswer
+                                            && timeNow > timeEvent + 50000);
+        if (stale) {
             it = synchroLog_.erase(it);
         }
         else {
             ++it;
         }
     }
-    //csdebug() << __func__ << ": finished";
 }
 
 bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return true;
-    }
-    //csdebug() << __func__;
     auto it = synchroLog_.find(sender);
     if (it == synchroLog_.end()) {
         return false;
@@ -492,14 +519,11 @@ bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
 }
 
 bool PoolSynchronizer::checkSynchroLog(const cs::PublicKey& sender) { //is true when we can request blocks's set
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return true;
-    }
     auto it = synchroLog_.find(sender);
     if (synchroLog_.find(sender) != synchroLog_.end()) {
         auto timeEvent = std::get<2>(it->second);
         auto timeNow = cs::Utils::currentTimestamp();
-        if (std::get<1>(it->second) == SyncroMessage::AwaitAnswer || (std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow < timeEvent + 500)) {
+        if (std::get<1>(it->second) == SyncroMessage::AwaitAnswer || (std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow < timeEvent + kPerPeerCooldownMs)) {
             //csdebug() << __func__ << ": key " << cs::Utils::byteStreamToHex(sender) << " is still busy";
             return false;
         }

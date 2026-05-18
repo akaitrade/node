@@ -2,9 +2,11 @@
 #ifndef CONFIG_HPP
 #define CONFIG_HPP
 
+#include <map>
 #include <string>
 
 #include <boost/asio.hpp>
+#include <boost/log/trivial.hpp>
 #include <boost/log/utility/setup/settings.hpp>
 #include <boost/program_options.hpp>
 
@@ -56,6 +58,7 @@ enum BootstrapType {
 struct PoolSyncData {
     cs::Sequence blockPoolsCount = 100;              // max block count in one request: cannot be 0
     uint16_t sequencesVerificationFrequency = 350;   // sequences received verification frequency : 0-never; 1-once per round: other- in ms;
+    uint16_t postSyncSoakRounds = 2;                 // refuse Trusted role for N rounds after synchroFinished (0 = disable)
 };
 
 struct ApiData {
@@ -123,6 +126,14 @@ struct EventsReportData {
     bool reject_contract_consensus = true;
     // invalid block detected by node
     bool alarm_invalid_block = true;
+};
+
+struct WatchdogData {
+    bool   enabled         = true;    // master switch
+    size_t checkInterval   = 60;      // seconds between samples
+    size_t stuckThreshold  = 10;      // minutes of no-progress before firing
+    bool   emitTelemetry   = true;    // send StuckDetected to event_report
+    bool   kickEnabled     = false;   // opt-in: call Node::processSync() on stuck
 };
 
 struct DbSQLData {
@@ -210,8 +221,16 @@ public:
         return loggerSettings_;
     }
 
+    const std::map<std::string, boost::log::trivial::severity_level>& getLogChannelLevels() const {
+        return logChannelLevels_;
+    }
+
     const PoolSyncData& getPoolSyncSettings() const {
         return poolSyncData_;
+    }
+
+    const WatchdogData& getWatchdogSettings() const {
+        return watchdogData_;
     }
 
     const ApiData& getApiSettings() const {
@@ -342,11 +361,14 @@ private:
     static Config readFromFile(const std::string& fileName);
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
+    void setLoggerSettingsFromFile(const std::string& fileName);
+    void readLogChannelLevels(const boost::property_tree::ptree& config);
     void readPoolSynchronizerData(const boost::property_tree::ptree& config);
     void readApiData(const boost::property_tree::ptree& config);
     void readConveyerData(const boost::property_tree::ptree& config);
     void readEventsReportData(const boost::property_tree::ptree& config);
     void readDbSQLData(const boost::property_tree::ptree& config);
+    void readWatchdogData(const boost::property_tree::ptree& config);
 
     bool readKeys(const std::string& pathToPk, const std::string& pathToSk, const bool encrypt);
     void showKeys(const std::string& pk58);
@@ -388,10 +410,12 @@ private:
     cs::PrivateKey privateKey_{};
 
     boost::log::settings loggerSettings_{};
+    std::map<std::string, boost::log::trivial::severity_level> logChannelLevels_;
 
     PoolSyncData poolSyncData_;
     ApiData apiData_;
     DbSQLData dbSQLData_;
+    WatchdogData watchdogData_;
 
     bool showBalanceChange_ = false;
     bool alwaysExecuteContracts_ = false;

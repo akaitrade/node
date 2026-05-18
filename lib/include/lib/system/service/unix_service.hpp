@@ -164,19 +164,24 @@ inline void Service::waitForSignals() {
 }
 
 inline void Service::doWork() {
+    // mux_ released before onInit so signals dispatch during slow-start.
     {
         lock_type lock(mux_);
         threadsStatus_.workerReady = true;
-        bool ok = owner_.onInit(serviceName_);
         cv_.notify_all();
+    }
 
+    bool ok = owner_.onInit(serviceName_);
+
+    {
+        lock_type lock(mux_);
         if (!ok) {
             threadsStatus_.error = true;
+            threadsStatus_.workerReady = true;
+            cv_.notify_all();
             return;
         }
-
         cv_.wait(lock, [this]() { return threadsStatus_.mainReady; });
-
         if (threadsStatus_.error) {
             return;
         }
