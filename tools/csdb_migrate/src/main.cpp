@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -53,6 +54,8 @@ struct Args {
     size_t bundle_size = 0;              // experimental: pack N blocks per BDB record (0 = disabled)
     bool bundle_compress = false;        // LZ4-compress each bundle value before put_recno
     bool pubkey_remap = false;           // experimental: rewrite tx src/tgt + confidants as wallet_id refs
+    bool validator_pack = false;         // produce a validator pack: last N blocks + head_floor.bin
+    size_t validator_retain = 0;         // rolling-window depth N (required when validator_pack=true)
 };
 
 // Reserved user_field id for the experimental confidant-set reference. Out of
@@ -81,7 +84,9 @@ void print_usage() {
         "  --confidant-sets-out F   Override the side-file path (default: <dst>/confidant_sets.bin)\n"
         "  --bundle-size N          Experimental: pack N consecutive blocks into one BDB record (key = first_seq/N + 1). Requires --dst-backend berkeley. Skips Storage. dst is NOT node-loadable.\n"
         "  --bundle-compress        LZ4-compress each bundle value before write (use with --bundle-size).\n"
-        "  --pubkey-remap           Experimental: rewrite every transaction's source/target as wallet-id Address (4B) and pack confidants into user_field 99 as a [count:2][ids:n*4] blob. Pass 1 scans src to build the dict; pass 2 rewrites and writes. Emits 'pubkey_dict.bin'. Combine with --bundle-size and/or --bundle-compress. dst is NOT node-loadable.\n";
+        "  --pubkey-remap           Experimental: rewrite every transaction's source/target as wallet-id Address (4B) and pack confidants into user_field 99 as a [count:2][ids:n*4] blob. Pass 1 scans src to build the dict; pass 2 rewrites and writes. Emits 'pubkey_dict.bin'. Combine with --bundle-size and/or --bundle-compress. dst is NOT node-loadable.\n"
+        "  --validator-pack         Produce a validator pack: copies only the most recent --retain blocks and writes head_floor.bin to dst. Use with a fresh dst dir; also copy <src>/qs and <src>/{trxIndex,blockhashes} into dst manually.\n"
+        "  --retain N               Rolling-window depth in blocks (required with --validator-pack, N>=200).\n";
 }
 
 bool parse_size(const char* s, size_t& out) {
@@ -123,8 +128,19 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (k == "--bundle-size") { auto v = need_value("--bundle-size"); if (!v) return false; if (!parse_size(v, a.bundle_size)) return false; }
         else if (k == "--bundle-compress") { a.bundle_compress = true; }
         else if (k == "--pubkey-remap") { a.pubkey_remap = true; }
+        else if (k == "--validator-pack") { a.validator_pack = true; }
+        else if (k == "--retain") {
+            auto v = need_value("--retain"); if (!v) return false;
+            if (!parse_size(v, a.validator_retain)) return false;
+        }
         else if (k == "--help" || k == "-h") { print_usage(); return false; }
         else { std::cerr << "unknown argument: " << k << "\n"; print_usage(); return false; }
+    }
+    if (a.validator_pack) {
+        if (a.validator_retain < 200) {
+            std::cerr << "--validator-pack requires --retain N with N>=200\n";
+            return false;
+        }
     }
     if (a.src.empty() || a.dst.empty()) { print_usage(); return false; }
     return true;
@@ -1098,6 +1114,32 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (args.validator_pack) {
+        // Derive --from/--to from the source tip so the pack contains only
+        // the last `--retain` blocks. new_iterator() is virtual-private on
+        // DatabaseBerkeleyDB; call it through the Database& base reference.
+        csdb::Database& src_base = src_db;
+        auto it = src_base.new_iterator();
+        if (!it) {
+            std::cerr << "validator-pack: cannot iterate src to find tip\n";
+            return 1;
+        }
+        it->seek_to_last();
+        if (!it->is_valid()) {
+            std::cerr << "validator-pack: src is empty\n";
+            return 1;
+        }
+        const cs::Sequence srcTip = static_cast<cs::Sequence>(it->key());
+        const cs::Sequence floor = (srcTip + 1 > args.validator_retain)
+            ? (srcTip + 1 - args.validator_retain)
+            : 0;
+        args.from = floor;
+        args.to = srcTip;
+        std::cout << "validator-pack: srcTip=" << srcTip
+                  << "  retain=" << args.validator_retain
+                  << "  range=[" << args.from << ", " << args.to << "]\n";
+    }
+
     // Polymorphic destination: keep a base shared_ptr for Storage and a typed
     // pointer to the RocksDB instance (when applicable) for the bulk-load /
     // compact_full hooks that don't exist on BerkeleyDB. open() is on each
@@ -1393,6 +1435,28 @@ int main(int argc, char** argv) {
         if (!verify_balances(vb_src, vb_dst, args)) {
             return 1;
         }
+    }
+
+    if (args.validator_pack) {
+        const cs::Sequence floor = args.from;
+        const fs::path finalPath = fs::path(args.dst) / "head_floor.bin";
+        const fs::path tmpPath   = fs::path(args.dst) / "head_floor.bin.tmp";
+        {
+            std::ofstream ofs(tmpPath.string(), std::ios::binary | std::ios::trunc);
+            ofs.write(reinterpret_cast<const char*>(&floor), sizeof(floor));
+            ofs.flush();
+        }
+        boost::system::error_code ec;
+        fs::rename(tmpPath, finalPath, ec);
+        if (ec) {
+            std::cerr << "validator-pack: failed to write head_floor.bin: " << ec.message() << "\n";
+            return 1;
+        }
+        std::cout << "validator-pack: wrote head_floor.bin = " << floor << "\n"
+                  << "validator-pack: NEXT STEPS — copy these into " << args.dst << " manually:\n"
+                  << "  <src>/qs/<latest>   -> <dst>/qs/0\n"
+                  << "  <src>/trxIndex/     -> <dst>/trxIndex/\n"
+                  << "  <src>/blockhashes/  -> <dst>/blockhashes/\n";
     }
 
     return 0;

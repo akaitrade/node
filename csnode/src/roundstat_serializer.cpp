@@ -2,8 +2,9 @@
 #include <sstream>
 #include <exception>
 
-#include <boost/archive/binary_oarchive.hpp>
-#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp> // legacy-format fallback on load
 
 #include <csnode/roundstat_serializer.hpp>
 #include <csnode/serializers_helper.hpp>
@@ -35,7 +36,7 @@ namespace cs {
 
     void RoundStat_Serializer::save(const std::filesystem::path& rootDir) {
         std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
-        boost::archive::binary_oarchive oa(ofs);
+        boost::archive::text_oarchive oa(ofs);
         csdebug() << kLogPrefix << __func__;
         roundStat_->printClassInfo();
         oa << roundStat_->serialize();
@@ -45,7 +46,7 @@ namespace cs {
         {
             std::ofstream ofs(kDataFileName, std::ios::binary);
             {
-                boost::archive::binary_oarchive oa(
+                boost::archive::text_oarchive oa(
                     ofs,
                     boost::archive::no_header | boost::archive::no_codecvt
                 );
@@ -61,11 +62,28 @@ namespace cs {
 
 
     void RoundStat_Serializer::load(const std::filesystem::path& rootDir) {
-        std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
-        boost::archive::binary_iarchive ia(ifs);
         csdebug() << kLogPrefix << __func__;
+        const auto path = rootDir / kDataFileName;
         Bytes data;
-        ia >> data;
+        // Try the current (text, cross-OS portable) format first; on parse error,
+        // fall back to the legacy binary archive so checkpoints saved by older
+        // nodes still load. After the next QS save the file is rewritten as text.
+        bool loaded = false;
+        try {
+            std::ifstream ifs(path, std::ios::binary);
+            boost::archive::text_iarchive ia(ifs);
+            ia >> data;
+            loaded = true;
+        }
+        catch (const std::exception& e) {
+            csinfo() << kLogPrefix << "text archive read failed (" << e.what()
+                     << "); trying legacy binary";
+        }
+        if (!loaded) {
+            std::ifstream ifs(path, std::ios::binary);
+            boost::archive::binary_iarchive ia(ifs);
+            ia >> data;
+        }
         roundStat_->deserialize(data);
         printClassInfo();
     }

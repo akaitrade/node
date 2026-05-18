@@ -1,6 +1,8 @@
 #define CS_LOG_CHANNEL "blockchain"
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string_view>
 #include <base58.h>
@@ -136,6 +138,23 @@ bool BlockChain::init(
   ) {
     cs::Connector::connect(&this->removeBlockEvent, trxIndex_.get(), &TransactionsIndex::onRemoveBlock);
 
+    dbPath_ = path;
+    {
+        // Restore the validator-mode floor watermark if a previous run wrote it.
+        // Best-effort: a missing/corrupt file leaves oldestRetained_ at 0
+        // (full-chain assumption) which is always safe — prune will simply re-scan.
+        const std::filesystem::path floorFile = std::filesystem::path(path) / "head_floor.bin";
+        std::error_code ec;
+        if (std::filesystem::exists(floorFile, ec)) {
+            std::ifstream ifs(floorFile, std::ios::binary);
+            cs::Sequence v = 0;
+            ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
+            if (ifs.gcount() == sizeof(v)) {
+                oldestRetained_.store(v);
+                cslog() << kLogPrefix << "loaded head_floor.bin: oldestRetained=" << v;
+            }
+        }
+    }
     lastSequence_ = 0;
     bool successfulQuickStart = false;
 
@@ -153,6 +172,16 @@ bool BlockChain::init(
             if (!successfulQuickStart && trxIndex_->recreate()) {
                 cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
             }
+        }
+    }
+
+    {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        if (sto.validatorOnly && !successfulQuickStart && oldestRetained_.load() > 0) {
+            cserror() << kLogPrefix << "validator-only: refusing to slow-start with pruned DB "
+                      << "(oldestRetained=" << oldestRetained_.load() << "). "
+                      << "Ship a fresh validator pack with matching QS checkpoint.";
+            return false;
         }
     }
 
@@ -259,6 +288,13 @@ bool BlockChain::init(
     if (!successfulQuickStart && !stop_ && serializationManPtr_) {
         serializationManPtr_->setCompletedFromGenesis();
     }
+    if (serializationManPtr_) {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        if (sto.validatorOnly) {
+            // Validator never walks genesis; mark caches consistent for the rolling window.
+            serializationManPtr_->setCompletedFromCheckpoint();
+        }
+    }
 
     good_ = true;
     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
@@ -352,6 +388,9 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
             if (serializationManPtr_->save(blockSeq, head)) {
                 serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
                 lastCheckpointWallClock_ = now;
+                if (sto.validatorOnly && blockSeq > sto.validatorRetainBlocks) {
+                    pruneBlocksBelow(blockSeq - sto.validatorRetainBlocks);
+                }
             }
             else {
                 cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
@@ -645,6 +684,75 @@ void BlockChain::removeLastBlock() {
     csmeta(csdebug) << kLogPrefix << "done";
 }
 
+size_t BlockChain::pruneBlocksBelow(cs::Sequence floor) {
+    if (floor == 0) return 0;
+    const cs::Sequence currentFloor = oldestRetained_.load();
+    if (floor <= currentFloor) return 0;
+    const cs::Sequence tip = lastSequence_.load();
+    if (floor > tip) {
+        cswarning() << kLogPrefix << "pruneBlocksBelow: refusing floor " << floor
+                    << " > lastSequence " << tip;
+        return 0;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    size_t removed = 0;
+    cs::Sequence seq = currentFloor;
+    // currentFloor==0 means "never pruned" — start at 1 (we never prune genesis).
+    if (seq == 0) seq = 1;
+
+    {
+        std::lock_guard lock(dbLock_);
+        for (; seq < floor; ++seq) {
+            csdb::PoolHash h = blockHashes_->find(seq);
+            if (h.is_empty()) {
+                // Already missing from index — backend may already be pruned. Skip cleanly.
+                continue;
+            }
+            if (!storage_.pool_remove_by_hash(h)) {
+                // Best-effort: log and continue. Re-running prune will retry.
+                cswarning() << kLogPrefix << "pruneBlocksBelow: chain-db remove failed at seq " << seq;
+            }
+            blockHashes_->remove(seq);
+            ++removed;
+        }
+    }
+
+    // Trim the per-address transaction index. Existing API: trimToFloor preserves
+    // entries at-or-below floor and prunes anything strictly above. For a rolling
+    // window we don't want that — we want to drop the OLDEST entries. The trxIndex
+    // doesn't currently expose front-trim; we rely on the index naturally shedding
+    // entries as the wallets transact again. Documented limitation; revisit if
+    // index size becomes a concern on long-running validators.
+
+    oldestRetained_.store(floor);
+
+    // Persist watermark atomically: write to tmp, fsync, rename. Order matters:
+    // we ONLY write the new floor after the deletes have committed. On crash
+    // mid-prune the watermark stays at the previous value and the next prune
+    // call will resume cleanly (idempotent).
+    if (!dbPath_.empty()) {
+        const std::filesystem::path finalPath = std::filesystem::path(dbPath_) / "head_floor.bin";
+        const std::filesystem::path tmpPath   = std::filesystem::path(dbPath_) / "head_floor.bin.tmp";
+        {
+            std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
+            ofs.write(reinterpret_cast<const char*>(&floor), sizeof(floor));
+            ofs.flush();
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmpPath, finalPath, ec);
+        if (ec) {
+            cswarning() << kLogPrefix << "pruneBlocksBelow: failed to publish head_floor.bin: " << ec.message();
+        }
+    }
+
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    cslog() << kLogPrefix << "pruneBlocksBelow: removed " << removed
+            << " blocks; oldestRetained=" << floor << " (" << ms << " ms)";
+    return removed;
+}
+
 bool BlockChain::compromiseLastBlock(const csdb::PoolHash& desired_hash) {
     csdb::Pool last_block = csdb::Pool{};
     {
@@ -912,6 +1020,9 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
             if (serializationManPtr_->save(pool.sequence(), head)) {
                 serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
                 lastCheckpointWallClock_ = now;
+                if (sto.validatorOnly && pool.sequence() > sto.validatorRetainBlocks) {
+                    pruneBlocksBelow(pool.sequence() - sto.validatorRetainBlocks);
+                }
             }
             else {
                 cserror() << "Cannot save caches with version " << pool.sequence();

@@ -62,6 +62,9 @@ public:
     // genesis-to-head walk at some point. Cleared on a fresh init, set by
     // BlockChain after Storage::open returns from a successful slow walk.
     void setCompletedFromGenesis();
+    // Sticky bit indicating the caches are consistent for the live rolling
+    // window but were not walked from genesis. Set in validator-only mode.
+    void setCompletedFromCheckpoint();
     bool isLoadedFromCompletedSnapshot() const;
     void pruneCheckpoints(size_t keep);
 

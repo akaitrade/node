@@ -76,6 +76,11 @@ struct StorageData {
     size_t checkpointKeep = 5;              // retained periodic checkpoints (qs/0 always kept on top)
     size_t checkpointEvery = 50'000;        // blocks between periodic checkpoints (rolling history depth = checkpointEvery * checkpointKeep)
     size_t checkpointEveryMinutes = 0;      // wall-clock fallback: also save if this many minutes elapsed since last save (0 = disabled; opt-in for slow networks)
+    // Validator-only mode: node participates in consensus but keeps only a rolling window of recent
+    // blocks and refuses to serve historical block-sync requests from peers.
+    bool   validatorOnly         = false;   // master switch
+    size_t validatorRetainBlocks = 10'000;  // rolling window depth in blocks (hard-min enforced at startup)
+    bool   validatorRefuseSync   = true;    // refuse BlockRequest/BlockHash replies when validatorOnly
 };
 
 struct ApiData {

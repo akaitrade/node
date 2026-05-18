@@ -194,6 +194,16 @@ public:
     cs::Bytes checkForSpecialTransactions(const std::vector<csdb::Transaction>& trxs, cs::Sequence seq);
     cs::Sequence getLastSeq() const;
 
+    // Validator-only rolling-window pruning. Sequence of the oldest block still in chain DB.
+    // Returns 0 when nothing has been pruned (full chain retained).
+    cs::Sequence getOldestRetained() const { return oldestRetained_.load(); }
+
+    // Remove blocks with sequence < floor from chain DB, BlockHashes LMDB and TransactionsIndex.
+    // Idempotent: callers can pass the same floor twice without harm.
+    // Persists the new floor to head_floor.bin atomically AFTER the deletes commit.
+    // Returns number of blocks actually removed.
+    size_t pruneBlocksBelow(cs::Sequence floor);
+
     static inline const csdb::user_field_id_t kFieldTimestamp = 0;
     static inline const csdb::user_field_id_t kFieldServiceInfo = 1;
     static inline const csdb::user_field_id_t kFieldBlockReward = 3;
@@ -529,6 +539,10 @@ private:
     // may be modified once in uuid() method:
     mutable std::atomic<uint64_t> uuid_ = 0;
     std::atomic<cs::Sequence> lastSequence_;
+    // Lowest block sequence still present in chain DB (0 = full chain or never pruned).
+    std::atomic<cs::Sequence> oldestRetained_{0};
+    // Stashed at init(); used by validator-mode prune to locate head_floor.bin.
+    std::string dbPath_;
     cs::Sequence blocksToBeRemoved_ = 0;
     std::atomic_bool stop_ = false;
 

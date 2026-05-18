@@ -142,6 +142,22 @@ bool Node::init() {
         transport_->setPermanentNeighbours(initialConfidants_);
     }
 
+    {
+        const auto& sd = cs::ConfigHolder::instance().config()->getStorageSettings();
+        if (sd.validatorOnly) {
+            cslog() << "============================================================";
+            cslog() << " VALIDATOR-ONLY MODE";
+            cslog() << "   retain_blocks   = " << sd.validatorRetainBlocks;
+            cslog() << "   refuse_sync     = " << (sd.validatorRefuseSync ? "true" : "false");
+            cslog() << "   db_backend      = " << sd.dbBackend;
+            cslog() << "   checkpoint_every= " << sd.checkpointEvery
+                    << "   keep= " << sd.checkpointKeep;
+            cslog() << " This node will participate in consensus but will not serve";
+            cslog() << " historical blocks to peers.";
+            cslog() << "============================================================";
+        }
+    }
+
 #ifdef NODE_API
     std::cout << "Init API... ";
 
@@ -850,8 +866,16 @@ bool Node::canBeTrusted(bool critical) {
         return false;
     }
 
-    if (!solver_->smart_contracts().executionAllowed()) {
-        return false;
+    {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        if (!sto.validatorOnly) {
+            if (!solver_->smart_contracts().executionAllowed()) {
+                return false;
+            }
+        }
+        // Validator-mode nodes never run the executor; we still want them to be Trusted-eligible.
+        // The SC-packet verification path (IterValidator::checkSignaturesSmartSource) only reads
+        // recent-block confidants, which the rolling window covers by orders of magnitude.
     }
 
     return true;
@@ -1753,6 +1777,16 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
         csmeta(cserror) << "Sequences size is 0";
         sendSyncroMessage(cs::SyncroMessage::IncorrectRequest, sender);
         return;
+    }
+
+    {
+        const auto& sd = cs::ConfigHolder::instance().config()->getStorageSettings();
+        if (sd.validatorOnly && sd.validatorRefuseSync) {
+            csdebug() << "NODE> validator-only: refusing block request from "
+                      << cs::Utils::byteStreamToHex(sender);
+            sendSyncroMessage(cs::SyncroMessage::NoSuchBlocks, sender);
+            return;
+        }
     }
 
     if (!checkSynchroRequestsLog(sender, sequences.back())) {

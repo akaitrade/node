@@ -348,7 +348,14 @@ void IterValidator::checkSignaturesSmartSource(SolverContext& context, cs::Packe
 
             csdb::Pool poolWithInitTr = context.blockchain().loadBlock(smartRef.sequence);
             if (!poolWithInitTr.is_valid()) {
-                cslog() << kLogPrefix << "failed to load block with init transaction";
+                const auto floor = context.blockchain().getOldestRetained();
+                if (floor > 0 && smartRef.sequence < floor) {
+                    cswarning() << kLogPrefix << "validator: SC ref sequence " << smartRef.sequence
+                                << " is below rolling-window floor " << floor
+                                << "; rejecting packet (cannot verify)";
+                } else {
+                    cslog() << kLogPrefix << "failed to load block with init transaction";
+                }
                 smartSourceInvalidSignatures_.insert(transaction.source());
                 continue;
             }

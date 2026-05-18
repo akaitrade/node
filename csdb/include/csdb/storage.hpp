@@ -247,6 +247,15 @@ public:
      bool pool_remove_(cs::Sequence testSequence);
 
     /**
+     * @brief Remove a pool from storage by its hash, regardless of position.
+     *        Used by validator-mode rolling-window pruning. Does not touch
+     *        last_hash or count_pool semantics (those track the tip, which
+     *        is unaffected by old-block removal).
+     * @return true on success
+     */
+    bool pool_remove_by_hash(const PoolHash& hash);
+
+    /**
      * @brief Requesting the transaction using transaction id (pool.number_in_pool).
      * @param[in] id transaction id
      * @return Transaction object. If transaction with such id can't be found in the storage,

@@ -1216,6 +1216,22 @@ bool Storage::pool_remove_(cs::Sequence testSequence) {
     return false;
 }
 
+bool Storage::pool_remove_by_hash(const PoolHash& hash) {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    if (hash.is_empty()) {
+        d->set_last_error(InvalidParameter, "%s: Empty hash passed", funcName());
+        return false;
+    }
+    if (!d->db->remove(hash.to_binary())) {
+        return false;
+    }
+    d->set_last_error();
+    return true;
+}
+
 Wallet Storage::wallet(const Address& addr) const {
     return Wallet::get(addr);
 }

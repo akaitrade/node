@@ -87,6 +87,9 @@ const std::string PARAM_NAME_STORAGE_ROCKSDB_MEMTABLE_MB = "rocksdb_memtable_mb"
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_KEEP = "checkpoint_keep";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY = "checkpoint_every";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES = "checkpoint_every_minutes";
+const std::string PARAM_NAME_STORAGE_VALIDATOR_ONLY = "validator_only";
+const std::string PARAM_NAME_STORAGE_VALIDATOR_RETAIN_BLOCKS = "validator_retain_blocks";
+const std::string PARAM_NAME_STORAGE_VALIDATOR_REFUSE_SYNC = "validator_refuse_sync";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -1049,6 +1052,24 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
         storageData_.checkpointEvery = 1000;
     }
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES, storageData_.checkpointEveryMinutes);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VALIDATOR_ONLY, storageData_.validatorOnly);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VALIDATOR_RETAIN_BLOCKS, storageData_.validatorRetainBlocks);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_VALIDATOR_REFUSE_SYNC, storageData_.validatorRefuseSync);
+    if (storageData_.validatorOnly) {
+        constexpr size_t kValidatorRetainMin = 200;
+        if (storageData_.validatorRetainBlocks < kValidatorRetainMin) {
+            cswarning() << "config: validator_retain_blocks=" << storageData_.validatorRetainBlocks
+                        << " below hard minimum " << kValidatorRetainMin << "; clamping";
+            storageData_.validatorRetainBlocks = kValidatorRetainMin;
+        }
+        const size_t qsOverlap = storageData_.checkpointEvery * (storageData_.checkpointKeep + 1);
+        if (storageData_.validatorRetainBlocks < qsOverlap) {
+            cswarning() << "config: validator_retain_blocks=" << storageData_.validatorRetainBlocks
+                        << " is less than checkpoint_every*(checkpoint_keep+1)=" << qsOverlap
+                        << "; raising to preserve QS↔chain overlap";
+            storageData_.validatorRetainBlocks = qsOverlap;
+        }
+    }
 }
 
 void Config::readWatchdogData(const boost::property_tree::ptree& config) {

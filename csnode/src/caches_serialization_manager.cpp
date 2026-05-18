@@ -89,10 +89,15 @@ struct CachesSerializationManager::Impl {
     static constexpr uint8_t kCurrentSchemaVersion = 1;
     static constexpr uint32_t kHeadMagic = 0x44414548u; // "HEAD" LE
     static constexpr uint8_t kSentinelCompletedFromGenesisBit = 1 << 0;
+    // Set by validator-mode checkpoints: caches are consistent for the rolling
+    // window but were NOT walked from genesis. Full-node bootstraps must NOT
+    // treat such checkpoints as a genesis-completion proof.
+    static constexpr uint8_t kSentinelCompletedFromCheckpointBit = 1 << 1;
     const std::vector <std::string> hashesDivisions = {"blockchain", "smartcontracts","walletscache","walletsIds","roundstat","tokensmaster","apihandler"};
 
     std::optional<CheckpointHead> loadedHead_{};
     bool completedFromGenesis_ = false;
+    bool completedFromCheckpoint_ = false;
     bool loadedFromCompleted_ = false;
 
     enum BindBits {
@@ -245,7 +250,8 @@ struct CachesSerializationManager::Impl {
     void saveSentinel(const std::filesystem::path& dir) {
         std::ofstream f(dir / kSentinelFile, std::ios::binary);
         uint8_t flags = 0;
-        if (completedFromGenesis_) flags |= kSentinelCompletedFromGenesisBit;
+        if (completedFromGenesis_)    flags |= kSentinelCompletedFromGenesisBit;
+        if (completedFromCheckpoint_) flags |= kSentinelCompletedFromCheckpointBit;
         f.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
     }
 
@@ -712,6 +718,10 @@ std::optional<CheckpointHead> CachesSerializationManager::getLoadedHead() const 
 
 void CachesSerializationManager::setCompletedFromGenesis() {
     pImpl_->completedFromGenesis_ = true;
+}
+
+void CachesSerializationManager::setCompletedFromCheckpoint() {
+    pImpl_->completedFromCheckpoint_ = true;
 }
 
 bool CachesSerializationManager::isLoadedFromCompletedSnapshot() const {
