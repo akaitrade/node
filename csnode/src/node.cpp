@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <csignal>
+#include <filesystem>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -108,6 +109,7 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&blockChain_.tryToStoreBlockEvent, this, &Node::deepBlockValidation);
     cs::Connector::connect(&blockChain_.stopNode, this, &Node::stop);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::processSpecialInfo);
+    cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::retireColdStartFederation);
     cs::Connector::connect(&blockChain_.uncertainBlock, this, &Node::sendBlockRequestToConfidants);
     cs::Connector::connect(&blockChain_.orderNecessaryBlock, this, &Node::sendNecessaryBlockRequest);
     cs::Connector::connect(&stat_.accountInitiationRequest, this, &Node::accountInitiationRequest);
@@ -237,8 +239,18 @@ bool Node::init() {
         return false;
     }
 
-    if (initialConfidants_.size() < Consensus::MinTrustedNodes) {
+    // Plan §3.2 B7: only meaningful on cold start. Post-genesis the chain uses lastBlockConfidants().
+    if (isColdStart() && initialConfidants_.size() < Consensus::MinTrustedNodes) {
         cslog() << "After reading blockchain, bootstrap nodes number is " << initialConfidants_.size();
+    }
+
+    // Plan §3.2 B5: on a post-genesis chain, repin permanent neighbours to lastBlockConfidants();
+    // initialConfidants_ is the cold-start federation only.
+    if (!isColdStart()) {
+        const auto lbc = lastBlockConfidants();
+        if (lbc.find(solver_->getPublicKey()) != lbc.end()) {
+            transport_->setPermanentNeighbours(lbc);
+        }
     }
 
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
@@ -274,7 +286,8 @@ bool Node::init() {
         tryResolveHashProblems();
     }
  
-    initBootstrapRP(initialConfidants_);
+    // Plan §3.2 B7: post-genesis seeds bootstrap RP from on-chain confidants, not the static federation.
+    initBootstrapRP(isColdStart() ? initialConfidants_ : lastBlockConfidants());
     EventReport::sendRunningStatus(*this, Running::Status::Run);
     globalPublicKey_.fill(0);
     globalPublicKey_.at(31) = 7U;
@@ -307,11 +320,22 @@ void Node::setupNextMessageBehaviour() {
 
 void Node::printInitialConfidants() {
     const cs::PublicKey& own_key = solver_->getPublicKey();
-    csinfo() << "Initial confidants: ";
-    for (const auto& item : initialConfidants_) {
-        const auto beg = item.data();
-        const auto end = beg + item.size();
-        csinfo() << "NODE> " << " - " << EncodeBase58(beg, end) << (item == own_key ? " (me)" : "");
+    // Plan §3.2 B7: cosmetic; only print initialConfidants_ on cold start.
+    if (isColdStart()) {
+        csinfo() << "Initial confidants: ";
+        for (const auto& item : initialConfidants_) {
+            const auto beg = item.data();
+            const auto end = beg + item.size();
+            csinfo() << "NODE> " << " - " << EncodeBase58(beg, end) << (item == own_key ? " (me)" : "");
+        }
+    }
+    else {
+        csinfo() << "Last-block confidants: ";
+        for (const auto& item : lastBlockConfidants()) {
+            const auto beg = item.data();
+            const auto end = beg + item.size();
+            csinfo() << "NODE> " << " - " << EncodeBase58(beg, end) << (item == own_key ? " (me)" : "");
+        }
     }
 }
 
@@ -399,7 +423,8 @@ void Node::onSuccessQS(csdb::Amount blockReward, csdb::Amount miningCoeff, bool 
     Consensus::miningOn = miningOn;
     Consensus::blockReward = blockReward;
     Consensus::miningCoefficient = miningCoeff;
-    Consensus::TimeMinStage1 = stageOneHashesTime;
+    // Defensive: legacy persisted state may carry a 0 here.
+    Consensus::TimeMinStage1 = (stageOneHashesTime < 100) ? 500 : stageOneHashesTime;
     std::string msg;
     std::string miningStr = Consensus::miningOn ? "true" : "false";
     std::string stakingStr = Consensus::stakingOn ? "true" : "false";
@@ -468,10 +493,17 @@ uint8_t Node::calculateBootStrapWeight(cs::PublicKeys& confidants) {
     if (confSize > 8) {
         return currentWeight;
     }
-    //auto it = initialConfidants_.cbegin();
+    // Plan §0 Gap #1: post-genesis weight is position in lastBlockConfidants();
+    // cold start keeps the historical initialConfidants_ behaviour.
+    const std::set<cs::PublicKey> authority = isColdStart()
+        ? initialConfidants_
+        : lastBlockConfidants();
     auto itConfidants = confidants.cbegin();
     --confSize;
-    for (auto it : initialConfidants_) {
+    for (auto it : authority) {
+        if (itConfidants == confidants.cend()) {
+            break;
+        }
         if (std::equal(it.cbegin(), it.cend(), itConfidants->cbegin())) {
             currentWeight += 1 << confSize;
             ++itConfidants;
@@ -495,20 +527,30 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
     stream >> confSize;
     csdebug() << "NODE> Number of confidants :" << cs::numeric_cast<int>(confSize);
 
-    if (confSize < Consensus::MinTrustedNodes || confSize > Consensus::MaxTrustedNodes) {
-        cswarning() << "Bad confidants num";
+    // DECENTRALIZATION_PLAN §3.2 B3: accept recovery tables with >= 2/3 of lastBlockConfidants().
+    // Cold start (empty chain) falls back to MinTrustedNodes as the historical floor.
+    const auto authority = lastBlockConfidants();
+    const size_t confSizeMin = authority.empty()
+        ? static_cast<size_t>(Consensus::MinTrustedNodes)
+        : std::max<size_t>(1, (authority.size() * 2 + 2) / 3);
+    if (confSize < confSizeMin || confSize > Consensus::MaxTrustedNodes) {
+        cswarning() << "Bad confidants num " << static_cast<int>(confSize)
+                    << " (min " << confSizeMin << ", authority=" << authority.size() << ")";
         return;
     }
 
     cs::ConfidantsKeys confidants;
     confidants.reserve(confSize);
 
+    // Plan §0 Gap #5: the `unknown` admin-signature branch is cold-start-only by design.
+    // Post-genesis initialConfidants_ is retired (empty), and authority is enforced by
+    // verifyBootstrapQuorum() in the post-activation branch — not by an admin signature.
     bool unknown = false;
     for (int i = 0; i < confSize; ++i) {
         cs::PublicKey key;
         stream >> key;
         confidants.push_back(std::move(key));
-        if (initialConfidants_.find(key) == initialConfidants_.cend()) {
+        if (isColdStart() && initialConfidants_.find(key) == initialConfidants_.cend()) {
             unknown = true;
         }
     }
@@ -1063,6 +1105,11 @@ void Node::getCharacteristic(cs::RoundPackage& rPackage) {
     auto tmp = rPackage.poolSignatures();
     pool.value().set_signatures(tmp);
     pool.value().set_confidants(confidantsReference);
+    // Plan §0 invariant: post-H_activate blocks include kFieldWriterVersion in their hash.
+    // The writer adds it in solvercore.cpp; receivers must add it here so pool.hash() matches.
+    if (pool.value().sequence() >= Consensus::H_activate_decentralization) {
+        pool.value().add_user_field(BlockChain::kFieldWriterVersion, static_cast<uint64_t>(NODE_VERSION));
+    }
     auto tmpPool = solver_->getDeferredBlock().clone();
     if (tmpPool.is_valid() && tmpPool.sequence() == round) {
         auto tmp2 = rPackage.poolSignatures();
@@ -4137,6 +4184,40 @@ bool Node::checkNodeVersion(cs::Sequence curSequence, std::string& msg) {
 //     //TODO: insert necessary code here
 //}
 
+void Node::retireColdStartFederation(const csdb::Pool& pool) {
+    // Idempotent: run exactly once, on the first finalized block (>=1) this node sees post-startup.
+    // - cold-start chains: triggers on the 0->1 transition (block 1 produced after genesis).
+    // - upgrading mid-chain: triggers on the next stored block (any seq >= 1), which validates
+    //   the chain is genuinely post-genesis before retiring the federation file.
+    if (initialConfidantsRetired_) return;
+    if (pool.sequence() < 1) return;
+    initialConfidantsRetired_ = true;
+
+    cslog() << "Plan §3.2 B5: first post-genesis block finalized; "
+            << "retiring cold-start initialConfidants_ (had "
+            << initialConfidants_.size() << " entries).";
+    initialConfidants_.clear();
+
+    const auto& fn = cs::ConfigHolder::instance().config()->getInitialTrustedFileName();
+    if (fn.empty()) {
+        return;
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(fn, ec)) {
+        return;
+    }
+    const std::string disabledFn = fn + ".disabled";
+    std::filesystem::rename(fn, disabledFn, ec);
+    if (ec) {
+        cswarning() << "Plan §3.2 B5: failed to rename '" << fn << "' -> '" << disabledFn
+                    << "': " << ec.message() << " (cleared in-memory only)";
+    }
+    else {
+        cslog() << "Plan §3.2 B5: renamed '" << fn << "' -> '" << disabledFn
+                << "' (file is no longer consulted on post-genesis restarts).";
+    }
+}
+
 void Node::processSpecialInfo(const csdb::Pool& pool) {
     if (pool.sequence() >= Consensus::H_activate_decentralization) {
         return;
@@ -4500,7 +4581,15 @@ bool Node::isColdStart() const {
 }
 
 std::set<cs::PublicKey> Node::lastBlockConfidants() const {
-    const auto& confidants = blockChain_.getLastBlock().confidants();
+    const auto lastSeq = blockChain_.getLastSeq();
+    auto lastBlock = blockChain_.getLastBlock();
+    const auto& confidants = lastBlock.confidants();
+    if (confidants.empty()) {
+        cswarning() << "BSIG_TRACE> lastBlockConfidants EMPTY lastSeq=" << lastSeq
+                    << " block.is_valid=" << lastBlock.is_valid()
+                    << " block.sequence=" << lastBlock.sequence()
+                    << " block.tx_count=" << lastBlock.transactions_count();
+    }
     return std::set<cs::PublicKey>(confidants.begin(), confidants.end());
 }
 
@@ -4549,65 +4638,89 @@ void Node::sendBootstrapSignature(const std::set<cs::PublicKey>& proposedConfs, 
     for (const auto& key : lastBlockConfidants()) {
         recipients.push_back(key);
     }
+    cslog() << "BSIG_TRACE> send rNum=" << rNum << " confs=" << proposedConfs.size()
+            << " recipients=" << recipients.size() << " store[me]=" << entry.sigs.size();
     sendBroadcastIfNoConnection(recipients, MsgTypes::BootstrapSignature, rNum, packetPayload);
 
     finalizeBootstrapIfQuorumReached(rNum);
 }
 
-void Node::getBootstrapSignature(const uint8_t* data, const size_t size, const cs::RoundNumber, const cs::PublicKey&) {
+void Node::getBootstrapSignature(const uint8_t* data, const size_t size, const cs::RoundNumber, const cs::PublicKey& sender) {
     cs::IDataStream in(data, size);
+    cs::Bytes payload;
+    in >> payload;
+    if (!in.isValid() || payload.empty()) {
+        cswarning() << "BSIG_TRACE> recv DROP empty/invalid payload wrapper";
+        return;
+    }
+    cs::IDataStream stream(payload.data(), payload.size());
     cs::RoundNumber rNum = 0;
     uint8_t confSize = 0;
-    in >> rNum >> confSize;
+    stream >> rNum >> confSize;
 
-    if (!in.isValid() || confSize < Consensus::MinTrustedNodes || confSize > Consensus::MaxTrustedNodes) {
-        csdebug() << "NODE> bootstrap signature: malformed/bad confidant count, drop";
+    if (!stream.isValid() || confSize < Consensus::MinTrustedNodes || confSize > Consensus::MaxTrustedNodes) {
+        cswarning() << "BSIG_TRACE> recv DROP malformed/bad confSize=" << static_cast<int>(confSize);
         return;
     }
 
     std::set<cs::PublicKey> proposedConfs;
     for (uint8_t i = 0; i < confSize; ++i) {
         cs::PublicKey k;
-        in >> k;
+        stream >> k;
         proposedConfs.insert(k);
     }
-    if (!in.isValid() || proposedConfs.size() != confSize) {
-        csdebug() << "NODE> bootstrap signature: duplicate or short confidants, drop";
+    if (!stream.isValid() || proposedConfs.size() != confSize) {
+        cswarning() << "BSIG_TRACE> recv DROP duplicate/short confs";
         return;
     }
 
     cs::PublicKey signerKey;
     cs::Signature sig;
-    in >> signerKey >> sig;
-    if (!in.isValid()) {
-        csdebug() << "NODE> bootstrap signature: missing signer/sig, drop";
+    stream >> signerKey >> sig;
+    if (!stream.isValid()) {
+        cswarning() << "BSIG_TRACE> recv DROP missing signer/sig";
         return;
     }
 
     const auto authority = lastBlockConfidants();
     if (authority.find(signerKey) == authority.end()) {
-        csdebug() << "NODE> bootstrap signature from non-authority signer, drop";
+        cswarning() << "BSIG_TRACE> recv DROP non-authority signer=" << KeyToBase58(signerKey)
+                    << " authority=" << authority.size() << " lastSeq=" << blockChain_.getLastSeq()
+                    << " coldStart=" << isColdStart();
         return;
     }
 
     const auto payloadPrefix = makeBootstrapPayloadPrefix(proposedConfs);
     const auto sigBuf = makeBootstrapSigningBuffer(rNum, payloadPrefix);
     if (!cscrypto::verifySignature(sig, signerKey, sigBuf.data(), sigBuf.size())) {
-        cswarning() << "NODE> bootstrap signature failed verify, drop";
+        cswarning() << "BSIG_TRACE> recv DROP sig verify failed signer=" << KeyToBase58(signerKey)
+                    << " rNum=" << rNum;
         return;
     }
 
     auto& entry = bootstrapSigStore_[payloadPrefix];
     entry.sortedConfs = proposedConfs;
     entry.sigs[signerKey] = sig;
+    cslog() << "BSIG_TRACE> recv OK from=" << KeyToBase58(signerKey)
+            << " rNum=" << rNum << " confs=" << confSize
+            << " store=" << entry.sigs.size() << "/" << authority.size();
 
     finalizeBootstrapIfQuorumReached(rNum);
 }
 
 bool Node::finalizeBootstrapIfQuorumReached(cs::RoundNumber rNum) {
     const auto authority = lastBlockConfidants();
-    if (authority.empty()) return false;
+    if (authority.empty()) {
+        cswarning() << "BSIG_TRACE> finalize SKIP authority empty";
+        return false;
+    }
     const size_t required = (authority.size() * 2 + 2) / 3;
+    size_t bestSigs = 0;
+    for (const auto& [_, entry] : bootstrapSigStore_) {
+        if (entry.sigs.size() > bestSigs) bestSigs = entry.sigs.size();
+    }
+    cslog() << "BSIG_TRACE> finalize rNum=" << rNum << " buckets=" << bootstrapSigStore_.size()
+            << " best=" << bestSigs << " required=" << required << " authority=" << authority.size();
 
     for (auto& [_, entry] : bootstrapSigStore_) {
         if (entry.sigs.size() < required) continue;
@@ -4673,6 +4786,10 @@ void Node::onRoundTimeElapsed() {
     const std::set<cs::PublicKey> recovery_authority =
         isColdStart() ? initialConfidants_ : lastBlockConfidants();
 
+    cslog() << "BSIG_TRACE> onRoundTimeElapsed lastSeq=" << blockChain_.getLastSeq()
+            << " coldStart=" << isColdStart() << " recovery_authority.size=" << recovery_authority.size()
+            << " own_in_authority=" << (recovery_authority.find(own_key) != recovery_authority.end());
+
     if (recovery_authority.find(own_key) == recovery_authority.end()) {
         cslog() << "Waiting for next round...";
 
@@ -4712,11 +4829,15 @@ void Node::onRoundTimeElapsed() {
                     };
 
     transport_->forEachNeighbour(std::move(callback));
-    if (actualConfidants.size() % 2 == 0) {
+    // Plan §3.2 B3: keep every alive lastBlockConfidants() member at maxSeq in the
+    // recovery proposal. Dropping the largest to force an odd count starves stage-1
+    // (needs MinTrustedNodes-1 hashes from others) when exactly MinTrustedNodes are alive.
+    const bool post_activation_authority = !isColdStart() &&
+        (blockChain_.getLastSeq() + 1 >= Consensus::H_activate_decentralization);
+    if (!post_activation_authority && actualConfidants.size() % 2 == 0) {
         auto it = actualConfidants.end();
         --it;
-        it = actualConfidants.erase(it);
-
+        actualConfidants.erase(it);
     }
     initBootstrapRP(actualConfidants);
 
@@ -4734,10 +4855,17 @@ void Node::onRoundTimeElapsed() {
         transport_->addToNeighbours(recovery_authority);
     }
 
-    if (actualConfidants.size() < Consensus::MinTrustedNodes) {
+    // DECENTRALIZATION_PLAN §3.2 B3: post-genesis recovery requires 2/3 of lastBlockConfidants().
+    // Cold start uses MinTrustedNodes as the historical floor (plan: cold-start path unchanged).
+    const size_t recoveryQuorum = isColdStart()
+        ? static_cast<size_t>(Consensus::MinTrustedNodes)
+        : std::max<size_t>(1, (recovery_authority.size() * 2 + 2) / 3);
+    if (actualConfidants.size() < recoveryQuorum) {
         cslog() << "Not enough confidants with max sequence " << maxGlobalBlock
-            << " (" << actualConfidants.size() << ", min " << Consensus::MinTrustedNodes
-            << " required). Wait until syncro finished or more bootstrap nodes to start...";
+            << " (" << actualConfidants.size() << ", min " << recoveryQuorum
+            << " required, recovery_authority=" << recovery_authority.size()
+            << (isColdStart() ? ", cold-start" : ", post-genesis")
+            << "). Wait until syncro finished or more bootstrap nodes to start...";
 
         return;
     }
@@ -4799,7 +4927,16 @@ void Node::onRoundTimeElapsed() {
         reviewConveyerHashes();
     }
     else {
-        cslog() << "Wait for " << KeyToBase58(*actualConfidants.cbegin()) << " to start round...";
+        const bool post_activation = !isColdStart() &&
+            (blockChain_.getLastSeq() + 1 >= Consensus::H_activate_decentralization);
+        if (post_activation) {
+            cslog() << "Co-signing recovery bootstrap (initiator: "
+                    << KeyToBase58(*actualConfidants.cbegin()) << ")...";
+            sendBootstrapSignature(actualConfidants, roundPackageCache_.back().roundTable().round);
+        }
+        else {
+            cslog() << "Wait for " << KeyToBase58(*actualConfidants.cbegin()) << " to start round...";
+        }
     }
 }
 
@@ -5085,8 +5222,12 @@ void Node::getNodeInfo(const api_diag::NodeInfoRequest& request, api_diag::NodeI
     }
 
     // get bootstrap nodes
+    // Plan §3.2 B7: post-genesis report lastBlockConfidants(); cold start keeps initialConfidants_.
+    const std::set<cs::PublicKey> reportAuthority = isColdStart()
+        ? initialConfidants_
+        : lastBlockConfidants();
     std::map<cs::PublicKey, api_diag::BootstrapNode> bootstrap;
-    for (const auto& item : initialConfidants_) {
+    for (const auto& item : reportAuthority) {
         bool alive = (item == nodeIdKey_);
         cs::Sequence seq = alive ? sequence : 0;
         api_diag::BootstrapNode bn;
@@ -5096,9 +5237,9 @@ void Node::getNodeInfo(const api_diag::NodeInfoRequest& request, api_diag::NodeI
         bootstrap[item] = bn;
     }
     // update alive bootstrap nodes
-    auto callback = [&bootstrap, this](const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber) {
-        const auto it = initialConfidants_.find(neighbour);
-        if (it == initialConfidants_.end()) {
+    auto callback = [&bootstrap, &reportAuthority](const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber) {
+        const auto it = reportAuthority.find(neighbour);
+        if (it == reportAuthority.end()) {
             return;
         }
         auto& item = bootstrap[*it];

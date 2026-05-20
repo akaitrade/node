@@ -576,12 +576,15 @@ private:
 
     static constexpr size_t kQuickStartSaveCachesInterval = 50'000; // fallback default; overridden by config checkpoint_every
     std::chrono::steady_clock::time_point lastCheckpointWallClock_ = std::chrono::steady_clock::now();
-    int32_t blockRewardIntegral_;
-    uint64_t blockRewardFraction_ ;
-    int32_t miningCoefficientIntegral_;
-    uint64_t miningCoefficientFraction_;
-    bool stakingOn_;
-    bool miningOn_;
-    uint32_t TimeMinStage1_;
+    // Defaults match BlockChain_Serializer::clear() values so a fresh chain
+    // (no persisted state, no admin set-orders) starts with sane consensus params
+    // instead of indeterminate values.
+    int32_t  blockRewardIntegral_           = 0;
+    uint64_t blockRewardFraction_           = 0;
+    int32_t  miningCoefficientIntegral_     = 0;
+    uint64_t miningCoefficientFraction_     = 0;
+    bool     stakingOn_                     = false;
+    bool     miningOn_                      = false;
+    uint32_t TimeMinStage1_                 = 500;
 };
 #endif  //  BLOCKCHAIN_HPP

@@ -6,8 +6,11 @@
 
 class Consensus {
 public:
-    // Decentralization hard-fork activation height; UINT64_MAX = dormant until set by activation release.
-    constexpr static uint64_t H_activate_decentralization = UINT64_MAX;
+    // Decentralization hard-fork activation height.
+    // TESTNET: set to 1 so decentralized recovery (2/3 quorum BootstrapSignature) is active.
+    // MAINNET: MUST be raised back to UINT64_MAX (dormant) or a real future-height before launch.
+    // See nodeDocs/CONSENSUS_PARAMETER_AUDIT.md.
+    constexpr static uint64_t H_activate_decentralization = 1;
 
     /** @brief   Set the flag to log solver-with-state messages to console*/
     const static bool Log;

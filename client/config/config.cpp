@@ -842,6 +842,7 @@ Config Config::readFromFile(const std::string& fileName) {
         try {
             initTrustedFileName = params.get<std::string>(PARAM_NAME_INITIAL_TRUSTED);
         } catch (...) {}
+        result.initTrustedFileName_ = initTrustedFileName;
 
         std::string line;
 

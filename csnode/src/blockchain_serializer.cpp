@@ -108,5 +108,13 @@ void BlockChain_Serializer::load(const std::filesystem::path& rootDir) {
     *miningOn_ = miningOn == 0U ? true : false;
 
     ia >> *TimeMinStage1_;
+    // Legacy state may have been persisted before TimeMinStage1_ had an in-class
+    // initializer; a 0 (or absurdly low) value would otherwise make the stage-1
+    // timer fire instantly, collapsing rounds to a few milliseconds.
+    if (*TimeMinStage1_ < 100) {
+        cswarning() << "BlockChain_Serializer::load: TimeMinStage1_=" << *TimeMinStage1_
+                    << " below sanity floor; resetting to 500ms default.";
+        *TimeMinStage1_ = 500;
+    }
 }
 }  // namespace cs

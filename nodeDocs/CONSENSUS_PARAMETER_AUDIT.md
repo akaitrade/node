@@ -1,5 +1,16 @@
 # Consensus Parameter Audit — Decentralization Hard-Fork Safety Check
 
+## ⚠️ Current build setting — TESTNET ONLY
+
+`Consensus::H_activate_decentralization` is currently compiled in as **`1`** in
+`solver/include/solver/consensus.hpp`. This enables decentralized 2/3-quorum recovery
+from block 1 onward so the feature can be exercised on local testnets.
+
+**Before mainnet release this constant MUST be changed back to either `UINT64_MAX`
+(dormant) or a real future block height agreed by validators.** Shipping `=1` to mainnet
+would invalidate every historical pre-activation block's admin-signed BootstrapTable
+expectations and is not safe.
+
 ## Purpose
 
 This document is the operator checklist for verifying live mainnet consensus parameter

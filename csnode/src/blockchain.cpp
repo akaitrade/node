@@ -2628,5 +2628,6 @@ void BlockChain::setStakingOn(bool stOn) {
     miningOn_ = stOn;
 }
 void BlockChain::setTimeMinStage1(uint32_t timeStage1) {
-    TimeMinStage1_ = timeStage1;
+    // Guard against caller propagating a 0/uninit value: stage-1 timer at 0 collapses rounds.
+    TimeMinStage1_ = (timeStage1 < 100) ? 500 : timeStage1;
 }

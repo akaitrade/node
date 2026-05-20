@@ -194,6 +194,12 @@ public:
         return initialConfidants_;
     }
 
+    // Plan §3.2 B5: filename of the init_trusted.txt-equivalent (empty if unset).
+    // Node uses this to retire the cold-start federation file on first post-genesis block.
+    const std::string& getInitialTrustedFileName() const {
+        return initTrustedFileName_;
+    }
+
     const std::string& getPathToDB() const {
         return pathToDb_;
     }
@@ -423,6 +429,7 @@ private:
 
     std::string pathToDb_;
     std::string hostsFileName_;
+    std::string initTrustedFileName_;
 
     cs::PublicKey publicKey_{};
     cs::PrivateKey privateKey_{};

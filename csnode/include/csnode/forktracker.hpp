@@ -1,6 +1,7 @@
 #ifndef FORKTRACKER_HPP
 #define FORKTRACKER_HPP
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -23,7 +24,7 @@ struct KnownFork {
 };
 
 // Empty for now. Future forks appended here per release.
-inline constexpr KnownFork KNOWN_FORKS[] = {};
+inline constexpr std::array<KnownFork, 0> KNOWN_FORKS{};
 
 struct ForkActivation {
     const KnownFork* fork;

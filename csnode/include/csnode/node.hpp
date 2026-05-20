@@ -391,6 +391,9 @@ public slots:
     // request current trusted nodes for block with specific sequence
     void sendBlockRequestToConfidants(cs::Sequence sequence);
     void processSpecialInfo(const csdb::Pool& pool);
+    // Plan §3.2 B5: on first finalized post-genesis block, clear in-memory initialConfidants_
+    // and rename init_trusted.txt to <name>.disabled so a future DB reset can't reuse it silently.
+    void retireColdStartFederation(const csdb::Pool& pool);
     void checkConsensusSettings(cs::Sequence seq, std::string& msg);
 
     void validateBlock(const csdb::Pool& block, bool* shouldStop);
@@ -558,6 +561,9 @@ private:
 
     std::set<cs::PublicKey> initialConfidants_;
     bool isBootstrapRound_ = false;
+    // Plan §3.2 B5: one-shot cold-start cleanup flag.
+    // Set true once initialConfidants_ has been retired on the first finalized post-genesis block.
+    bool initialConfidantsRetired_ = false;
     cs::CachesSerializationManager cachesSerializationManager_;
     cs::ForkTracker forkTracker_;
 

@@ -13,9 +13,13 @@
 #include <csnode/walletsstate.hpp>
 #include <lib/system/logger.hpp>
 
-#include <client/config/config.hpp>
 #include <csnode/blockchain.hpp>
 #include <lib/system/utils.hpp>
+
+// NODE_VERSION lives in client/config/config.cpp; declare here to avoid
+// pulling client headers into the solver library (no include path for it).
+using NodeVersion = cs::Version;
+extern const NodeVersion NODE_VERSION;
 
 #include <cstdlib>
 #include <functional>
@@ -527,7 +531,10 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
 //        uploadNewStates(conveyer.uploadNewStates());
         deferredBlock_ = std::move(pool.value());
         deferredBlock_.set_confidants(conveyer.confidants());
-        deferredBlock_.add_user_field(BlockChain::kFieldWriterVersion, static_cast<uint64_t>(NODE_VERSION));
+        // Plan §0 invariant: pre-activation blocks must be byte-identical to vanilla.
+        if (deferredBlock_.sequence() >= Consensus::H_activate_decentralization) {
+            deferredBlock_.add_user_field(BlockChain::kFieldWriterVersion, static_cast<uint64_t>(NODE_VERSION));
+        }
 
         //csmeta(csdebug) << "block #" << deferredBlock_.sequence() << " add new wallets to pool";
         pnode->getBlockChain().addNewWalletsToPool(deferredBlock_);
@@ -563,7 +570,9 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
             tmpPool.add_transaction(it);
         }
 
-        tmpPool.add_user_field(BlockChain::kFieldWriterVersion, static_cast<uint64_t>(NODE_VERSION));
+        if (tmpPool.sequence() >= Consensus::H_activate_decentralization) {
+            tmpPool.add_user_field(BlockChain::kFieldWriterVersion, static_cast<uint64_t>(NODE_VERSION));
+        }
 
         if (tmpPool.sequence() > Consensus::StartingDPOS && Consensus::miningOn) {
             poolMetaInfo.reward = setBlockReward(tmpPool, poolMetaInfo.realTrustedMask);
