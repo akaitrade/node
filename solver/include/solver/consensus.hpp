@@ -6,6 +6,9 @@
 
 class Consensus {
 public:
+    // Decentralization hard-fork activation height; UINT64_MAX = dormant until set by activation release.
+    constexpr static uint64_t H_activate_decentralization = UINT64_MAX;
+
     /** @brief   Set the flag to log solver-with-state messages to console*/
     const static bool Log;
 

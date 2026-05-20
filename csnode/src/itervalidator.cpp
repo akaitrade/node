@@ -293,9 +293,14 @@ std::pair<bool, PublicKey> IterValidator::checkTransactionSignature(SolverContex
         smartSourceTransaction = context.smart_contracts().is_known_smart_contract(transaction.source());
     }
     if (!SmartContracts::is_new_state(transaction) && !smartSourceTransaction) {
+        const bool post_activation =
+            context.blockchain().getLastSeq() + 1 >= Consensus::H_activate_decentralization;
         if (src.is_wallet_id()) {
             auto pub = context.blockchain().getAddressByType(src, BlockChain::AddressType::PublicKey);
             if (context.blockchain().isSpecial(transaction)) {
+                if (post_activation) {
+                    return std::make_pair(false, Zero::key);
+                }
                 const auto& starter_key = cs::PacketValidator::getBlockChainKey();
                 if (pub.public_key() != starter_key) {
                     return std::make_pair(false, Zero::key);
@@ -304,6 +309,9 @@ std::pair<bool, PublicKey> IterValidator::checkTransactionSignature(SolverContex
             return std::make_pair(true, pub.public_key());
         }
         if (context.blockchain().isSpecial(transaction)) {
+            if (post_activation) {
+                return std::make_pair(false, Zero::key);
+            }
             const auto& starter_key = cs::PacketValidator::getBlockChainKey();
             if (src.public_key() != starter_key) {
                 return std::make_pair(false, Zero::key);

@@ -337,6 +337,8 @@ void Transport::dispatchNodeMessage(const cs::PublicKey& sender, const MsgTypes 
             return node_->getRoundTable(data, size, rNum, sender);
         case MsgTypes::BootstrapTable:
             return node_->getBootstrapTable(data, size, rNum);
+        case MsgTypes::BootstrapSignature:
+            return node_->getBootstrapSignature(data, size, rNum, sender);
         case MsgTypes::RoundTableRequest:
             return node_->getRoundTableRequest(data, size, rNum, sender);
         case MsgTypes::BlockHash:

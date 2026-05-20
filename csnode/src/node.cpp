@@ -515,7 +515,18 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
 
     uint8_t currentWeight = calculateBootStrapWeight(confidants);
 
-    if (unknown) {
+    const bool post_activation = !isColdStart() &&
+        (blockChain_.getLastSeq() + 1 >= Consensus::H_activate_decentralization);
+
+    if (post_activation) {
+        // Sender-side multi-sig collection MUST land before H_activate is set from UINT64_MAX.
+        if (!verifyBootstrapQuorum(stream, payload, rNum, confSize)) {
+            cswarning() << kLogPrefix_ << "bootstrap table failed quorum check, drop";
+            return;
+        }
+        currentWeight = 255U;
+    }
+    else if (unknown) {
         cs::Signature sig;
         stream >> sig;
         if (!stream.isValid()) {
@@ -2140,7 +2151,7 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
     }
 
     // BB: every round (for now) may be handled:
-    if (type == MsgTypes::BootstrapTable) {
+    if (type == MsgTypes::BootstrapTable || type == MsgTypes::BootstrapSignature) {
         return MessageActions::Process;
     }
 
@@ -4127,6 +4138,9 @@ bool Node::checkNodeVersion(cs::Sequence curSequence, std::string& msg) {
 //}
 
 void Node::processSpecialInfo(const csdb::Pool& pool) {
+    if (pool.sequence() >= Consensus::H_activate_decentralization) {
+        return;
+    }
     for (auto it : pool.transactions()) {
         if (!getBlockChain().isSpecial(it)) {
             continue;
@@ -4263,32 +4277,6 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
                 cslog() << "MaxQueueSize changed to: " << Consensus::MaxQueueSize;
             }
 
-            if (order == 32U) {
-                uint8_t cnt;
-                stream >> cnt;
-                csdebug() << "Blacklisted smart-contracts: ";
-                for (uint8_t i = 1; i <= cnt; ++i) {
-                    cs::PublicKey key;
-                    stream >> key;
-                    csdb::Address addr = csdb::Address::from_public_key(key);
-                    solver_->smart_contracts().setBlacklisted(addr, true);
-                    cslog() << static_cast<int>(i) << ". " << cs::Utils::byteStreamToHex(key);
-                }
-            }
-
-            if (order == 33U) {
-                uint8_t cnt;
-                stream >> cnt;
-                csdebug() << "Rehabilitated smart-contracts: ";
-                for (uint8_t i = 1; i <= cnt; ++i) {
-                    cs::PublicKey key;
-                    stream >> key;
-                    csdb::Address addr = csdb::Address::from_public_key(key);
-                    solver_->smart_contracts().setBlacklisted(addr, false);
-                    cslog() << static_cast<int>(i) << ". " << cs::Utils::byteStreamToHex(key);
-                }
-            }
-
             if (order == 35U) {// apply new global features
                 uint64_t value;
                 stream >> value;
@@ -4358,6 +4346,12 @@ void Node::checkConsensusSettings(cs::Sequence seq, std::string& msg){
     saveConsensusSettingsToChain();
 }
 
+static NodeVersion extractWriterVersion(const csdb::Pool& block) {
+    const auto field = block.user_field(BlockChain::kFieldWriterVersion);
+    if (!field.is_valid()) return NodeVersion{0};
+    return static_cast<NodeVersion>(field.value<uint64_t>());
+}
+
 void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
     // User-cancel is honoured by BlockChain::init's OpenCallback via blockChain_.stop_;
     // signalling it via *shouldStop here would be misread by csdb as DataIntegrityError.
@@ -4368,7 +4362,7 @@ void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
             /*| cs::BlockValidator::ValidationLevel::accountBalance*/,
         cs::BlockValidator::SeverityLevel::greaterThanWarnings)) {
         *shouldStop = true;
-        csdebug() << "NODE> Trying to add sequence " << block.sequence() << " to incorrect blocks list. NodeStatus: " 
+        csdebug() << "NODE> Trying to add sequence " << block.sequence() << " to incorrect blocks list. NodeStatus: "
             << (status_ == cs::NodeStatus::ReadingBlocks ? "ReadingBlocks" : "Other");
         if (status_ == cs::NodeStatus::ReadingBlocks) {
             getBlockChain().addIncorrectBlockNumber(block.sequence());
@@ -4380,6 +4374,20 @@ void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
         }
     }
     processSpecialInfo(block);
+
+    forkTracker_.onBlockAccepted(block.sequence(), extractWriterVersion(block));
+    while (auto activation = forkTracker_.pollNewActivation()) {
+        cslog() << "NODE> fork '" << activation->fork->name
+                << "' locked in; activates at sequence " << activation->activationHeight;
+        nVersionChange_.seq = activation->activationHeight;
+        nVersionChange_.minFullVersion = activation->fork->minFullVersion;
+        nVersionChange_.minCompatibleVersion = activation->fork->minCompatibleVersion;
+        nVersionChange_.check = NODE_VERSION >= nVersionChange_.minFullVersion
+            ? cs::CheckVersion::None
+            : (NODE_VERSION < nVersionChange_.minCompatibleVersion
+                ? cs::CheckVersion::Full
+                : cs::CheckVersion::Normal);
+    }
 }
 
 
@@ -4487,16 +4495,191 @@ void Node::deepBlockValidation(const csdb::Pool& block, bool* check_failed) {//c
     csdebug() << "NODE> no invalid transactions in block #" <<WithDelimiters(block.sequence());
 }
 
+bool Node::isColdStart() const {
+    return blockChain_.getLastSeq() == 0;
+}
+
+std::set<cs::PublicKey> Node::lastBlockConfidants() const {
+    const auto& confidants = blockChain_.getLastBlock().confidants();
+    return std::set<cs::PublicKey>(confidants.begin(), confidants.end());
+}
+
+static cs::Bytes makeBootstrapPayloadPrefix(const std::set<cs::PublicKey>& sortedConfs) {
+    cs::Bytes out;
+    out.reserve(1 + sortedConfs.size() * cscrypto::kPublicKeySize);
+    out.push_back(static_cast<uint8_t>(sortedConfs.size()));
+    for (const auto& key : sortedConfs) {
+        out.insert(out.end(), key.begin(), key.end());
+    }
+    return out;
+}
+
+static cs::Bytes makeBootstrapSigningBuffer(cs::RoundNumber rNum, const cs::Bytes& payloadPrefix) {
+    cs::Bytes out;
+    out.reserve(sizeof(cs::RoundNumber) + payloadPrefix.size());
+    const auto* ptr = reinterpret_cast<const uint8_t*>(&rNum);
+    out.insert(out.end(), ptr, ptr + sizeof(cs::RoundNumber));
+    out.insert(out.end(), payloadPrefix.begin(), payloadPrefix.end());
+    return out;
+}
+
+void Node::sendBootstrapSignature(const std::set<cs::PublicKey>& proposedConfs, cs::RoundNumber rNum) {
+    const auto payloadPrefix = makeBootstrapPayloadPrefix(proposedConfs);
+    const auto sigBuf = makeBootstrapSigningBuffer(rNum, payloadPrefix);
+
+    const cs::PublicKey mySignerKey = solver_->getPublicKey();
+    const cs::Signature mySig =
+        cscrypto::generateSignature(solver_->getPrivateKey(), sigBuf.data(), sigBuf.size());
+
+    auto& entry = bootstrapSigStore_[payloadPrefix];
+    entry.sortedConfs = proposedConfs;
+    entry.sigs[mySignerKey] = mySig;
+
+    cs::Bytes packetPayload;
+    cs::ODataStream out(packetPayload);
+    out << rNum;
+    out << static_cast<uint8_t>(proposedConfs.size());
+    for (const auto& key : proposedConfs) {
+        out << key;
+    }
+    out << mySignerKey;
+    out << mySig;
+
+    cs::PublicKeys recipients;
+    for (const auto& key : lastBlockConfidants()) {
+        recipients.push_back(key);
+    }
+    sendBroadcastIfNoConnection(recipients, MsgTypes::BootstrapSignature, rNum, packetPayload);
+
+    finalizeBootstrapIfQuorumReached(rNum);
+}
+
+void Node::getBootstrapSignature(const uint8_t* data, const size_t size, const cs::RoundNumber, const cs::PublicKey&) {
+    cs::IDataStream in(data, size);
+    cs::RoundNumber rNum = 0;
+    uint8_t confSize = 0;
+    in >> rNum >> confSize;
+
+    if (!in.isValid() || confSize < Consensus::MinTrustedNodes || confSize > Consensus::MaxTrustedNodes) {
+        csdebug() << "NODE> bootstrap signature: malformed/bad confidant count, drop";
+        return;
+    }
+
+    std::set<cs::PublicKey> proposedConfs;
+    for (uint8_t i = 0; i < confSize; ++i) {
+        cs::PublicKey k;
+        in >> k;
+        proposedConfs.insert(k);
+    }
+    if (!in.isValid() || proposedConfs.size() != confSize) {
+        csdebug() << "NODE> bootstrap signature: duplicate or short confidants, drop";
+        return;
+    }
+
+    cs::PublicKey signerKey;
+    cs::Signature sig;
+    in >> signerKey >> sig;
+    if (!in.isValid()) {
+        csdebug() << "NODE> bootstrap signature: missing signer/sig, drop";
+        return;
+    }
+
+    const auto authority = lastBlockConfidants();
+    if (authority.find(signerKey) == authority.end()) {
+        csdebug() << "NODE> bootstrap signature from non-authority signer, drop";
+        return;
+    }
+
+    const auto payloadPrefix = makeBootstrapPayloadPrefix(proposedConfs);
+    const auto sigBuf = makeBootstrapSigningBuffer(rNum, payloadPrefix);
+    if (!cscrypto::verifySignature(sig, signerKey, sigBuf.data(), sigBuf.size())) {
+        cswarning() << "NODE> bootstrap signature failed verify, drop";
+        return;
+    }
+
+    auto& entry = bootstrapSigStore_[payloadPrefix];
+    entry.sortedConfs = proposedConfs;
+    entry.sigs[signerKey] = sig;
+
+    finalizeBootstrapIfQuorumReached(rNum);
+}
+
+bool Node::finalizeBootstrapIfQuorumReached(cs::RoundNumber rNum) {
+    const auto authority = lastBlockConfidants();
+    if (authority.empty()) return false;
+    const size_t required = (authority.size() * 2 + 2) / 3;
+
+    for (auto& [_, entry] : bootstrapSigStore_) {
+        if (entry.sigs.size() < required) continue;
+
+        cs::Bytes packet;
+        cs::ODataStream out(packet);
+        out << static_cast<uint8_t>(entry.sortedConfs.size());
+        for (const auto& key : entry.sortedConfs) {
+            out << key;
+        }
+        out << static_cast<uint8_t>(entry.sigs.size());
+        for (const auto& [signer, sig] : entry.sigs) {
+            out << signer << sig;
+        }
+
+        sendBroadcast(MsgTypes::BootstrapTable, rNum, packet);
+        cslog() << "NODE> bootstrap quorum reached (" << entry.sigs.size()
+                << "/" << authority.size() << "); broadcasting BootstrapTable";
+
+        bootstrapSigStore_.clear();
+        return true;
+    }
+    return false;
+}
+
+bool Node::verifyBootstrapQuorum(cs::IDataStream& stream, const cs::Bytes& payload,
+                                 cs::RoundNumber rNum, uint8_t confSize) const {
+    const size_t signed_subdata_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
+    cs::Bytes buf;
+    buf.reserve(sizeof(cs::RoundNumber) + signed_subdata_len);
+    const auto* ptr = reinterpret_cast<const uint8_t*>(&rNum);
+    std::copy(ptr, ptr + sizeof(cs::RoundNumber), std::back_inserter(buf));
+    std::copy(payload.data(), payload.data() + signed_subdata_len, std::back_inserter(buf));
+
+    uint8_t sigCount = 0;
+    stream >> sigCount;
+    if (!stream.isValid() || sigCount == 0) return false;
+
+    const auto authority = lastBlockConfidants();
+    if (authority.empty()) return false;
+    const size_t required = (authority.size() * 2 + 2) / 3;  // ceil(2/3 * n)
+
+    std::set<cs::PublicKey> seen;
+    size_t valid = 0;
+    for (uint8_t i = 0; i < sigCount; ++i) {
+        cs::PublicKey signer;
+        cs::Signature sig;
+        stream >> signer >> sig;
+        if (!stream.isValid()) return false;
+        if (authority.find(signer) == authority.end()) continue;
+        if (!seen.insert(signer).second) continue;
+        if (cscrypto::verifySignature(sig, signer, buf.data(), buf.size())) {
+            if (++valid >= required) return true;
+        }
+    }
+    return false;
+}
+
 void Node::onRoundTimeElapsed() {
     solver_->resetGrayList();
     const cs::PublicKey& own_key = solver_->getPublicKey();
-    if (initialConfidants_.find(own_key) == initialConfidants_.end()) {
+
+    const std::set<cs::PublicKey> recovery_authority =
+        isColdStart() ? initialConfidants_ : lastBlockConfidants();
+
+    if (recovery_authority.find(own_key) == recovery_authority.end()) {
         cslog() << "Waiting for next round...";
 
         myLevel_ = Level::Normal;
         myConfidantIndex_ = cs::ConfidantConsts::InvalidConfidantIndex;
 
-        initBootstrapRP(initialConfidants_);
+        initBootstrapRP(recovery_authority);
 
         // if we have correct last block, we pretend to next trusted role
         // otherwise remote nodes will drop our hash
@@ -4512,10 +4695,10 @@ void Node::onRoundTimeElapsed() {
     const cs::Sequence maxLocalBlock = blockChain_.getLastSeq();
     cs::Sequence maxGlobalBlock = maxLocalBlock;
 
-    auto callback = [&maxGlobalBlock, &actualConfidants, this]
+    auto callback = [&maxGlobalBlock, &actualConfidants, &recovery_authority]
                     (const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber) {
-                        const auto it = initialConfidants_.find(neighbour);
-                        if (it == initialConfidants_.end()) {
+                        const auto it = recovery_authority.find(neighbour);
+                        if (it == recovery_authority.end()) {
                             return;
                         }
                         if (lastSeq > maxGlobalBlock) {
@@ -4543,12 +4726,12 @@ void Node::onRoundTimeElapsed() {
         cslog() << "NODE> " << " - " << KeyToBase58(item) << (item == own_key ? " (me)" : "");
     }
 
-    if (actualConfidants.size() < initialConfidants_.size()) {
+    if (actualConfidants.size() < recovery_authority.size()) {
         cslog() << "Num of confidants with max sequence " << maxGlobalBlock
-                << " (" << actualConfidants.size() << " is less than init trusted num "
-                << initialConfidants_.size() << ", start lookup...";
+                << " (" << actualConfidants.size() << " is less than recovery authority size "
+                << recovery_authority.size() << ", start lookup...";
 
-        transport_->addToNeighbours(initialConfidants_);
+        transport_->addToNeighbours(recovery_authority);
     }
 
     if (actualConfidants.size() < Consensus::MinTrustedNodes) {
@@ -4598,7 +4781,14 @@ void Node::onRoundTimeElapsed() {
         auto& conveyer = cs::Conveyer::instance();
         conveyer.updateRoundTable(roundPackageCache_.back().roundTable().round, roundPackageCache_.back().roundTable());
 
-        sendBroadcast(MsgTypes::BootstrapTable, roundPackageCache_.back().roundTable().round, bin);
+        const bool post_activation = !isColdStart() &&
+            (blockChain_.getLastSeq() + 1 >= Consensus::H_activate_decentralization);
+        if (post_activation) {
+            sendBootstrapSignature(actualConfidants, roundPackageCache_.back().roundTable().round);
+        }
+        else {
+            sendBroadcast(MsgTypes::BootstrapTable, roundPackageCache_.back().roundTable().round, bin);
+        }
         confirmationList_.remove(roundPackageCache_.back().roundTable().round);
         if (!isBootstrapRound_) {
             isBootstrapRound_ = true;

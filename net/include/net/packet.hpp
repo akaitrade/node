@@ -62,6 +62,7 @@ enum MsgTypes : uint8_t {
     TransactionPacketHash,
     TransactionsPacketBaseRequest,
     TransactionsPacketBaseReply,
+    BootstrapSignature = 40,
     NodeStopRequest = 255
 };
 

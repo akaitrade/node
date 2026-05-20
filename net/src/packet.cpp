@@ -7,6 +7,8 @@ const char* Packet::messageTypeToString(MsgTypes messageType) {
     switch (messageType) {
         case BootstrapTable:
             return "BootstrapTable";
+        case BootstrapSignature:
+            return "BootstrapSignature";
         case Transactions:
             return "Transactions";
         case FirstTransaction:

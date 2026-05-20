@@ -92,6 +92,7 @@ bool PacketValidator::validateNodePacket(const Packet& packet) {
         case MsgTypes::NodeStopRequest:
         case MsgTypes::RoundTable:
         case MsgTypes::BootstrapTable:
+        case MsgTypes::BootstrapSignature:
         case MsgTypes::RoundTableReply:
         case MsgTypes::RoundPackRequest:  // old-round node may ask for round info
         case MsgTypes::EmptyRoundPack:

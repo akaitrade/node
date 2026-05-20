@@ -12,6 +12,7 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/compressor.hpp>
+#include <csnode/forktracker.hpp>
 
 #include <lib/system/timer.hpp>
 
@@ -84,6 +85,7 @@ public:
 
     // incoming requests processing
     void getBootstrapTable(const uint8_t* data, const size_t size, const cs::RoundNumber);
+    void getBootstrapSignature(const uint8_t* data, const size_t size, const cs::RoundNumber, const cs::PublicKey& sender);
     bool verifyPacketSignatures(cs::TransactionsPacket& packet, const cs::PublicKey& sender);
     bool verifyPacketTransactions(cs::TransactionsPacket packet, const cs::PublicKey& sender);
     void getTransactionsPacket(const uint8_t* data, const std::size_t size, const cs::PublicKey& sender);
@@ -395,6 +397,16 @@ public slots:
     void deepBlockValidation(const csdb::Pool& block, bool* shouldStop);
     void sendBlockAlarmSignal(cs::Sequence seq);
     void onRoundTimeElapsed();
+
+    // genesis-only; post-block-1, recovery uses on-chain confidants.
+    bool isColdStart() const;
+    std::set<cs::PublicKey> lastBlockConfidants() const;
+    bool verifyBootstrapQuorum(cs::IDataStream& stream, const cs::Bytes& payload,
+                               cs::RoundNumber rNum, uint8_t confSize) const;
+
+    void sendBootstrapSignature(const std::set<cs::PublicKey>& proposedConfs, cs::RoundNumber rNum);
+    bool finalizeBootstrapIfQuorumReached(cs::RoundNumber rNum);
+
     void onNeighbourAdded(const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber lastRound);
     void onNeighbourRemoved(const cs::PublicKey& neighbour);
 
@@ -547,6 +559,13 @@ private:
     std::set<cs::PublicKey> initialConfidants_;
     bool isBootstrapRound_ = false;
     cs::CachesSerializationManager cachesSerializationManager_;
+    cs::ForkTracker forkTracker_;
+
+    struct BootstrapSigEntry {
+        std::set<cs::PublicKey> sortedConfs;
+        std::map<cs::PublicKey, cs::Signature> sigs;
+    };
+    std::map<cs::Bytes, BootstrapSigEntry> bootstrapSigStore_;
 
     size_t notInRound_ = 0;
     std::map<cs::PublicKey, std::tuple<cs::Sequence, cs::SyncroMessage, uint64_t>> synchroRequestsLog_;

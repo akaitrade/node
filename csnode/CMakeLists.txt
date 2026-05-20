@@ -82,6 +82,7 @@ add_library(csnode
   include/csnode/roundstat_serializer.hpp
   include/csnode/chain_integrity.hpp
   include/csnode/syncwatchdog.hpp
+  include/csnode/forktracker.hpp
   src/blockchain.cpp
   src/blockchain_serializer.cpp
   src/node.cpp
@@ -120,6 +121,7 @@ add_library(csnode
   src/roundstat_serializer.cpp
   src/chain_integrity.cpp
   src/syncwatchdog.cpp
+  src/forktracker.cpp
 )
 
 configure_msvc_flags()

@@ -55,6 +55,7 @@ PacketsQueue::Priority PacketsQueue::getPriority(MsgTypes type) const {
         case MsgTypes::NodeStopRequest:
         case MsgTypes::RoundTable:
         case MsgTypes::BootstrapTable:
+        case MsgTypes::BootstrapSignature:
         case MsgTypes::BlockHash:
         case MsgTypes::TransactionPacket:
         case MsgTypes::TransactionsPacketReply:

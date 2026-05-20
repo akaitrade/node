@@ -51,10 +51,6 @@ struct EndpointData {
     static EndpointData fromString(const std::string&);
 };
 
-enum BootstrapType {
-    IpList
-};
-
 struct PoolSyncData {
     cs::Sequence blockPoolsCount = 100;              // max block count in one request: cannot be 0
     uint16_t sequencesVerificationFrequency = 350;   // sequences received verification frequency : 0-never; 1-once per round: other- in ms;
