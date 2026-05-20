@@ -2338,6 +2338,17 @@ void BlockChain::debugRecomputeBlockDiff(const csdb::Pool& rx) const {
            << "  tgtN="  << tgtCount
            << "  trxN="  << wd.transNum_ << "\n";
     }
+    // Full to_binary() byte stream for the received block. Diff against
+    // the local TRUSTED_SIGN_DUMP to_binary_hex for the same seq to find
+    // the exact diverging byte/field. Skipped if size > 64 KB.
+    const cs::Bytes binBytes = rx.to_binary();
+    ss << "  to_binary_size " << binBytes.size() << "\n";
+    if (binBytes.size() <= 65536) {
+        ss << "  to_binary_hex  "
+           << cs::Utils::byteStreamToHex(binBytes.data(), binBytes.size()) << "\n";
+    } else {
+        ss << "  to_binary_hex  (skipped: size > 64KB)\n";
+    }
     ss << "=== END_RECOMPUTE_DIFF seq=" << rx.sequence() << " ===";
 
     csdebug() << ss.str();
