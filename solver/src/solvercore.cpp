@@ -573,57 +573,57 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
         }
         csdebug() << log_prefix << os.str();
     }
+    // Zero every stage3 hash/signature slot up front so any field whose source
+    // turns out to be empty is sent recognisably-unsigned instead of carrying
+    // stale memory from a prior call.
+    std::fill(stage3.blockHash.begin(),       stage3.blockHash.end(),       uint8_t{0});
+    std::fill(stage3.roundHash.begin(),       stage3.roundHash.end(),       uint8_t{0});
+    std::fill(stage3.trustedHash.begin(),     stage3.trustedHash.end(),     uint8_t{0});
+    std::fill(stage3.blockSignature.begin(),  stage3.blockSignature.end(),  uint8_t{0});
+    std::fill(stage3.roundSignature.begin(),  stage3.roundSignature.end(),  uint8_t{0});
+    std::fill(stage3.trustedSignature.begin(),stage3.trustedSignature.end(),uint8_t{0});
+
+    const cs::Sequence seq = deferredBlock_.sequence();
+
+    // blockHash: direct copy of the pool hash, then sign.
     const auto lastHashBin = deferredBlock_.hash().to_binary();
-    // Zero before copy: empty source would otherwise leak stale memory into the signed hash.
-    std::fill(stage3.blockHash.begin(), stage3.blockHash.end(), uint8_t{0});
-    if (lastHashBin.empty()) {
-        cserror() << log_prefix << "stage3: deferredBlock_.hash() is empty for seq="
-                  << deferredBlock_.sequence() << " — refusing to sign zero hash, aborting stage3";
-        return;
+    if (!lastHashBin.empty()) {
+        std::copy(lastHashBin.cbegin(), lastHashBin.cend(), stage3.blockHash.begin());
+        stage3.blockSignature = cscrypto::generateSignature(private_key, stage3.blockHash.data(), stage3.blockHash.size());
     }
-    std::copy(lastHashBin.cbegin(), lastHashBin.cend(), stage3.blockHash.begin());
-    stage3.blockSignature = cscrypto::generateSignature(private_key, stage3.blockHash.data(), stage3.blockHash.size());
-
-
-    //pnode->prepareRoundTable(table, poolMetaInfo, stage3);
-    //csmeta(csdetails) << "end";
+    else {
+        cswarning() << log_prefix << "stage3: blockHash source empty for seq=" << seq << ", field left unsigned";
+    }
 
     const cs::Characteristic* block_characteristic = conveyer.characteristic(conveyer.currentRoundNumber());
-
     if (!block_characteristic) {
         csmeta(cserror) << "Send round info characteristic not found, logic error";
         return;
     }
-    bool showVersion = justCreatedRoundPackage_.roundTable().round >= Consensus::StartingDPOS && Consensus::miningOn;
-    cs::Bytes bytes = justCreatedRoundPackage_.bytesToSign(showVersion);
-    std::fill(stage3.roundHash.begin(), stage3.roundHash.end(), uint8_t{0});
-    if (bytes.empty()) {
-        cserror() << log_prefix << "stage3: roundTable bytesToSign is empty for seq="
-                  << deferredBlock_.sequence() << " — refusing to sign zero hash, aborting stage3";
-        return;
+    const bool showVersion = justCreatedRoundPackage_.roundTable().round >= Consensus::StartingDPOS && Consensus::miningOn;
+
+    // roundHash: hash of the round-table signing bytes, then sign.
+    const cs::Bytes roundBytes = justCreatedRoundPackage_.bytesToSign(showVersion);
+    if (!roundBytes.empty()) {
+        stage3.roundHash = cscrypto::calculateHash(roundBytes.data(), roundBytes.size());
+        stage3.roundSignature = cscrypto::generateSignature(private_key, stage3.roundHash.data(), stage3.roundHash.size());
     }
-    stage3.roundHash = cscrypto::calculateHash(bytes.data(), bytes.size());
+    else {
+        cswarning() << log_prefix << "stage3: roundHash source empty for seq=" << seq << ", field left unsigned";
+    }
 
-    cs::Bytes messageToSign;
-    messageToSign.reserve(sizeof(cs::RoundNumber) + sizeof(uint8_t) + sizeof(cs::Hash));
-    cs::ODataStream signStream(messageToSign);
-    signStream << justCreatedRoundPackage_.roundTable().round;
-    signStream << pnode->subRound();
-    signStream << stage3.roundHash;
-    stage3.roundSignature = cscrypto::generateSignature(private_key, stage3.roundHash.data(), stage3.roundHash.size());
-
+    // trustedHash: hash of round number + confidants, then sign.
     cs::Bytes trustedList;
     cs::ODataStream tStream(trustedList);
     tStream << justCreatedRoundPackage_.roundTable().round;
     tStream << justCreatedRoundPackage_.roundTable().confidants;
-    std::fill(stage3.trustedHash.begin(), stage3.trustedHash.end(), uint8_t{0});
-    if (trustedList.empty()) {
-        cserror() << log_prefix << "stage3: trustedList is empty for seq="
-                  << deferredBlock_.sequence() << " — refusing to sign zero hash, aborting stage3";
-        return;
+    if (!trustedList.empty()) {
+        stage3.trustedHash = cscrypto::calculateHash(trustedList.data(), trustedList.size());
+        stage3.trustedSignature = cscrypto::generateSignature(private_key, stage3.trustedHash.data(), stage3.trustedHash.size());
     }
-    stage3.trustedHash = cscrypto::calculateHash(trustedList.data(), trustedList.size());
-    stage3.trustedSignature = cscrypto::generateSignature(private_key, stage3.trustedHash.data(), stage3.trustedHash.size());
+    else {
+        cswarning() << log_prefix << "stage3: trustedHash source empty for seq=" << seq << ", field left unsigned";
+    }
 
     csdebug() << "NODE> StageThree prepared:" << std::endl << cs::StageThree::toString(stage3);
 }
