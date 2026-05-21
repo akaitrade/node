@@ -176,8 +176,8 @@ void TrustedStage2State::mark_outbound_nodes(SolverContext& context) {
     const uint8_t cnt = static_cast<uint8_t>(context.cnt_trusted());
     for (uint8_t i = 0; i < cnt; ++i) {
         if (context.stage1(i) == nullptr) {
-            // it is possible to get a transition to other state in SolverCore from any iteration, this is not a problem,
-            // simply execute method until end
+            // mark untrusted so the fake's empty roundTimeStamp doesn't silently desync chooseTimeStamp.
+            context.mark_untrusted(i);
             context.fake_stage1(i);
         }
     }
