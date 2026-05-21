@@ -87,6 +87,9 @@ Node::Node(cs::config::Observer& observer)
     // it should work prior WalletsIds & WalletsCache on reading DB
     // to prevent slow BCh reading skip deep validation of already validated blocks
     //cs::Connector::connect(&blockChain_.readBlockEvent(), this, &Node::deepBlockValidation);
+    // Inject confirmation getter so RECOMPUTE_DIFF can dump sha.confirmations.local
+    // alongside the rx side without dragging Node* into BlockChain.
+    blockChain_.setConfirmationGetter([this](cs::RoundNumber r) { return getConfirmation(r); });
     // let blockChain_ to subscribe on signals, WalletsIds & WalletsCache are there
     blockChain_.subscribeToSignals();
     // solver MUST subscribe to signals after the BlockChain

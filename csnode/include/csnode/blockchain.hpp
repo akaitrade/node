@@ -2,10 +2,12 @@
 #define BLOCKCHAIN_HPP
 
 #include <chrono>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include <fstream>
@@ -42,6 +44,7 @@ class Fee;
 class TransactionsIndex;
 class TransactionsPacket;
 class BlockChain_Serializer;
+struct TrustedConfirmation;
 
 /** @brief   The synchronized block signal emits when block is trying to be stored */
 using TryToStoreBlockSignal = cs::Signal<void(const csdb::Pool&, bool*)>;
@@ -208,6 +211,20 @@ public:
     // input vs. what the received block claims. Gated by env CS_DEBUG_RECOMPUTE.
     void debugRecomputeBlockDiff(const csdb::Pool& received) const;
 
+    // Shadow setBlockReward: recompute the blockReward bytes for `rx` using this
+    // node's current wallet cache, as if THIS node had been the writer. Same
+    // algorithm as SolverCore::setBlockReward but driven purely off the received
+    // pool + local cache, so it works without joining consensus. Used by the
+    // RECOMPUTE_DIFF dump to expose per-confidant divergence in the reward calc.
+    std::string computeShadowBlockReward(const csdb::Pool& rx) const;
+
+    // Optional callback to peek at this node's confirmationList_ for diagnostic
+    // purposes. Set by Node at startup. Used by debugRecomputeBlockDiff to dump
+    // sha.confirmations.local vs rx and surface confirmation-set drift between
+    // this node and the network writer, again without joining consensus.
+    using ConfirmationGetter = std::function<std::optional<cs::TrustedConfirmation>(cs::RoundNumber)>;
+    void setConfirmationGetter(ConfirmationGetter cb) { confirmationGetter_ = std::move(cb); }
+
     /**
      * @fn    std::size_t BlockChain::getCachedBlocksSize() const;
      *
@@ -355,7 +372,7 @@ public:
     void getTransactionsUntill(Transactions& transactions, csdb::Address address, csdb::TransactionID id, uint16_t flagg);
     void getAccountRegTime(uint64_t& aTime, csdb::Address address);
     void setBlocksToBeRemoved(cs::Sequence number);
-    double getStakingCoefficient(cs::StakingCoefficient coeff);
+    double getStakingCoefficient(cs::StakingCoefficient coeff) const;
 
     std::string printWalletCaches();
 
@@ -422,6 +439,8 @@ public:
 
 
 private:
+    ConfirmationGetter confirmationGetter_;
+
     void createCachesPath();
     bool findAddrByWalletId(const WalletId id, csdb::Address& addr) const;
     void writeGenesisBlock();

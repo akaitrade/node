@@ -261,11 +261,16 @@ private:
         return find_stage<>(stageOneStorage, sender);
     }
 
-    // Freeze the current stageOneStorage into stageOneSnapshot. Called once per
-    // round at the moment Trusted-1 transitions out, so subsequent late stage1
-    // arrivals don't perturb chooseTimeStamp on this node.
+    // TEMPORARILY DISABLED (see nodeDocs/STAGE1_LATE_RECEPTION_DIVERGENCE.md).
+    // The chooseTimeStamp snapshot from e58d1ab1 didn't fix the realTrustedMask
+    // divergence and the late-sender gate that depended on it didn't help
+    // either — so we're rolling back to vanilla behaviour (live stageOneStorage)
+    // while we hunt the actual stage-2 reconciliation regression.
+    // Leaving the empty body so the call sites in the trusted-1 → trusted-2
+    // transition compile; chooseTimeStamp's `!stageOneSnapshot.empty()` check
+    // then falls through to live storage, which is what vanilla did.
     void snapshotStage1ForTimestamp() {
-        stageOneSnapshot = stageOneStorage;
+        // no-op while we bisect the stage-2 regression.
     }
 
     /**
@@ -330,8 +335,8 @@ private:
     std::array<uint8_t, Consensus::MaxTrustedNodes> markUntrusted;
 
     std::vector<cs::StageOne> stageOneStorage;
-    // Frozen view of stageOneStorage taken when Trusted-1 transitions out.
-    // Used by chooseTimeStamp to avoid sign-time non-determinism from late stage1 arrivals.
+    // Stays empty while the snapshot path is disabled (see
+    // snapshotStage1ForTimestamp); chooseTimeStamp falls back to live storage.
     std::vector<cs::StageOne> stageOneSnapshot;
     std::vector<cs::StageTwo> stageTwoStorage;
     std::vector<cs::StageThree> stageThreeStorage;

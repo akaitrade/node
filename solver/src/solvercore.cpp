@@ -617,18 +617,27 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
         }
         csdebug() << log_prefix << os.str();
     }
+    // Zero every stage3 hash/signature slot up front so any field whose source
+    // turns out to be empty is sent recognisably-unsigned instead of carrying
+    // stale memory from a prior call.
+    std::fill(stage3.blockHash.begin(),       stage3.blockHash.end(),       uint8_t{0});
+    std::fill(stage3.roundHash.begin(),       stage3.roundHash.end(),       uint8_t{0});
+    std::fill(stage3.trustedHash.begin(),     stage3.trustedHash.end(),     uint8_t{0});
+    std::fill(stage3.blockSignature.begin(),  stage3.blockSignature.end(),  uint8_t{0});
+    std::fill(stage3.roundSignature.begin(),  stage3.roundSignature.end(),  uint8_t{0});
+    std::fill(stage3.trustedSignature.begin(),stage3.trustedSignature.end(),uint8_t{0});
+
+    const cs::Sequence seq = deferredBlock_.sequence();
+
+    // blockHash: direct copy of the pool hash, then sign.
     const auto lastHashBin = deferredBlock_.hash().to_binary();
-    // Zero blockHash before copy so an empty hash source can't leave stale
-    // heap/stack memory in the field (which we'd then sign over → invalid
-    // signatures rejected by peers as "Block Signatures are not valid").
-    std::fill(stage3.blockHash.begin(), stage3.blockHash.end(), uint8_t{0});
-    if (lastHashBin.empty()) {
-        cserror() << log_prefix << "stage3: deferredBlock_.hash() is empty for seq="
-                  << deferredBlock_.sequence() << " — refusing to sign zero hash, aborting stage3";
-        return;
+    if (!lastHashBin.empty()) {
+        std::copy(lastHashBin.cbegin(), lastHashBin.cend(), stage3.blockHash.begin());
+        stage3.blockSignature = cscrypto::generateSignature(private_key, stage3.blockHash.data(), stage3.blockHash.size());
     }
-    std::copy(lastHashBin.cbegin(), lastHashBin.cend(), stage3.blockHash.begin());
-    stage3.blockSignature = cscrypto::generateSignature(private_key, stage3.blockHash.data(), stage3.blockHash.size());
+    else {
+        cswarning() << log_prefix << "stage3: blockHash source empty for seq=" << seq << ", field left unsigned";
+    }
 
     // CS_DEBUG_RECOMPUTE: dump signed-blockHash inputs for cross-node diffing.
     {
@@ -677,12 +686,86 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
                    << "  tgtN="  << tgtN
                    << "  trxN="  << wd.transNum_ << "\n";
             }
+            // Per-field SHA-256 fingerprints. Compare these across nodes
+            // in the diverging round to localize which sub-region of the
+            // signed block stream differs.
+            auto sha = [](const void* p, size_t n) -> std::string {
+                const auto h = cscrypto::calculateHash(static_cast<const cs::Byte*>(p), n);
+                return cs::Utils::byteStreamToHex(h.data(), h.size());
+            };
+            auto appendRaw = [](cs::Bytes& dst, const void* p, size_t n) {
+                const auto* b = static_cast<const cs::Byte*>(p);
+                dst.insert(dst.end(), b, b + n);
+            };
+
+            ss << "  sha.timestamp     " << sha(ts.data(), ts.size()) << "\n";
+            ss << "  sha.blockReward   " << sha(br.data(), br.size()) << "\n";
+
+            {
+                cs::Bytes buf;
+                for (const auto& k : conf) {
+                    appendRaw(buf, k.data(), k.size());
+                }
+                ss << "  sha.confidants    " << sha(buf.data(), buf.size())
+                   << "  count=" << conf.size() << "\n";
+            }
+            ss << "  sha.realTrustedMask " << sha(maskBytes.data(), maskBytes.size()) << "\n";
+            {
+                const uint64_t rt = deferredBlock_.realTrusted();
+                const uint8_t  nt = deferredBlock_.numberTrusted();
+                cs::Bytes buf;
+                appendRaw(buf, &rt, sizeof(rt));
+                buf.push_back(nt);
+                ss << "  sha.rt+nt         " << sha(buf.data(), buf.size()) << "\n";
+            }
+            {
+                cs::Bytes buf;
+                const uint8_t  nc = deferredBlock_.numberConfirmations();
+                const uint64_t cm = deferredBlock_.roundConfirmationMask();
+                buf.push_back(nc);
+                appendRaw(buf, &cm, sizeof(cm));
+                for (const auto& sig : deferredBlock_.roundConfirmations()) {
+                    appendRaw(buf, sig.data(), sig.size());
+                }
+                ss << "  sha.confirmations " << sha(buf.data(), buf.size())
+                   << "  count=" << deferredBlock_.roundConfirmations().size() << "\n";
+            }
+            {
+                const auto& nw = static_cast<const csdb::Pool&>(deferredBlock_).newWallets();
+                cs::Bytes buf;
+                for (const auto& w : nw) {
+                    const size_t   ti = w.addressId_.trxInd_;
+                    const size_t   at = w.addressId_.addressType_;
+                    const auto     wi = w.walletId_;
+                    appendRaw(buf, &ti, sizeof(ti));
+                    appendRaw(buf, &at, sizeof(at));
+                    appendRaw(buf, &wi, sizeof(wi));
+                }
+                ss << "  sha.newWallets    " << sha(buf.data(), buf.size())
+                   << "  count=" << nw.size() << "\n";
+            }
+            {
+                const csdb::Amount rc = deferredBlock_.roundCost();
+                const int32_t  ri = rc.integral();
+                const uint64_t rf = rc.fraction();
+                cs::Bytes buf;
+                appendRaw(buf, &ri, sizeof(ri));
+                appendRaw(buf, &rf, sizeof(rf));
+                ss << "  sha.roundCost     " << sha(buf.data(), buf.size())
+                   << "  integral=" << ri << "  fraction=" << rf << "\n";
+            }
+            {
+                const auto& trx = deferredBlock_.transactions();
+                ss << "  trx.count         " << trx.size() << "\n";
+            }
+
             // Full to_binary() byte stream we just hashed. This is the
             // single source of truth for blockHash — diff against the
             // received block's bytes in RECOMPUTE_DIFF to localize the
             // exact diverging field. (Skipped if size > 64 KB.)
             const cs::Bytes binBytes = deferredBlock_.to_binary();
             ss << "  to_binary_size " << binBytes.size() << "\n";
+            ss << "  sha.to_binary     " << sha(binBytes.data(), binBytes.size()) << "\n";
             if (binBytes.size() <= 65536) {
                 ss << "  to_binary_hex  "
                    << cs::Utils::byteStreamToHex(binBytes.data(), binBytes.size()) << "\n";
@@ -704,38 +787,30 @@ void SolverCore::spawn_next_round(const cs::PublicKeys& nodes, const cs::Packets
         csmeta(cserror) << "Send round info characteristic not found, logic error";
         return;
     }
-    bool showVersion = justCreatedRoundPackage_.roundTable().round >= Consensus::StartingDPOS && Consensus::miningOn;
-    cs::Bytes bytes = justCreatedRoundPackage_.bytesToSign(showVersion);
-    // Same defensive zero as blockHash: calculateHash on empty input is
-    // not contractually defined to zero-fill, so we do it explicitly.
-    std::fill(stage3.roundHash.begin(), stage3.roundHash.end(), uint8_t{0});
-    if (bytes.empty()) {
-        cserror() << log_prefix << "stage3: roundTable bytesToSign is empty for seq="
-                  << deferredBlock_.sequence() << " — refusing to sign zero hash, aborting stage3";
-        return;
+    const bool showVersion = justCreatedRoundPackage_.roundTable().round >= Consensus::StartingDPOS && Consensus::miningOn;
+
+    // roundHash: hash of the round-table signing bytes, then sign.
+    const cs::Bytes roundBytes = justCreatedRoundPackage_.bytesToSign(showVersion);
+    if (!roundBytes.empty()) {
+        stage3.roundHash = cscrypto::calculateHash(roundBytes.data(), roundBytes.size());
+        stage3.roundSignature = cscrypto::generateSignature(private_key, stage3.roundHash.data(), stage3.roundHash.size());
     }
-    stage3.roundHash = cscrypto::calculateHash(bytes.data(), bytes.size());
+    else {
+        cswarning() << log_prefix << "stage3: roundHash source empty for seq=" << seq << ", field left unsigned";
+    }
 
-    cs::Bytes messageToSign;
-    messageToSign.reserve(sizeof(cs::RoundNumber) + sizeof(uint8_t) + sizeof(cs::Hash));
-    cs::ODataStream signStream(messageToSign);
-    signStream << justCreatedRoundPackage_.roundTable().round;
-    signStream << pnode->subRound();
-    signStream << stage3.roundHash;
-    stage3.roundSignature = cscrypto::generateSignature(private_key, stage3.roundHash.data(), stage3.roundHash.size());
-
+    // trustedHash: hash of round number + confidants, then sign.
     cs::Bytes trustedList;
     cs::ODataStream tStream(trustedList);
     tStream << justCreatedRoundPackage_.roundTable().round;
     tStream << justCreatedRoundPackage_.roundTable().confidants;
-    std::fill(stage3.trustedHash.begin(), stage3.trustedHash.end(), uint8_t{0});
-    if (trustedList.empty()) {
-        cserror() << log_prefix << "stage3: trustedList is empty for seq="
-                  << deferredBlock_.sequence() << " — refusing to sign zero hash, aborting stage3";
-        return;
+    if (!trustedList.empty()) {
+        stage3.trustedHash = cscrypto::calculateHash(trustedList.data(), trustedList.size());
+        stage3.trustedSignature = cscrypto::generateSignature(private_key, stage3.trustedHash.data(), stage3.trustedHash.size());
     }
-    stage3.trustedHash = cscrypto::calculateHash(trustedList.data(), trustedList.size());
-    stage3.trustedSignature = cscrypto::generateSignature(private_key, stage3.trustedHash.data(), stage3.trustedHash.size());
+    else {
+        cswarning() << log_prefix << "stage3: trustedHash source empty for seq=" << seq << ", field left unsigned";
+    }
 
     csdebug() << "NODE> StageThree prepared:" << std::endl << cs::StageThree::toString(stage3);
 }

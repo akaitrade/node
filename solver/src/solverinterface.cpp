@@ -13,6 +13,9 @@
 
 #include <chrono>
 #include <algorithm>
+#include <cstdlib>
+#include <sstream>
+#include <string_view>
 
 namespace cs {
 void SolverCore::init(
@@ -351,6 +354,45 @@ void SolverCore::gotStageThree(const cs::StageThree& stage, const uint8_t flagg)
 					csdebug() << "--> Writer is not valid.";
 				}
                 csdebug() << cs::StageThree::toString(stageFrom);
+                // CS_DEBUG_RECOMPUTE: cross-node divergence forensic. The receiver's
+                // stageFrom.blockHash/roundHash/trustedHash fields are LOCAL uninitialized
+                // memory (the wire format only carries the three signatures), so the only
+                // thing useful to anyone trying to diff with another operator's log is the
+                // local hashes we tried to verify against plus the remote signatures.
+                static const bool s_recomp = [] {
+                    const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+                    return v && *v && std::string_view(v) != "0";
+                }();
+                if (s_recomp) {
+                    std::ostringstream fd;
+                    fd << "\n=== STAGE3_FORENSIC seq=" << (pnode->getBlockChain().getLastSeq() + 1)
+                       << " sender=" << static_cast<int>(stageFrom.sender)
+                       << " iter=" << static_cast<int>(stageFrom.iteration) << " ===\n";
+                    fd << "  local.blockHash    " << cs::Utils::byteStreamToHex(stageTo.blockHash.data(), stageTo.blockHash.size()) << "\n";
+                    fd << "  remote.blockSig    " << cs::Utils::byteStreamToHex(stageFrom.blockSignature.data(), stageFrom.blockSignature.size()) << "\n";
+                    fd << "  local.roundHash    " << cs::Utils::byteStreamToHex(stageTo.roundHash.data(), stageTo.roundHash.size()) << "\n";
+                    fd << "  remote.roundSig    " << cs::Utils::byteStreamToHex(stageFrom.roundSignature.data(), stageFrom.roundSignature.size()) << "\n";
+                    fd << "  local.trustedHash  " << cs::Utils::byteStreamToHex(stageTo.trustedHash.data(), stageTo.trustedHash.size()) << "\n";
+                    fd << "  remote.trustedSig  " << cs::Utils::byteStreamToHex(stageFrom.trustedSignature.data(), stageFrom.trustedSignature.size()) << "\n";
+                    fd << "  local.realTrusted  " << cs::Utils::byteStreamToHex(stageTo.realTrustedMask.data(), stageTo.realTrustedMask.size()) << "\n";
+                    fd << "  remote.realTrusted " << cs::Utils::byteStreamToHex(stageFrom.realTrustedMask.data(), stageFrom.realTrustedMask.size()) << "\n";
+                    // chooseTimeStamp using remote's mask vs ours. If masks match,
+                    // both calls reduce to the same input; if they differ, this is
+                    // the smoking gun for the timestamp divergence path.
+                    const std::string tsLocal  = chooseTimeStamp(stageTo.realTrustedMask);
+                    const std::string tsRemote = chooseTimeStamp(stageFrom.realTrustedMask);
+                    fd << "  chooseTs(localMask)  " << tsLocal  << "\n";
+                    fd << "  chooseTs(remoteMask) " << tsRemote << "\n";
+                    fd << "  stageOne.size=" << stageOneStorage.size()
+                       << " snapshot.size=" << stageOneSnapshot.size() << "\n";
+                    const auto& src = !stageOneSnapshot.empty() ? stageOneSnapshot : stageOneStorage;
+                    for (const auto& s1 : src) {
+                        fd << "    s1 sender=" << static_cast<int>(s1.sender)
+                           << " ts=\"" << s1.roundTimeStamp << "\"\n";
+                    }
+                    fd << "=== END_STAGE3_FORENSIC seq=" << (pnode->getBlockChain().getLastSeq() + 1) << " ===";
+                    cslog() << fd.str();
+                }
                 realTrustedSetValue(stageFrom.sender, cs::ConfidantConsts::InvalidConfidantIndex);
             }
             return;

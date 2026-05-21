@@ -24,6 +24,8 @@
 #include <csnode/transactionsindex.hpp>
 #include <csnode/transactionsiterator.hpp>
 #include <csnode/configholder.hpp>
+#include <csnode/confirmationlist.hpp>
+#include <solver/consensus.hpp>
 #include <solver/smartcontracts.hpp>
 
 #include <boost/filesystem.hpp>
@@ -1268,7 +1270,7 @@ bool BlockChain::findWalletData(WalletId id, WalletData& wallData) const {
     return findWalletData_Unsafe(id, wallData);
 }
 
-double BlockChain::getStakingCoefficient(StakingCoefficient coeff) {
+double BlockChain::getStakingCoefficient(StakingCoefficient coeff) const {
     switch (coeff) {
     case StakingCoefficient::ThreeMonth:
         return 0.25;
@@ -2259,6 +2261,93 @@ std::string amtToString(const csdb::Amount& a) {
 }
 } // namespace
 
+// Mirrors SolverCore::setBlockReward (solver/src/solvercore.cpp:363) but driven
+// purely off the received pool + this node's wallet cache. Same algorithm,
+// same ordering, same fixed-point math.
+std::string BlockChain::computeShadowBlockReward(const csdb::Pool& rx) const {
+    const auto confidants = rx.confidants();
+    const auto realTrusted = cs::Utils::bitsToMask(rx.numberTrusted(), rx.realTrusted());
+    csdb::Amount totalFee = rx.roundCost();
+    if (totalFee == csdb::Amount{ 0 }) {
+        for (const auto& tr : rx.transactions()) {
+            totalFee += csdb::Amount(tr.counted_fee().to_double());
+        }
+    }
+    csdb::Amount totalStake = 0;
+    std::vector<csdb::Amount> confidantAndStake;
+    int32_t realTrustedNumber = 0;
+    const uint8_t kUntrustedMarker = 255;
+
+    for (size_t i = 0; i < confidants.size(); ++i) {
+        csdb::Amount nodeConfidantAndStake;
+        csdb::Amount nodeConfidantAndFreezenStake;
+        csdb::Amount totalNodeStake = 0;
+        if (realTrusted[i] == kUntrustedMarker) {
+            confidantAndStake.push_back(csdb::Amount{ 0 });
+            continue;
+        }
+        ++realTrustedNumber;
+        BlockChain::WalletData wData;
+        findWalletData(csdb::Address::from_public_key(confidants[i]), wData);
+        totalNodeStake += wData.balance_;
+        nodeConfidantAndStake += wData.balance_;
+        if (wData.delegateSources_ != nullptr && wData.delegateSources_->size() > 0) {
+            for (auto& keyAndStake : *(wData.delegateSources_)) {
+                for (auto& tm : keyAndStake.second) {
+                    if (tm.coeff == cs::StakingCoefficient::NoStaking) {
+                        nodeConfidantAndStake += tm.amount;
+                    }
+                    else {
+                        nodeConfidantAndFreezenStake += tm.amount * getStakingCoefficient(tm.coeff);
+                    }
+                }
+            }
+        }
+        totalNodeStake = nodeConfidantAndStake + nodeConfidantAndFreezenStake;
+
+        csdb::Amount totaNodeCutStake = totalNodeStake;
+        if (totaNodeCutStake > Consensus::MaxStakeValue) {
+            totaNodeCutStake = Consensus::MaxStakeValue;
+        }
+
+        confidantAndStake.push_back(
+            (nodeConfidantAndStake * getStakingCoefficient(cs::StakingCoefficient::NoStaking) + nodeConfidantAndFreezenStake)
+            * (totalNodeStake > csdb::Amount{ 1 } ? totaNodeCutStake / totalNodeStake : csdb::Amount{ 1 })
+        );
+        totalStake += confidantAndStake[i];
+    }
+
+    csdb::Amount minedValue = rx.sequence() < Consensus::StartingDPOS
+        ? csdb::Amount{ 0 }
+        : totalFee * Consensus::miningCoefficient + Consensus::blockReward;
+    if (totalStake < csdb::Amount{ 1 }) {
+        totalStake = csdb::Amount{ 1 };
+    }
+    csdb::Amount oneMiningPart = Consensus::stakingOn ? minedValue / totalStake : csdb::Amount{ 0 };
+    csdb::Amount payedReward = 0;
+    size_t numPayedTrusted = 0;
+    cs::Bytes fldBytes;
+    cs::ODataStream stream(fldBytes);
+    for (size_t i = 0; i < confidants.size(); ++i) {
+        csdb::Amount rewardToPay = 0;
+        if (realTrusted[i] != kUntrustedMarker) {
+            if (static_cast<int32_t>(numPayedTrusted) == realTrustedNumber - 1) {
+                rewardToPay = minedValue - payedReward;
+            }
+            else {
+                rewardToPay = oneMiningPart * confidantAndStake[i];
+            }
+            ++numPayedTrusted;
+        }
+        if (rewardToPay > minedValue || rewardToPay < csdb::Amount{ 0 }) {
+            rewardToPay = csdb::Amount{ 0 };
+        }
+        stream << rewardToPay.integral() << rewardToPay.fraction();
+        payedReward += rewardToPay;
+    }
+    return std::string(fldBytes.begin(), fldBytes.end());
+}
+
 void BlockChain::debugRecomputeBlockDiff(const csdb::Pool& rx) const {
     if (!debugRecomputeOn()) return;
 
@@ -2338,17 +2427,145 @@ void BlockChain::debugRecomputeBlockDiff(const csdb::Pool& rx) const {
            << "  tgtN="  << tgtCount
            << "  trxN="  << wd.transNum_ << "\n";
     }
-    // Full to_binary() byte stream for the received block. Diff against
-    // the local TRUSTED_SIGN_DUMP to_binary_hex for the same seq to find
-    // the exact diverging byte/field. Skipped if size > 64 KB.
-    const cs::Bytes binBytes = rx.to_binary();
+    // Per-field SHA-256 fingerprints of the received block. Pair with the
+    // sha.* lines in TRUSTED_SIGN_DUMP to localize which sub-region of the
+    // signed stream diverged between this node and the network majority.
+    auto sha = [](const void* p, size_t n) -> std::string {
+        const auto h = cscrypto::calculateHash(static_cast<const cs::Byte*>(p), n);
+        return cs::Utils::byteStreamToHex(h.data(), h.size());
+    };
+    auto appendRaw = [](cs::Bytes& dst, const void* p, size_t n) {
+        const auto* b = static_cast<const cs::Byte*>(p);
+        dst.insert(dst.end(), b, b + n);
+    };
+
+    {
+        std::string ts;
+        if (rx.user_field_ids().count(kFieldTimestamp) > 0) {
+            ts = rx.user_field(kFieldTimestamp).value<std::string>();
+        }
+        ss << "  sha.timestamp     " << sha(ts.data(), ts.size()) << "\n";
+    }
+    {
+        std::string rxR;
+        if (rx.user_field_ids().count(kFieldBlockReward) > 0) {
+            rxR = rx.user_field(kFieldBlockReward).value<std::string>();
+        }
+        ss << "  sha.blockReward   " << sha(rxR.data(), rxR.size()) << "\n";
+
+        // Shadow recomputation: what blockReward WOULD this node produce if it
+        // had signed this round? Diff against rx_hex tells us whether this
+        // node's wallet-state-driven calc agrees with the network writer's.
+        const std::string localR = computeShadowBlockReward(rx);
+        ss << "  sha.blockReward.local " << sha(localR.data(), localR.size())
+           << (localR == rxR ? "  MATCH" : "  DIVERGE") << "\n";
+        if (localR != rxR) {
+            ss << "  local.blockReward hex="
+               << cs::Utils::byteStreamToHex(
+                      reinterpret_cast<const uint8_t*>(localR.data()), localR.size())
+               << "\n";
+        }
+    }
+    {
+        cs::Bytes buf;
+        for (const auto& k : rx.confidants()) {
+            appendRaw(buf, k.data(), k.size());
+        }
+        ss << "  sha.confidants    " << sha(buf.data(), buf.size())
+           << "  count=" << rx.confidants().size() << "\n";
+    }
+    {
+        const uint64_t rt = rx.realTrusted();
+        const uint8_t  nt = rx.numberTrusted();
+        cs::Bytes buf;
+        appendRaw(buf, &rt, sizeof(rt));
+        buf.push_back(nt);
+        ss << "  sha.rt+nt         " << sha(buf.data(), buf.size()) << "\n";
+    }
+    {
+        cs::Bytes buf;
+        const uint8_t  nc = rx.numberConfirmations();
+        const uint64_t cm = rx.roundConfirmationMask();
+        buf.push_back(nc);
+        appendRaw(buf, &cm, sizeof(cm));
+        for (const auto& sig : rx.roundConfirmations()) {
+            appendRaw(buf, sig.data(), sig.size());
+        }
+        const std::string rxSha = sha(buf.data(), buf.size());
+        ss << "  sha.confirmations " << rxSha
+           << "  count=" << rx.roundConfirmations().size() << "\n";
+
+        // Shadow confirmation view: query this node's confirmationList_ for the
+        // same round and serialize it the same way. If sha differs, this node's
+        // local confirmation set drifted from the network writer's set — a
+        // sign-time-only divergence we can't catch by comparing finalized state.
+        if (confirmationGetter_) {
+            const auto local = confirmationGetter_(static_cast<cs::RoundNumber>(rx.sequence()));
+            if (local.has_value()) {
+                cs::Bytes lbuf;
+                const uint8_t lnc = static_cast<uint8_t>(local->mask.size());
+                const uint64_t lcm = cs::Utils::maskToBits(local->mask);
+                lbuf.push_back(lnc);
+                appendRaw(lbuf, &lcm, sizeof(lcm));
+                for (const auto& sig : local->signatures) {
+                    appendRaw(lbuf, sig.data(), sig.size());
+                }
+                const std::string localSha = sha(lbuf.data(), lbuf.size());
+                ss << "  sha.confirmations.local " << localSha
+                   << "  count=" << local->signatures.size()
+                   << (localSha == rxSha ? "  MATCH" : "  DIVERGE") << "\n";
+            }
+            else {
+                ss << "  sha.confirmations.local (no entry in confirmationList_)\n";
+            }
+        }
+    }
+    {
+        const auto& nw = rx.newWallets();
+        cs::Bytes buf;
+        for (const auto& w : nw) {
+            const size_t   ti = w.addressId_.trxInd_;
+            const size_t   at = w.addressId_.addressType_;
+            const auto     wi = w.walletId_;
+            appendRaw(buf, &ti, sizeof(ti));
+            appendRaw(buf, &at, sizeof(at));
+            appendRaw(buf, &wi, sizeof(wi));
+        }
+        ss << "  sha.newWallets    " << sha(buf.data(), buf.size())
+           << "  count=" << nw.size() << "\n";
+    }
+    {
+        const csdb::Amount rc = rx.roundCost();
+        const int32_t  ri = rc.integral();
+        const uint64_t rf = rc.fraction();
+        cs::Bytes buf;
+        appendRaw(buf, &ri, sizeof(ri));
+        appendRaw(buf, &rf, sizeof(rf));
+        ss << "  sha.roundCost     " << sha(buf.data(), buf.size())
+           << "  integral=" << ri << "  fraction=" << rf << "\n";
+    }
+    {
+        ss << "  trx.count         " << rx.transactions().size() << "\n";
+    }
+
+    // Full to_binary() byte stream for the received block. csdb::Pool caches
+    // its binary form during compose(); the rx we get here may not have been
+    // composed yet (signatures applied but compose() pending), so .to_binary()
+    // returns empty. Clone+compose to force the canonical form, then diff
+    // against the local TRUSTED_SIGN_DUMP to_binary_hex for the same seq to
+    // find the exact diverging byte/field. Skipped if size > 64 KB.
+    csdb::Pool rxClone = rx.clone();
+    rxClone.compose();
+    const cs::Bytes binBytes = rxClone.to_binary();
     ss << "  to_binary_size " << binBytes.size() << "\n";
+    ss << "  sha.to_binary     " << sha(binBytes.data(), binBytes.size()) << "\n";
     if (binBytes.size() <= 65536) {
         ss << "  to_binary_hex  "
            << cs::Utils::byteStreamToHex(binBytes.data(), binBytes.size()) << "\n";
     } else {
         ss << "  to_binary_hex  (skipped: size > 64KB)\n";
     }
+    ss << "  composed_hash  " << rxClone.hash().to_string() << "\n";
     ss << "=== END_RECOMPUTE_DIFF seq=" << rx.sequence() << " ===";
 
     csdebug() << ss.str();

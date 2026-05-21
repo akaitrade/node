@@ -23,18 +23,17 @@ option(LEVELDB_BUILD_TESTS "" OFF)
 option(LEVELDB_AUTORUN_TESTS "" OFF)
 option(DBSQL "Enable PostgeSQL server connection" OFF)
 
-set(CSDB_BACKEND "berkeleydb" CACHE STRING "csdb storage backend: berkeleydb, rocksdb, or both")
-set_property(CACHE CSDB_BACKEND PROPERTY STRINGS berkeleydb rocksdb both)
-if(NOT CSDB_BACKEND STREQUAL "berkeleydb" AND NOT CSDB_BACKEND STREQUAL "rocksdb" AND NOT CSDB_BACKEND STREQUAL "both")
-    message(FATAL_ERROR "CSDB_BACKEND must be 'berkeleydb', 'rocksdb', or 'both' (got '${CSDB_BACKEND}')")
-endif()
-message(STATUS "csdb backend: ${CSDB_BACKEND}")
+# The node binary always carries both DB backends; runtime selection is via
+# config.ini `db_backend` (berkeleydb default, rocksdb opt-in). The build
+# option used to allow shipping a single-backend binary; that is no longer
+# supported.
+set(CSDB_BACKEND "both" CACHE INTERNAL "csdb storage backend (locked to 'both')")
+message(STATUS "csdb backend: both (locked)")
 
-# When ON, csdb compiles BOTH backend .cpp files and the csdb_migrate tool is
-# built. CSDB_BACKEND still selects the default backend used by node.exe.
-option(CSDB_BUILD_MIGRATE "Build BDB->RocksDB migration tool (compiles both backends)" OFF)
+# Migration tool optionally built; it needs both backends, which we already have.
+option(CSDB_BUILD_MIGRATE "Build BDB->RocksDB migration tool" OFF)
 if(CSDB_BUILD_MIGRATE)
-    message(STATUS "csdb migrate tool: enabled (both backends will be compiled)")
+    message(STATUS "csdb migrate tool: enabled")
 endif()
 
 # OFF by default; ON aborts at startup if loaded chain UUID matches mainnet.
