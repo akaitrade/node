@@ -120,7 +120,14 @@ void TransactionsIndex::invalidate() {
 
 void TransactionsIndex::close() {
     if (db_->isOpen()) {
+      db_->flush();
       db_->close();
+    }
+}
+
+void TransactionsIndex::flush() {
+    if (db_->isOpen()) {
+      db_->flush();
     }
 }
 

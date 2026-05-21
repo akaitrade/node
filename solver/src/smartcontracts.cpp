@@ -1751,10 +1751,6 @@ void SmartContracts::on_next_block_impl(const csdb::Pool& block, bool reading_db
                             if (!reading_db) {
                                 csdebug() << kLogPrefix << to_base58(abs_addr) << " state is unchanged after " << ref_start;
                             }
-                            if (pnode->isStopRequested()) {
-                                *should_stop = true;
-                                return;
-                            }
                         }
                         remove_from_queue(ref_start, reading_db);
                     }

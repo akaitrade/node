@@ -34,8 +34,8 @@ class Node;
 
 class Transport : public net::HostEventHandler {
 public:
-    inline static volatile std::sig_atomic_t gSignalStatus = 0;
-    static void stop() { Transport::gSignalStatus = 1; }
+    inline static volatile std::sig_atomic_t gSignalStatus = 0;   // legacy flag; new path is stop()
+    void stop();   // wakes run loops immediately via cv
 
     using AddressAndPort = std::pair<std::string, uint16_t>;
     using BanList = std::vector<AddressAndPort>;
@@ -119,6 +119,10 @@ private:
     std::condition_variable newPacketsReceived_;
     std::mutex inboxMux_;
     PacketsQueue inboxQueue_;
+
+    std::atomic<bool> stopped_{false};
+    std::mutex shutdownMux_;
+    std::condition_variable shutdownCv_;
 
     Neighbourhood neighbourhood_;
     std::thread processorThread_;

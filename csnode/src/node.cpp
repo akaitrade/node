@@ -167,9 +167,16 @@ bool Node::init() {
                 initialConfidants_,
                 cs::ConfigHolder::instance().config()->newBlockchainTopSeq())
         ) {
-            csinfo() << "Remove data for QUICK START";
-            cachesSerializationManager_.clear();
-
+            if (isStopRequested()) {
+                cslog() << "Init aborted by user; preserving QUICK START state.";
+                if (cachesSerializationManager_.save(0)) {
+                    blockChain_.flushIndexes();
+                    cslog() << "Saved interim QUICK START state to qs/0.";
+                }
+            } else {
+                csinfo() << "Remove data for QUICK START";
+                cachesSerializationManager_.clear();
+            }
             return false;
         }
         Consensus::TimeMinStage1 = blockChain_.getTimeMinStage1();
@@ -191,9 +198,16 @@ bool Node::init() {
             cs::ConfigHolder::instance().config()->getPathToDB(),
             &cachesSerializationManager_, initialConfidants_)
     ) {
-        csinfo() << "Remove data for QUICK START";
-        cachesSerializationManager_.clear();
-
+        if (isStopRequested()) {
+            cslog() << "Init aborted by user; preserving QUICK START state.";
+            if (cachesSerializationManager_.save(0)) {
+                blockChain_.flushIndexes();
+                cslog() << "Saved interim QUICK START state to qs/0.";
+            }
+        } else {
+            csinfo() << "Remove data for QUICK START";
+            cachesSerializationManager_.clear();
+        }
         return false;
     }
 
@@ -276,6 +290,10 @@ void Node::stop() {
     dumpKnownPeersToFile();
     EventReport::sendRunningStatus(*this, Running::Status::Stop);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    if (poolSynchronizer_) {
+        poolSynchronizer_->stop();
+    }
 
     // stopping transport stops the node (see Node::run() method)
     transport_->stop();
@@ -3954,6 +3972,8 @@ void Node::requestStop() {
 }
 
 void Node::onStopRequested() {
+    blockChain_.requestStop();
+
     if (stopRequested_) {
         stop();
         return;
@@ -4239,12 +4259,9 @@ void Node::checkConsensusSettings(cs::Sequence seq, std::string& msg){
 }
 
 void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
-    if (stopRequested_) {
-        *shouldStop = true;
-        return;
-    }
+    // user-cancel is honoured via BlockChain::init's OpenCallback; *shouldStop here means DataIntegrityError
     if (!blockValidator_->validateBlock(block,
-        cs::BlockValidator::ValidationLevel::hashIntergrity 
+        cs::BlockValidator::ValidationLevel::hashIntergrity
             | cs::BlockValidator::ValidationLevel::blockNum
             /*| cs::BlockValidator::ValidationLevel::smartStates*/
             /*| cs::BlockValidator::ValidationLevel::accountBalance*/,

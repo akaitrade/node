@@ -2,7 +2,9 @@
 #define DUMBCV_HPP
 
 #include <atomic>
+#include <condition_variable>
 #include <map>
+#include <mutex>
 #include <lib/system/common.hpp>
 #include <csdb/transaction.hpp>
 

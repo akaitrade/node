@@ -144,6 +144,11 @@ bool BlockChain::init(
     bool checkTrxIndexRecreate = true;
 
     csdb::Storage::OpenCallback progress = [&](const csdb::Storage::OpenProgress& progress) {
+        if (stop_) {
+            cslog() << kLogPrefix << "shutdown requested, aborting slow start at "
+                    << WithDelimiters(progress.poolsProcessed);
+            return true;
+        }
         if (checkTrxIndexRecreate) {
           checkTrxIndexRecreate = false;
           if (trxIndex_->recreate() && successfulQuickStart) {
@@ -195,6 +200,12 @@ bool BlockChain::init(
 
 bool BlockChain::isGood() const {
     return good_;
+}
+
+void BlockChain::flushIndexes() {
+    if (trxIndex_) {
+        trxIndex_->flush();
+    }
 }
 
 uint64_t BlockChain::uuid() const {

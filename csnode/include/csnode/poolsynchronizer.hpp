@@ -1,6 +1,8 @@
 #ifndef POOLSYNCHRONIZER_HPP
 #define POOLSYNCHRONIZER_HPP
 
+#include <mutex>
+
 #include <csdb/pool.hpp>
 
 #include <csnode/blockchain.hpp>
@@ -23,6 +25,8 @@ public:
     void syncLastPool();
     void getBlockReply(PoolsBlock&& poolsBlock, const cs::PublicKey& sender);
     bool isSyncroStarted() const;
+
+    void stop();
 
     cs::Sequence getMaxNeighbourSequence();
     static const RoundNumber kRoundDifferentForSync = values::kDefaultMetaStorageMaxSize;
@@ -71,6 +75,7 @@ private:
     BlockChain* blockChain_;
 
     std::atomic<bool> isSyncroStarted_ = false;
+    std::atomic<bool> stopped_ = false;
 
     Sequence maxRequestedSequence_ = kWrongSequence;
     std::unordered_map<PublicKey, Sequence> neighbours_;
