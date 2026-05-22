@@ -138,6 +138,7 @@ bool Peer::onRun(const char*) {
     }
 
     cslog() << "Node stopped";
+    node_->stop();   // idempotent; ensures stop ordering even if run() returned via a non-stop path
     cslog() << "Destroying Node";
     node_->destroy();
     node_.reset(nullptr);

@@ -85,6 +85,8 @@ public:
 
     bool isGood() const;
 
+    void flushIndexes();
+
     // return unique id of database if at least one unique block has written, otherwise (only genesis block) 0
     uint64_t uuid() const;
 
@@ -168,6 +170,7 @@ public:
 
     // storage adaptor
     void close();
+    void requestStop() { stop_ = true; }
     bool getTransaction(const csdb::Address& addr, const int64_t& innerId, csdb::Transaction& result) const;
     void arrangeBlocksInCache();
 
