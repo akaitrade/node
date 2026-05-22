@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #include <serializer.hpp>
@@ -3391,21 +3392,20 @@ Bytes SmartContracts::serialize() {
         ++qIt;
     }
 
-    //TODO: next two set should be sorted unless we impact the difference of hashes while loading contracts
-    size_t bSize = blacklistedContracts_.size();
-    os << bSize;
-    auto bIt = blacklistedContracts_.begin();
-    for (size_t i = 0; i < bSize; ++i) {
-        os << bIt->public_key();
-        ++bIt;
+    // Copy unordered_sets into ordered sets for deterministic byte output.
+    // Iteration over std::unordered_set is implementation-defined, so direct
+    // iteration produced different hash values on each save → cache integrity
+    // check failed on load even when the logical state was identical.
+    std::set<csdb::Address> sortedBlacklist(blacklistedContracts_.begin(), blacklistedContracts_.end());
+    os << sortedBlacklist.size();
+    for (const auto& addr : sortedBlacklist) {
+        os << addr.public_key();
     }
 
-    size_t lSize = locked_contracts.size();
-    os << lSize;
-    auto lIt = locked_contracts.begin();
-    for (size_t i = 0; i < lSize; ++i) {
-        os << lIt->public_key();
-        ++lIt;
+    std::set<csdb::Address> sortedLocked(locked_contracts.begin(), locked_contracts.end());
+    os << sortedLocked.size();
+    for (const auto& addr : sortedLocked) {
+        os << addr.public_key();
     }
     return data;
 }
@@ -3514,11 +3514,11 @@ SmartContracts::StateItem SmartContracts::StateItem::from_bytes(Bytes& data) {
     is >> uSize;
     for (uint64_t i = 0ULL; i < uSize; ++i) {
         std::string u1;
-        is >> u1;   
+        is >> u1;
         uint64_t u1Size = 0;
-        is >> u1Size;    
+        is >> u1Size;
         std::map<csdb::Address, std::string> iMap;
-        for (size_t i1 = 0ULL; i < u1Size; ++i) {
+        for (size_t i1 = 0ULL; i1 < u1Size; ++i1) {
             PublicKey pKey;
             std::string s1;
             is >> pKey;
@@ -3556,9 +3556,7 @@ SmartContracts::QueueItem SmartContracts::QueueItem::from_bytes(Bytes& data) {
     for (size_t i = 0ULL; i < eSize;++i) {
         Bytes eData;
         is >> eData;
-        SmartContracts::ExecutionItem tmp;
-        tmp.from_bytes(eData);
-        res.executions.push_back(tmp);
+        res.executions.push_back(SmartContracts::ExecutionItem::from_bytes(eData));
     }
     is >> res.status;
     is >> res.seq_enqueue;
@@ -3582,9 +3580,8 @@ Bytes SmartContracts::ExecutionItem::to_bytes() {
     os << consumed_fee.integral() << consumed_fee.fraction();
     uint64_t uSize = uses.size();
     os << uSize;
-    auto it = uses.begin();
-    while (it != uses.end()) {
-        os << it->public_key();
+    for (const auto& addr : uses) {
+        os << addr.public_key();
     }
 
     os << result.toBinary();
@@ -3598,7 +3595,7 @@ SmartContracts::ExecutionItem SmartContracts::ExecutionItem::from_bytes(Bytes& d
     is >> res.ref_start.sequence >> res.ref_start.transaction;
     Bytes tdata;
     is >> tdata;
-    res.transaction.from_binary(tdata);
+    res.transaction = csdb::Transaction::from_binary(tdata);
     int32_t tint;
     uint64_t tfrac;
 

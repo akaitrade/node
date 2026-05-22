@@ -12,6 +12,7 @@
 
 #include <csnode/node.hpp>  // introduce csconnector::connector::ApiExecHandlerPtr at least
 
+#include <cassert>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -410,7 +411,9 @@ public:
     void net_update_contract_state(const csdb::Address& contract_abs_addr, const cs::Bytes& contract_data);
 
     csdb::Address absolute_address(const csdb::Address& optimized_address) const {
-        return bc.getAddressByType(optimized_address, BlockChain::AddressType::PublicKey);
+        auto result = bc.getAddressByType(optimized_address, BlockChain::AddressType::PublicKey);
+        assert(result.is_public_key() && "absolute_address resolved to non-pubkey form");
+        return result;
     }
 
     std::string to_base58(const csdb::Address& addr) {

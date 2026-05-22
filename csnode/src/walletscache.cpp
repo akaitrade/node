@@ -184,8 +184,18 @@ void WalletsCache::Updater::loadNextBlock(const csdb::Pool& pool,
     data_.staking_->cleanObsoletteDelegations(BlockChain::getBlockTime(pool));
 
 #ifdef MONITOR_NODE
-    const auto& wrWall = pool.writer_public_key();
+    cs::PublicKey wrWall;
+    bool wrWallValid = false;
+    try {
+        wrWall = pool.writer_public_key();
+        wrWallValid = true;
+    }
+    catch (const std::exception& e) {
+        cswarning() << "WalletsCache: skip writer/trusted update for block "
+                    << pool.sequence() << " (writer_public_key threw: " << e.what() << ")";
+    }
 
+    if (wrWallValid) {
     auto it_writer = data_.trusted_info_.find(wrWall);
     if (it_writer == data_.trusted_info_.end()) {
         auto res = data_.trusted_info_.insert(std::make_pair(wrWall, TrustedData()));
@@ -204,6 +214,7 @@ void WalletsCache::Updater::loadNextBlock(const csdb::Pool& pool,
         else --it_trusted->second.times_trusted;
     }
     setWalletTime(wrWall, timeStamp);
+    } // if (wrWallValid)
 #endif
 /* @TODO optimize checkWallets - takes 96% of time during db loading
     if (!transactions.empty()) {
@@ -608,8 +619,10 @@ double WalletsCache::Updater::loadTrxForSource(const csdb::Transaction& tr,
                         << EncodeBase58(cs::Bytes(pubKey.begin(), pubKey.end()))
                         << " <- " << tr.innerID();
 
-#ifdef MONITOR_NODE        
-            setWalletTime(pubKey, tr.get_time());
+#ifdef MONITOR_NODE
+            if (wallData.createTime_ == 0) {
+                wallData.createTime_ = tr.get_time();
+            }
 #endif
         }
         else {
@@ -810,7 +823,9 @@ void WalletsCache::Updater::loadTrxForTarget(const csdb::Transaction& tr, const 
         }
 
 #ifdef MONITOR_NODE
-        setWalletTime(toPublicKey(tr.target()), tr.get_time());
+        if (wallData.createTime_ == 0) {
+            wallData.createTime_ = tr.get_time();
+        }
 #endif
         wallData.lastTransaction_ = tr.id();
     }

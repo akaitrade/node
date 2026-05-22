@@ -1,4 +1,5 @@
 #include <base58.h>
+#include <chrono>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
 #include <lib/system/logger.hpp>
@@ -115,12 +116,18 @@ bool BlockChain::init(
     bool successfulQuickStart = false;
 
     if (newBlockchainTop == cs::kWrongSequence) {
-        if (trxIndex_->recreate()) {
-            cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
+        if (trxIndex_->recreate() || !trxIndex_->isReady() || trxIndex_->looksEmpty()) {
+            cswarning() << "trxIndex needs rebuild — skipping QuickStart, slow-start will populate it";
+            if (!trxIndex_->recreate()) {
+                trxIndex_->forceRebuild();
+            }
             bindSerializationManToCaches(serializationManPtr, initialConfidants);
         }
         else {
             successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
+            if (!successfulQuickStart && trxIndex_->recreate()) {
+                cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
+            }
         }
     }
 
@@ -128,6 +135,7 @@ bool BlockChain::init(
     if (successfulQuickStart) {
         if (lastSequence_ != 0) {
             firstBlockToReadInDatabase = lastSequence_ + 1;
+            trxIndex_->pinFloor(lastSequence_.load());
             emit successfullQuickStartEvent(csdb::Amount(blockRewardIntegral_, blockRewardFraction_), csdb::Amount(miningCoefficientIntegral_, miningCoefficientFraction_), miningOn_, miningOn_, TimeMinStage1_);
         }
 
@@ -171,6 +179,7 @@ bool BlockChain::init(
     }
 
     if (newBlockchainTop != cs::kWrongSequence) {
+        if (trxIndex_) trxIndex_->trimToFloor(newBlockchainTop);
         return true;
     }
 
@@ -193,6 +202,10 @@ bool BlockChain::init(
         }
     }
 
+    if (!successfulQuickStart && !stop_ && serializationManPtr_) {
+        serializationManPtr_->setCompletedFromGenesis();
+    }
+
     good_ = true;
     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
     return true;
@@ -206,6 +219,10 @@ void BlockChain::flushIndexes() {
     if (trxIndex_) {
         trxIndex_->flush();
     }
+}
+
+bool BlockChain::isTrxIndexReady() const {
+    return !trxIndex_ || trxIndex_->isReady();
 }
 
 uint64_t BlockChain::uuid() const {
@@ -246,6 +263,30 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
             }
             updateNonEmptyBlocks(block);
             walletsCacheUpdater_->loadNextBlock(block, block.confidants(), *this);
+        }
+    }
+
+    if (serializationManPtr_ && blockSeq && !*shouldStop) {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
+        const auto now = std::chrono::steady_clock::now();
+        const bool byCount = (every > 0 && blockSeq % every == 0);
+        const bool byTime = (sto.checkpointEveryMinutes > 0
+            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
+        if (byCount || byTime) {
+            cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
+            trxIndex_->flush();
+            cs::CheckpointHead head;
+            head.sequence = blockSeq;
+            head.head_hash = block.hash().to_binary();
+            head.prev_hash = block.previous_hash().to_binary();
+            if (serializationManPtr_->save(blockSeq, head)) {
+                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
+                lastCheckpointWallClock_ = now;
+            }
+            else {
+                cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
+            }
         }
     }
 }
@@ -795,11 +836,27 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
         return false;
     }
 
-    if (serializationManPtr_
-        && pool.sequence()
-        && pool.sequence() % kQuickStartSaveCachesInterval == 0
-        && !serializationManPtr_->save(pool.sequence())) {
-        cserror() << "Cannot save caches with version " << pool.sequence();
+    if (serializationManPtr_ && pool.sequence()) {
+        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
+        const auto now = std::chrono::steady_clock::now();
+        const bool byCount = (every > 0 && pool.sequence() % every == 0);
+        const bool byTime = (sto.checkpointEveryMinutes > 0
+            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
+        if (byCount || byTime) {
+            trxIndex_->flush();
+            cs::CheckpointHead head;
+            head.sequence = pool.sequence();
+            head.head_hash = pool.hash().to_binary();
+            head.prev_hash = pool.previous_hash().to_binary();
+            if (serializationManPtr_->save(pool.sequence(), head)) {
+                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
+                lastCheckpointWallClock_ = now;
+            }
+            else {
+                cserror() << "Cannot save caches with version " << pool.sequence();
+            }
+        }
     }
 
     return true;
@@ -1048,6 +1105,21 @@ void BlockChain::tryFlushDeferredBlock() {
 void BlockChain::close() {
     stop_ = true;
     tryFlushDeferredBlock();
+
+    cs::CheckpointHead headInfo;
+    if (serializationManPtr_) {
+        const auto topSeq = getLastSeq();
+        auto headHash = getHashBySequence(topSeq);
+        if (!headHash.is_empty()) {
+            headInfo.sequence = topSeq;
+            headInfo.head_hash = headHash.to_binary();
+            if (topSeq > 0) {
+                auto prevHash = getHashBySequence(topSeq - 1);
+                if (!prevHash.is_empty()) headInfo.prev_hash = prevHash.to_binary();
+            }
+        }
+    }
+
     cs::Lock lock(dbLock_);
     storage_.close();
     cs::Connector::disconnect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
@@ -1061,7 +1133,7 @@ void BlockChain::close() {
 
     csinfo() << "Blockchain: try to save caches for QUICK START.";
 
-    if (serializationManPtr_->save()) {
+    if (serializationManPtr_->save(0, headInfo)) {
       csinfo() << "Blockchain: caches for QUICK START saved successfully.";
     }
     else {

@@ -1,6 +1,7 @@
 #ifndef BLOCKCHAIN_HPP
 #define BLOCKCHAIN_HPP
 
+#include <chrono>
 #include <list>
 #include <map>
 #include <memory>
@@ -86,6 +87,9 @@ public:
     bool isGood() const;
 
     void flushIndexes();
+
+    // false while trxIndex has an unwalked floor gap; consensus uses this to gate Trusted.
+    bool isTrxIndexReady() const;
 
     // return unique id of database if at least one unique block has written, otherwise (only genesis block) 0
     uint64_t uuid() const;
@@ -547,7 +551,8 @@ private:
 
     friend class cs::BlockChain_Serializer;
 
-    const size_t kQuickStartSaveCachesInterval = 10'000'000;
+    static constexpr size_t kQuickStartSaveCachesInterval = 500'000;
+    std::chrono::steady_clock::time_point lastCheckpointWallClock_ = std::chrono::steady_clock::now();
     int32_t blockRewardIntegral_;
     uint64_t blockRewardFraction_ ;
     int32_t miningCoefficientIntegral_;

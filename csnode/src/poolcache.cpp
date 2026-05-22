@@ -1,12 +1,25 @@
 #include <poolcache.hpp>
 
+#include <cassert>
+#include <filesystem>
+#include <system_error>
+
 #include <csdb/pool.hpp>
 #include <lib/system/utils.hpp>
 
 static const std::string dbPath = "/poolcachedb";
 
+namespace {
+// wipe stale poolcachedb on startup; lmdbxx has no public iteration to rebuild the mirror
+std::string wipeAndReturn(const std::string& fullPath) {
+    std::error_code ec;
+    std::filesystem::remove_all(fullPath, ec);
+    return fullPath;
+}
+}
+
 cs::PoolCache::PoolCache(const std::string& path)
-: db_(path + dbPath) {
+: db_(wipeAndReturn(path + dbPath)) {
     initialization();
 }
 
@@ -76,13 +89,8 @@ std::optional<cs::PoolCache::Data> cs::PoolCache::value(cs::Sequence sequence) c
 std::optional<cs::PoolCache::Data> cs::PoolCache::pop(cs::Sequence sequence) {
     auto data = value(sequence);
     db_.remove(sequence);
-
-    if (!data.has_value()) {
-        onRemoved(sequence);
-        return std::nullopt;
-    }
-
-    return std::make_optional(std::move(data).value());
+    onRemoved(sequence); // always sync mirror; onRemoved is idempotent
+    return data.has_value() ? std::make_optional(std::move(data).value()) : std::nullopt;
 }
 
 size_t cs::PoolCache::size() const {
@@ -126,13 +134,27 @@ std::vector<cs::PoolCache::Interval> cs::PoolCache::ranges() const {
     }
 
     if (sizeCreated() > 0) {
-        auto i = std::as_const(syncedIter);
-        auto iter = (syncedIter == sequences_.end()) ? sequences_.begin() : i;
-        auto createdInterval = createInterval(std::next(iter)->first, maxSequence());
+        // Pick the start of the gap-walk for the Created portion of the cache.
+        // Original code did `std::next(iter)->first` unconditionally — UB when
+        // std::next(iter) == sequences_.end() (single Created entry, or
+        // syncedIter is the last element). MSVC reads sentinel garbage (0),
+        // producing a bogus interval [1..maxSeq-1] that broke sync.
+        std::vector<cs::PoolCache::Interval> createdInterval;
+        if (syncedIter == sequences_.end()) {
+            // No synced entries: walk all Created entries from minSequence.
+            createdInterval = createInterval(minSequence(), maxSequence());
+        }
+        else {
+            auto next = std::next(syncedIter);
+            if (next != sequences_.end()) {
+                createdInterval = createInterval(next->first, maxSequence());
+            }
+        }
 
         if (sizeSynced() > 0 && !createdInterval.empty()) {
-            if (syncedIter->first != std::next(syncedIter)->first) {
-                intervals.push_back(std::make_pair(syncedIter->first + 1, std::next(syncedIter)->first - 1));
+            auto next = std::next(syncedIter);
+            if (next != sequences_.end() && syncedIter->first + 1 < next->first) {
+                intervals.push_back(std::make_pair(syncedIter->first + 1, next->first - 1));
             }
         }
 
@@ -162,6 +184,8 @@ void cs::PoolCache::onInserted(const char* data, size_t size) {
             syncedIter = iter;
         }
     }
+
+    checkInvariant();
 }
 
 void cs::PoolCache::onRemoved(const char* data, size_t size) {
@@ -181,6 +205,7 @@ void cs::PoolCache::onRemoved(cs::Sequence sequence) {
         }
 
         sequences_.erase(iter);
+        checkInvariant();
     }
 }
 
@@ -197,10 +222,18 @@ void cs::PoolCache::initialization() {
     db_.open();
 
     syncedIter = sequences_.end();
+    // verify open-time signal replay produced a consistent mirror
+    checkInvariant();
 }
 
 cs::PoolStoreType cs::PoolCache::cachedType(cs::Sequence sequence) const {
     return sequences_.find(sequence)->second;
+}
+
+void cs::PoolCache::checkInvariant() const {
+#ifndef NDEBUG
+    assert(sequences_.size() == db_.size());
+#endif
 }
 
 std::vector<cs::PoolCache::Interval> cs::PoolCache::createInterval(Sequence min, Sequence max) const {

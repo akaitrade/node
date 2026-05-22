@@ -154,6 +154,9 @@ public:
         return size() == 0;
     }
 
+    lmdb::env& env() { return *env_; }
+    const lmdb::env& env() const { return *env_; }
+
     /// transactions
 
     // inserts pair of key/value to database as byte stream,
@@ -471,7 +474,7 @@ protected:
     auto environment(const unsigned flags) const {
         return std::make_unique<lmdb::env>(lmdb::env::create(flags));
     }
-    
+
 private:
     std::unique_ptr<lmdb::env> env_;
     std::string path_;

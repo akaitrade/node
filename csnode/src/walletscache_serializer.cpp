@@ -34,6 +34,7 @@ void WalletsCache_Serializer::bind(WalletsCache& wCache) {
 }
 
 void WalletsCache_Serializer::clear(const std::filesystem::path& rootDir) {
+    (void)rootDir;
     smartPayableTransactions_->clear();
     canceledSmarts_->clear();
     wallets_->clear();
@@ -42,7 +43,6 @@ void WalletsCache_Serializer::clear(const std::filesystem::path& rootDir) {
 #endif
     currentDelegations_->clear();
     miningDelegations_->clear();
-    save(rootDir);
 }
 
 void WalletsCache_Serializer::save(const std::filesystem::path& rootDir) {
