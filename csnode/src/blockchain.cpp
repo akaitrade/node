@@ -1,3 +1,4 @@
+#define CS_LOG_CHANNEL "blockchain"
 #include <base58.h>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
