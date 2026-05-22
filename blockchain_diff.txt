@@ -1,0 +1,1112 @@
+﻿diff --git a/csnode/src/blockchain.cpp b/csnode/src/blockchain.cpp
+index 69bc9d25..393f1710 100644
+--- a/csnode/src/blockchain.cpp
++++ b/csnode/src/blockchain.cpp
+@@ -1,3 +1,8 @@
++#define CS_LOG_CHANNEL "blockchain"
++#include <chrono>
++#include <cstdlib>
++#include <sstream>
++#include <string_view>
+ #include <base58.h>
+ #include <csdb/currency.hpp>
+ #include <lib/system/hash.hpp>
+@@ -9,6 +14,7 @@
+ #include <dbsql/roundinfo.hpp>
+ #endif
+ #include <csnode/blockchain.hpp>
++#include <csnode/chain_integrity.hpp>
+ #include <csnode/blockhashes.hpp>
+ #include <csnode/conveyer.hpp>
+ #include <csnode/datastream.hpp>
+@@ -18,6 +24,8 @@
+ #include <csnode/transactionsindex.hpp>
+ #include <csnode/transactionsiterator.hpp>
+ #include <csnode/configholder.hpp>
++#include <csnode/confirmationlist.hpp>
++#include <solver/consensus.hpp>
+ #include <solver/smartcontracts.hpp>
+ 
+ #include <boost/filesystem.hpp>
+@@ -78,7 +86,9 @@ bool BlockChain::bindSerializationManToCaches(
+ 
+ bool BlockChain::tryQuickStart(
+     cs::CachesSerializationManager* serializationManPtr,
+-    std::set<cs::PublicKey>& initialConfidants
++    std::set<cs::PublicKey>& initialConfidants,
++    const std::string& dbPath,
++    const std::string& dbBackend
+ ) {
+     cslog() << "Try QUICK START...";
+     if (!bindSerializationManToCaches(serializationManPtr, initialConfidants)) {
+@@ -89,7 +99,24 @@ bool BlockChain::tryQuickStart(
+     for (auto it : initialConfidants) {
+         reserveConf.insert(it);
+     }
+-    bool ok = serializationManPtr_->load();
++
++    // single-block chain-binding check; Storage::open re-opens for live walk
++    auto verifier = [&dbPath, &dbBackend](const cs::CheckpointHead& head) -> bool {
++        if (head.head_hash.empty()) return true;  // legacy / no binding to verify
++        auto db = cs::chain_integrity::open_db(dbBackend, dbPath);
++        if (!db) {
++            cswarning() << "tryQuickStart: cannot open chain DB for verification; allowing checkpoint";
++            return true;
++        }
++        const bool ok = cs::chain_integrity::verify_at(*db, head.sequence, head.head_hash);
++        if (!ok) {
++            cserror() << "tryQuickStart: chain-binding mismatch at seq " << head.sequence
++                      << "; quarantining checkpoint";
++        }
++        return ok;
++    };
++
++    bool ok = serializationManPtr_->load(verifier);
+ 
+     if (ok) {
+         cslog() << "Caches for QUICK START loaded successfully!";
+@@ -115,12 +142,19 @@ bool BlockChain::init(
+     bool successfulQuickStart = false;
+ 
+     if (newBlockchainTop == cs::kWrongSequence) {
+-        if (trxIndex_->recreate()) {
+-            cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
++        if (trxIndex_->recreate() || !trxIndex_->isReady() || trxIndex_->looksEmpty()) {
++            cswarning() << "trxIndex needs rebuild — skipping QuickStart, slow-start will populate it";
++            if (!trxIndex_->recreate()) {
++                trxIndex_->forceRebuild();
++            }
+             bindSerializationManToCaches(serializationManPtr, initialConfidants);
+         }
+         else {
+-            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
++            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants,
++                                                 path, cs::ConfigHolder::instance().config()->getStorageSettings().dbBackend);
++            if (!successfulQuickStart && trxIndex_->recreate()) {
++                cslog() << "Cannot use QUICK START, trxIndex has to be recreated";
++            }
+         }
+     }
+ 
+@@ -128,11 +162,21 @@ bool BlockChain::init(
+     if (successfulQuickStart) {
+         if (lastSequence_ != 0) {
+             firstBlockToReadInDatabase = lastSequence_ + 1;
++            trxIndex_->pinFloor(lastSequence_.load());
+             emit successfullQuickStartEvent(csdb::Amount(blockRewardIntegral_, blockRewardFraction_), csdb::Amount(miningCoefficientIntegral_, miningCoefficientFraction_), miningOn_, miningOn_, TimeMinStage1_);
+         }
+ 
+         csinfo() << "QUICK START! lastSequence_   is " << lastSequence_.load();
+         csinfo() << "QUICK START! first block to read in database is " << firstBlockToReadInDatabase;
++
++#ifdef CS_MAINNET_UUID
++        // QS bypasses onReadFromDB(block#1); check uuid_ here too.
++        if (uuid_.load() == CS_MAINNET_UUID) {
++            cserror() << kLogPrefix << "CS_REFUSE_MAINNET build detected mainnet UUID "
++                      << uuid_.load() << " (via QuickStart) — refusing to run.";
++            std::exit(2);
++        }
++#endif
+     }
+     else {
+         cslog() << "SLOW START...";
+@@ -144,6 +188,11 @@ bool BlockChain::init(
+     bool checkTrxIndexRecreate = true;
+ 
+     csdb::Storage::OpenCallback progress = [&](const csdb::Storage::OpenProgress& progress) {
++        if (stop_) {
++            cslog() << kLogPrefix << "shutdown requested, aborting slow start at "
++                    << WithDelimiters(progress.poolsProcessed);
++            return true;
++        }
+         if (checkTrxIndexRecreate) {
+           checkTrxIndexRecreate = false;
+           if (trxIndex_->recreate() && successfulQuickStart) {
+@@ -160,12 +209,32 @@ bool BlockChain::init(
+         return false;
+     };
+ 
+-    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase)) {
++    const auto& storageCfg = cs::ConfigHolder::instance().config()->getStorageSettings();
++
++    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
++                       storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
++                       storageCfg.useStubs,
++                       static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
++                       static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
++                       storageCfg.dbBackend)) {
+         cserror() << kLogPrefix << "Couldn't open database at " << path;
+         return false;
+     }
+ 
++    // Spin up the parallel signature verifier (sync-time only; idle at steady state).
++    if (storageCfg.verifyWorkerCount > 0 && storageCfg.verifyBatchSize > 1) {
++        verifierPool_ = std::make_unique<cs::VerifierPool>(storageCfg.verifyWorkerCount);
++        verifyBatchSize_ = storageCfg.verifyBatchSize;
++        cslog() << kLogPrefix << "verifier pool: " << storageCfg.verifyWorkerCount
++                << " workers, batch size " << storageCfg.verifyBatchSize;
++    }
++    if (storageCfg.progressLogInterval > 0) {
++        progressLogInterval_ = storageCfg.progressLogInterval;
++    }
++
+     if (newBlockchainTop != cs::kWrongSequence) {
++        // chain was just trimmed; align trxIndex if it was ahead.
++        if (trxIndex_) trxIndex_->trimToFloor(newBlockchainTop);
+         return true;
+     }
+ 
+@@ -188,6 +257,11 @@ bool BlockChain::init(
+         }
+     }
+ 
++    // full genesis-to-head walk completed — mark caches validated; carries forward via sentinel.bin
++    if (!successfulQuickStart && !stop_ && serializationManPtr_) {
++        serializationManPtr_->setCompletedFromGenesis();
++    }
++
+     good_ = true;
+     blocksToBeRemoved_ = totalLoaded - 1; // any amount to remave after start
+     return true;
+@@ -197,6 +271,16 @@ bool BlockChain::isGood() const {
+     return good_;
+ }
+ 
++void BlockChain::flushIndexes() {
++    if (trxIndex_) {
++        trxIndex_->flush();
++    }
++}
++
++bool BlockChain::isTrxIndexReady() const {
++    return !trxIndex_ || trxIndex_->isReady();
++}
++
+ uint64_t BlockChain::uuid() const {
+     return uuid_;
+ }
+@@ -209,12 +293,26 @@ void BlockChain::onStartReadFromDB(cs::Sequence lastWrittenPoolSeq) {
+ }
+ 
+ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
++    // stop_ is honoured by the OpenCallback (UserCancelled), not here.
+     auto blockSeq = block.sequence();
++    {
++        const auto prev = lastSequence_.load();
++        if (prev > blockSeq + 100) {
++            cslog() << "TRACE: onReadFromDB lastSequence_ regress from " << prev << " to " << blockSeq;
++        }
++    }
+     lastSequence_ = blockSeq;
+     if (blockSeq == 1) {
+         cs::Lock lock(dbLock_);
+         uuid_ = uuidFromBlock(block);
+         csdebug() << kLogPrefix << "UUID = " << uuid_;
++#ifdef CS_MAINNET_UUID
++        if (uuid_ == CS_MAINNET_UUID) {
++            cserror() << kLogPrefix << "CS_REFUSE_MAINNET build detected mainnet UUID "
++                      << uuid_ << " — refusing to run.";
++            std::exit(2);
++        }
++#endif
+     }
+ 
+     if (!updateWalletIds(block, *walletsCacheUpdater_.get())) {
+@@ -237,6 +335,31 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
+             walletsCacheUpdater_->loadNextBlock(block, block.confidants(), *this);
+         }
+     }
++
++    if (serializationManPtr_ && blockSeq && !*shouldStop) {
++        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
++        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
++        const auto now = std::chrono::steady_clock::now();
++        const bool byCount = (every > 0 && blockSeq % every == 0);
++        const bool byTime = (sto.checkpointEveryMinutes > 0
++            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
++        if (byCount || byTime) {
++            cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
++            trxIndex_->flush();
++            storage_.flush();   // sync chain DB WAL alongside indexes and QS save
++            cs::CheckpointHead head;
++            head.sequence = blockSeq;
++            head.head_hash = block.hash().to_binary();
++            head.prev_hash = block.previous_hash().to_binary();
++            if (serializationManPtr_->save(blockSeq, head)) {
++                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
++                lastCheckpointWallClock_ = now;
++            }
++            else {
++                cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
++            }
++        }
++    }
+ }
+ 
+ inline void BlockChain::updateNonEmptyBlocks(const csdb::Pool& pool) {
+@@ -363,8 +486,10 @@ void BlockChain::applyToWallet(const csdb::Address& addr, const std::function<vo
+     auto pub = getAddressByType(addr, BlockChain::AddressType::PublicKey);
+     auto wd = walletsCacheUpdater_->findWallet(pub.public_key());
+ 
++    if (wd) {
+         func(*wd);
+     }
++}
+ #endif
+ 
+ size_t BlockChain::getSize() const {
+@@ -516,6 +641,8 @@ void BlockChain::removeLastBlock() {
+         blockHashes_->remove(remove_hash);
+     }
+     --lastSequence_;
++    cslog() << "TRACE: removeLastBlock decremented lastSequence_ to " << lastSequence_.load()
++            << " (blocksToBeRemoved_=" << blocksToBeRemoved_ << ")";
+ 
+     csmeta(csdebug) << kLogPrefix << "done";
+ }
+@@ -661,79 +788,65 @@ void BlockChain::logBlockInfo(csdb::Pool& pool) {
+     csdebug() << " last storage size: " << getSize();
+ }
+ 
+-bool BlockChain::finalizeBlock(csdb::Pool& pool, bool isTrusted, cs::PublicKeys lastConfidants) {
+-    if (!pool.compose()) {
+-        csmeta(cserror) << kLogPrefix << "Couldn't compose block: " << pool.sequence();
+-        return false;
+-    }
+-
++bool BlockChain::verifyBlockSignatures(const csdb::Pool& pool,
++                                       const cs::PublicKeys& lastConfidants,
++                                       bool isTrusted) const {
+     cs::Sequence currentSequence = pool.sequence();
+-    const auto& confidants = pool.confidants();
+     const auto& signatures = pool.signatures();
+     const auto& realTrusted = pool.realTrusted();
+-    if (currentSequence > 1) {
+-        csdebug() << kLogPrefix << "Finalize: starting confidants validation procedure (#" << currentSequence << "):";
+ 
++    if (signatures.empty() && (!isTrusted || pool.sequence() != 0)) {
++        return false;
++    }
++
++    if (signatures.size() < static_cast<size_t>(cs::Utils::maskValue(realTrusted)) && !isTrusted && pool.sequence() != 0) {
++        return false;
++    }
++
++    // Round confirmations: this block's roundConfirmations against PREVIOUS block's confidants.
++    if (currentSequence > 1) {
+         cs::Bytes trustedToHash;
+         cs::ODataStream tth(trustedToHash);
+         tth << currentSequence;
+-        tth << confidants;
+-
++        tth << pool.confidants();
+         cs::Hash trustedHash = cscrypto::calculateHash(trustedToHash.data(), trustedToHash.size());
+ 
+         const cs::Signatures& sigs = pool.roundConfirmations();
+-        const auto& confMask = cs::Utils::bitsToMask(pool.numberConfirmations(), pool.roundConfirmationMask());
+-        // for debugging only delete->
+-        csdebug() << kLogPrefix << "Mask size = " << confMask.size() << " for next confidants:";
+-        for (auto& it : lastConfidants) {
+-            csdebug() << cs::Utils::byteStreamToHex(it.data(), it.size());
+-        }
+-        // <-delete
++        const auto confMask = cs::Utils::bitsToMask(pool.numberConfirmations(), pool.roundConfirmationMask());
++
+         if (!BlockChain::isBootstrap(pool) && confMask.size() > 1) {
+             if (!NodeUtils::checkGroupSignature(lastConfidants, confMask, sigs, trustedHash)) {
+-                csdebug() << kLogPrefix << "           The Confidants confirmations are not OK";
+                 return false;
+             }
+-            else {
+-                csdebug() << kLogPrefix << "           The Confidants confirmations are OK";
+         }
+     }
+-        else {
+-            // TODO: add SS or bootstrap confidants PKey to the prevConfidants
++
++    // Pool signatures: this block's signatures against THIS block's confidants.
++    if (currentSequence > 0) {
++        Hash tempHash;
++        auto hash = pool.hash().to_binary();
++        std::copy(hash.cbegin(), hash.cend(), tempHash.data());
++        const auto mask = cs::Utils::bitsToMask(pool.numberTrusted(), pool.realTrusted());
++        if (!NodeUtils::checkGroupSignature(pool.confidants(), mask, signatures, tempHash)) {
++            return false;
+         }
+     }
+ 
+-    if (signatures.empty() && (!isTrusted || pool.sequence() != 0)) {
+-        csmeta(csdebug) << kLogPrefix << "The pool #" << pool.sequence() << " doesn't contain signatures";
+-        return false;
++    return true;
+ }
+ 
+-    if (signatures.size() < static_cast<size_t>(cs::Utils::maskValue(realTrusted)) && !isTrusted && pool.sequence() != 0) {
+-        csmeta(csdebug) << kLogPrefix << "The number of signatures is insufficient";
++bool BlockChain::finalizeBlock(csdb::Pool& pool, bool isTrusted, cs::PublicKeys lastConfidants, bool skipVerify) {
++    if (!pool.compose()) {
++        csmeta(cserror) << kLogPrefix << "Couldn't compose block: " << pool.sequence();
+         return false;
+     }
+-    auto mask = cs::Utils::bitsToMask(pool.numberTrusted(), pool.realTrusted());
+ 
+-    // pool signatures check: start
+-    if (pool.sequence() > 0) {
+-        //  csmeta(csdebug) << "Pool Hash: " << cs::Utils::byteStreamToHex(pool.hash().to_binary().data(), pool.hash().to_binary().size());
+-        //  csmeta(csdebug) << "Prev Hash: " << cs::Utils::byteStreamToHex(pool.previous_hash().to_binary().data(), pool.previous_hash().to_binary().size());
+-        Hash tempHash;
+-        auto hash = pool.hash().to_binary();
+-        //csdebug() << "New pool " << pool.sequence() << ": " << cs::Utils::byteStreamToHex(pool.to_binary());
+-        std::copy(hash.cbegin(), hash.cend(), tempHash.data());
+-        if (NodeUtils::checkGroupSignature(confidants, mask, signatures, tempHash)) {
+-            csmeta(csdebug) << kLogPrefix << "The number of signatures is sufficient and all of them are OK";
+-        }
+-        else {
+-            cswarning() << kLogPrefix << "Some of Pool Signatures aren't valid. The pool will not be written to DB. It will be automatically written, when we get proper data";
++    if (!skipVerify) {
++        if (!verifyBlockSignatures(pool, lastConfidants, isTrusted)) {
++            cswarning() << kLogPrefix << "block #" << pool.sequence() << " failed signature verification";
+             return false;
+         }
+     }
+-    else {
+-        csmeta(csdebug) << kLogPrefix << "Genesis block will be written without signatures verification";
+-    }
+-    // pool signatures check: end
+ 
+     if (pool.transactions_count() > 0) {
+         const auto block_time = BlockChain::getBlockTime(pool);
+@@ -784,12 +897,29 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
+         return false;
+     }
+ 
+-    if (serializationManPtr_
+-        && pool.sequence()
+-        && pool.sequence() % kQuickStartSaveCachesInterval == 0
+-        && !serializationManPtr_->save(pool.sequence())) {
++    if (serializationManPtr_ && pool.sequence()) {
++        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
++        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
++        const auto now = std::chrono::steady_clock::now();
++        const bool byCount = (every > 0 && pool.sequence() % every == 0);
++        const bool byTime = (sto.checkpointEveryMinutes > 0
++            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
++        if (byCount || byTime) {
++            trxIndex_->flush();
++            storage_.flush();   // sync chain DB WAL alongside indexes and QS save
++            cs::CheckpointHead head;
++            head.sequence = pool.sequence();
++            head.head_hash = pool.hash().to_binary();
++            head.prev_hash = pool.previous_hash().to_binary();
++            if (serializationManPtr_->save(pool.sequence(), head)) {
++                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
++                lastCheckpointWallClock_ = now;
++            }
++            else {
+                 cserror() << "Cannot save caches with version " << pool.sequence();
+             }
++        }
++    }
+ 
+     return true;
+ }
+@@ -1037,6 +1167,23 @@ void BlockChain::tryFlushDeferredBlock() {
+ void BlockChain::close() {
+     stop_ = true;
+     tryFlushDeferredBlock();
++
++    // Capture chain-binding info BEFORE storage is closed; getHashBySequence
++    // needs the storage open.
++    cs::CheckpointHead headInfo;
++    if (serializationManPtr_) {
++        const auto topSeq = getLastSeq();
++        auto headHash = getHashBySequence(topSeq);
++        if (!headHash.is_empty()) {
++            headInfo.sequence = topSeq;
++            headInfo.head_hash = headHash.to_binary();
++            if (topSeq > 0) {
++                auto prevHash = getHashBySequence(topSeq - 1);
++                if (!prevHash.is_empty()) headInfo.prev_hash = prevHash.to_binary();
++            }
++        }
++    }
++
+     cs::Lock lock(dbLock_);
+     storage_.close();
+     cs::Connector::disconnect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
+@@ -1050,7 +1197,7 @@ void BlockChain::close() {
+ 
+     csinfo() << "Blockchain: try to save caches for QUICK START.";
+ 
+-    if (serializationManPtr_->save()) {
++    if (serializationManPtr_->save(0, headInfo)) {
+       csinfo() << "Blockchain: caches for QUICK START saved successfully.";
+     }
+     else {
+@@ -1123,7 +1270,7 @@ bool BlockChain::findWalletData(WalletId id, WalletData& wallData) const {
+     return findWalletData_Unsafe(id, wallData);
+ }
+ 
+-double BlockChain::getStakingCoefficient(StakingCoefficient coeff) {
++double BlockChain::getStakingCoefficient(StakingCoefficient coeff) const {
+     switch (coeff) {
+     case StakingCoefficient::ThreeMonth:
+         return 0.25;
+@@ -1271,7 +1418,7 @@ std::string  BlockChain::printWalletCaches() {
+     return res;
+ }
+ 
+-std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrusted) {
++std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrusted, bool skipVerify) {
+     const auto last_seq = getLastSeq();
+     const auto pool_seq = pool.sequence();
+ 
+@@ -1312,7 +1459,7 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
+         }
+     }
+ 
+-    if (finalizeBlock(pool, isTrusted, lastConfidants)) {
++    if (finalizeBlock(pool, isTrusted, lastConfidants, skipVerify)) {
+         csdebug() << kLogPrefix << "The block is correct";
+         if (!applyBlockToCaches(pool)) {
+             csdebug() << kLogPrefix << "failed to apply block to caches";
+@@ -1363,6 +1510,14 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
+ 
+         deferredBlock_ = pool;
+         pool = deferredBlock_.clone();
++        {
++            const auto prev = lastSequence_.load();
++            const auto newSeq = deferredBlock_.sequence();
++            if (prev > newSeq + 100) {
++                cslog() << "TRACE: recordBlock lastSequence_ regress from " << prev << " to " << newSeq
++                        << " (deferredBlock pool seq=" << newSeq << ")";
++            }
++        }
+         lastSequence_ = deferredBlock_.sequence();
+     }
+ 
+@@ -1554,7 +1709,7 @@ bool BlockChain::isSpecial(const csdb::Transaction& t) {
+     return false;
+ }
+ 
+-bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
++bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipVerify) {
+     const auto lastSequence = getLastSeq();
+     const auto poolSequence = pool.sequence();
+     
+@@ -1569,7 +1724,10 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
+     }
+ 
+     if (!BlockChain::isBootstrap(pool)) {
+-        if ((pool.numberConfirmations() == 0 || pool.roundConfirmations().size() == 0) && pool.sequence() > 1) {
++        // Stub-derived empty pools have no confirmations on disk; only enforce
++        // for non-empty pools. Coordinated upgrade requirement.
++        const bool requireConfirmations = pool.transactions_count() > 0;
++        if (requireConfirmations && (pool.numberConfirmations() == 0 || pool.roundConfirmations().size() == 0) && pool.sequence() > 1) {
+             return false;
+         }
+     }
+@@ -1610,6 +1768,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
+     }
+ 
+     if (poolSequence == lastSequence + 1) {
++        debugRecomputeBlockDiff(pool);
+         if (pool.previous_hash() != getLastHash()) {
+             csdebug() << "BLOCKCHAIN> new pool\'s prev. hash does not equal to current last hash";
+             if (getLastHash().is_empty()) {
+@@ -1646,6 +1805,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
+             csdebug() << kLogPrefix << "The pool " << pool.sequence() << " is invalid, won't be stored";
+             if (lastSequence_ == poolSequence) {
+                 --lastSequence_;
++                cslog() << "TRACE: tryToStoreBlock check_failed decremented lastSequence_ to " << lastSequence_.load();
+                 csdebug() << kLogPrefix << "Deleting defered block: " << deferredBlock_.sequence();
+                 deferredBlock_ = csdb::Pool{};
+             }
+@@ -1655,7 +1815,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
+         }
+ 
+         // write immediately
+-        if (recordBlock(pool, false).has_value()) {
++        if (recordBlock(pool, false, skipVerify).has_value()) {
+             csdebug() << kLogPrefix << "block #" << poolSequence << " has recorded to chain successfully";
+             // unable to call because stack overflow in case of huge written blocks amount possible:
+             // testCachedBlocks();
+@@ -1671,6 +1831,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type) {
+         //here the problem could arise if deferred the block is saved to db
+         if (lastSequence_ == poolSequence) {
+             --lastSequence_;
++            cslog() << "TRACE: storeBlock-record-failed decremented lastSequence_ to " << lastSequence_.load();
+             deferredBlock_ = csdb::Pool{};
+         }
+ 
+@@ -1730,51 +1891,146 @@ void BlockChain::testCachedBlocks() {
+ 
+     size_t countStored = 0;
+     cs::Sequence fromSeq = lastSeq;
++    const size_t batchSize = (verifierPool_ && verifyBatchSize_ > 1) ? verifyBatchSize_ : 1;
+ 
+     while (!cachedBlocks_->isEmpty()) {
+         if (stop_) {
+-            // stop requested while handle cached blocks
+             return;
+         }
+ 
+-        auto firstBlockInCache = cachedBlocks_->minSequence();
++        const auto firstBlockInCache = cachedBlocks_->minSequence();
++        if (firstBlockInCache != lastSeq) {
++            csdebug() << kLogPrefix << "Stop store blocks from cache. Next blocks in cache #" << firstBlockInCache;
++            break;
++        }
++
++        // Collect a batch of consecutive blocks (peek; do not pop yet).
++        std::vector<cs::PoolCache::Data> batch;
++        batch.reserve(batchSize);
++        cs::Sequence wantSeq = lastSeq;
++        for (size_t i = 0; i < batchSize; ++i) {
++            if (!cachedBlocks_->contains(wantSeq)) break;
++            auto v = cachedBlocks_->value(wantSeq);
++            if (!v.has_value()) break;
++            batch.push_back(std::move(v.value()));
++            ++wantSeq;
++        }
+ 
+-        if (firstBlockInCache == lastSeq) {
+-            // retrieve and use block if it is exactly what we need:
+-            auto data = cachedBlocks_->pop(firstBlockInCache);
++        if (batch.empty()) break;
++
++        const bool useParallelVerify = verifierPool_ && batch.size() > 1;
++        size_t verifiedCount = 0;
++
++        if (useParallelVerify) {
++            // Build lastConfidants per block. First needs the previous chain block;
++            // subsequent ones get them from the preceding batch entry directly.
++            std::vector<cs::PublicKeys> lastConfList(batch.size());
++            if (lastSeq > 1) {
++                cs::Lock dblock(dbLock_);
++                if (deferredBlock_.is_valid() && deferredBlock_.sequence() + 1 == lastSeq) {
++                    lastConfList[0] = deferredBlock_.confidants();
++                }
++                else {
++                    lastConfList[0] = loadBlock(lastSeq - 1).confidants();
++                }
++            }
++            for (size_t i = 1; i < batch.size(); ++i) {
++                lastConfList[i] = batch[i - 1].pool.confidants();
++            }
++
++            // Warm any lazily-cached Pool fields on the main thread before
++            // dispatching workers. hash() is the documented lazy field
++            // (Pool::hash() updateHash on first access). Touching the others
++            // here is defensive — confirms each pool's deserialised data is
++            // fully materialised before any worker touches it.
++            for (auto& d : batch) {
++                (void)d.pool.hash();
++                (void)d.pool.signatures();
++                (void)d.pool.confidants();
++                (void)d.pool.realTrusted();
++                (void)d.pool.numberTrusted();
++                (void)d.pool.roundConfirmations();
++                (void)d.pool.numberConfirmations();
++                (void)d.pool.roundConfirmationMask();
++            }
++
++            // Dispatch parallel verifies. Capture stable pointers by VALUE
++            // rather than references-to-local-references; the latter is
++            // implementation-defined and was the suspected cause of
++            // intermittent verify failures on the last block of each batch.
++            std::vector<std::future<bool>> futures;
++            futures.reserve(batch.size());
++            for (size_t i = 0; i < batch.size(); ++i) {
++                const csdb::Pool* poolPtr = &batch[i].pool;
++                const cs::PublicKeys* lcPtr = &lastConfList[i];
++                futures.push_back(verifierPool_->submit([this, poolPtr, lcPtr]() {
++                    return verifyBlockSignatures(*poolPtr, *lcPtr, /*isTrusted=*/false);
++                }));
++            }
++
++            // Wait for ALL verifies to complete before applying any block.
++            // Avoids storeBlock running in parallel with still-pending verify
++            // futures (storeBlock takes Pool& mutable; any global side
++            // effect from apply could otherwise race a pending verify).
++            std::vector<bool> verifyOk;
++            verifyOk.reserve(batch.size());
++            for (auto& f : futures) {
++                verifyOk.push_back(f.get());
++            }
++
++            // Apply in order. Stop applying at the first verify failure.
++            for (size_t i = 0; i < batch.size(); ++i) {
++                if (!verifyOk[i]) {
++                    cserror() << kLogPrefix << "verify failed at block " << batch[i].pool.sequence()
++                              << " in batch; dropping it and rest from cache";
++                    break;
++                }
++                cachedBlocks_->remove(batch[i].pool.sequence());
++                if (!storeBlock(batch[i].pool, batch[i].type, /*skipVerify=*/true)) {
++                    cserror() << kLogPrefix << "apply failed at block " << batch[i].pool.sequence()
++                              << "; dropping rest from cache";
++                    break;
++                }
++                ++verifiedCount;
++                ++countStored;
++            }
+ 
++            // Drop unapplied tail (verify failure or apply failure).
++            for (size_t i = verifiedCount; i < batch.size(); ++i) {
++                cachedBlocks_->remove(batch[i].pool.sequence());
++            }
++        }
++        else {
++            // Single-block path (steady-state, or verifierPool not configured).
++            auto data = cachedBlocks_->pop(firstBlockInCache);
+             if (!data.has_value()) {
+                 cswarning() << "cached blocks returned not valid pool, stop testing cache";
+                 break;
+             }
+-
+             if (data.value().pool.is_read_only() && data.value().type == cs::PoolStoreType::Created) {
+                 cswarning() << "created block from chache is read-only";
+             }
+-
+-            const bool ok = storeBlock(data.value().pool, data.value().type);
+-
+-            if (!ok) {
++            if (!storeBlock(data.value().pool, data.value().type)) {
+                 cserror() << kLogPrefix << "Failed to record cached block to chain, drop it & wait to request again";
+                 break;
+             }
+-
++            ++verifiedCount;
+             ++countStored;
++        }
+ 
+-            if (countStored >= 1000) {
++        if (countStored >= progressLogInterval_) {
+             cslog() << "BLOCKCHAIN> stored " << WithDelimiters(countStored)
+                 << " blocks " << WithDelimiters(fromSeq) << " .. " << WithDelimiters(fromSeq + countStored) << " from cache";
+             countStored = 0;
+             fromSeq = lastSeq + 1;
+         }
+ 
+-            lastSeq = getLastSeq() + 1;
+-        }
+-        else {
+-            // stop processing, we have not got required block in cache yet
+-            csdebug() << kLogPrefix << "Stop store blocks from cache. Next blocks in cache #" << firstBlockInCache;
++        if (verifiedCount < batch.size()) {
++            // Hit a failure; let next sync request bring the missing blocks again.
+             break;
+         }
++
++        lastSeq = getLastSeq() + 1;
+     }
+ 
+     if (countStored > 0) {
+@@ -1822,46 +2078,45 @@ std::size_t BlockChain::getCachedBlocksSizeSynced() const {
+     return cachedBlocks_->sizeSynced();
+ }
+ 
++cs::Sequence BlockChain::getCachedBlocksMinSequence() const {
++    cs::Lock lock(cachedBlocksMutex_);
++    return cachedBlocks_->isEmpty() ? cs::kWrongSequence : cachedBlocks_->minSequence();
++}
++
+ void BlockChain::clearBlockCache() {
+     cs::Lock lock(cachedBlocksMutex_);
+     cachedBlocks_->clear();
+ }
+ 
+-std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks() const {
++std::vector<BlockChain::SequenceInterval> BlockChain::getRequiredBlocks(cs::Sequence maxSequence) const {
+     cs::Sequence seq = getLastSeq();
+     const auto firstSequence = seq + 1;
+-    const auto currentRoundNumber = cs::Conveyer::instance().currentRoundNumber()-1;
++    const cs::Sequence inclusiveLast = (maxSequence != cs::kWrongSequence)
++        ? maxSequence
++        : (cs::Conveyer::instance().currentRoundNumber() >= 1
++            ? cs::Conveyer::instance().currentRoundNumber() - 1
++            : cs::Sequence{0});
+ 
+-    if (firstSequence >= currentRoundNumber) {
++    if (firstSequence > inclusiveLast) {
+         return std::vector<SequenceInterval>();
+     }
+ 
+-    const auto roundNumber = currentRoundNumber > 0 ? std::max(firstSequence, currentRoundNumber - 1) : 0;
++    const auto roundNumber = inclusiveLast;
+ 
+-    // return at least [next, 0] or [next, currentRoundNumber]:
+     if (cachedBlocks_->isEmpty()) {
+         return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
+     }
+ 
+     auto ranges = cachedBlocks_->ranges();
++    const auto minCached = cachedBlocks_->minSequence();
++    const auto maxCached = cachedBlocks_->maxSequence();
+ 
+-    if (ranges.empty()) {
+-        return std::vector<SequenceInterval>{ {firstSequence, roundNumber} };
+-    }
+-    bool emplaceLater = false;
+-    if (firstSequence < ranges.front().first) {
+-        ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
+-        emplaceLater = true;
++    if (firstSequence < minCached) {
++        ranges.emplace_back(firstSequence, minCached - 1);
+     }
+-    //TODO: this piece of code should be precisely examined
+-    if (ranges.back().second < roundNumber) {
+-        ranges.emplace_back(cachedBlocks_->maxSequence() + 1, roundNumber);
++    if (maxCached < roundNumber) {
++        ranges.emplace_back(maxCached + 1, roundNumber);
+     }
+-    if (emplaceLater) {
+-        ranges.emplace_back(firstSequence, cachedBlocks_->minSequence() - 1);
+-    }
+-
+-
+     return ranges;
+ }
+ 
+@@ -1990,11 +2245,340 @@ const MultiWallets& BlockChain::multiWallets() const {
+     return walletsCacheStorage_->multiWallets();
+ }
+ 
++namespace {
++bool debugRecomputeOn() {
++    static const bool en = [] {
++        const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
++        return v && *v && std::string_view(v) != "0";
++    }();
++    return en;
++}
++
++std::string amtToString(const csdb::Amount& a) {
++    std::ostringstream os;
++    os << a.integral() << "." << a.fraction();
++    return os.str();
++}
++} // namespace
++
++// Mirrors SolverCore::setBlockReward (solver/src/solvercore.cpp:363) but driven
++// purely off the received pool + this node's wallet cache. Same algorithm,
++// same ordering, same fixed-point math.
++std::string BlockChain::computeShadowBlockReward(const csdb::Pool& rx) const {
++    const auto confidants = rx.confidants();
++    const auto realTrusted = cs::Utils::bitsToMask(rx.numberTrusted(), rx.realTrusted());
++    csdb::Amount totalFee = rx.roundCost();
++    if (totalFee == csdb::Amount{ 0 }) {
++        for (const auto& tr : rx.transactions()) {
++            totalFee += csdb::Amount(tr.counted_fee().to_double());
++        }
++    }
++    csdb::Amount totalStake = 0;
++    std::vector<csdb::Amount> confidantAndStake;
++    int32_t realTrustedNumber = 0;
++    const uint8_t kUntrustedMarker = 255;
++
++    for (size_t i = 0; i < confidants.size(); ++i) {
++        csdb::Amount nodeConfidantAndStake;
++        csdb::Amount nodeConfidantAndFreezenStake;
++        csdb::Amount totalNodeStake = 0;
++        if (realTrusted[i] == kUntrustedMarker) {
++            confidantAndStake.push_back(csdb::Amount{ 0 });
++            continue;
++        }
++        ++realTrustedNumber;
++        BlockChain::WalletData wData;
++        findWalletData(csdb::Address::from_public_key(confidants[i]), wData);
++        totalNodeStake += wData.balance_;
++        nodeConfidantAndStake += wData.balance_;
++        if (wData.delegateSources_ != nullptr && wData.delegateSources_->size() > 0) {
++            for (auto& keyAndStake : *(wData.delegateSources_)) {
++                for (auto& tm : keyAndStake.second) {
++                    if (tm.coeff == cs::StakingCoefficient::NoStaking) {
++                        nodeConfidantAndStake += tm.amount;
++                    }
++                    else {
++                        nodeConfidantAndFreezenStake += tm.amount * getStakingCoefficient(tm.coeff);
++                    }
++                }
++            }
++        }
++        totalNodeStake = nodeConfidantAndStake + nodeConfidantAndFreezenStake;
++
++        csdb::Amount totaNodeCutStake = totalNodeStake;
++        if (totaNodeCutStake > Consensus::MaxStakeValue) {
++            totaNodeCutStake = Consensus::MaxStakeValue;
++        }
++
++        confidantAndStake.push_back(
++            (nodeConfidantAndStake * getStakingCoefficient(cs::StakingCoefficient::NoStaking) + nodeConfidantAndFreezenStake)
++            * (totalNodeStake > csdb::Amount{ 1 } ? totaNodeCutStake / totalNodeStake : csdb::Amount{ 1 })
++        );
++        totalStake += confidantAndStake[i];
++    }
++
++    csdb::Amount minedValue = rx.sequence() < Consensus::StartingDPOS
++        ? csdb::Amount{ 0 }
++        : totalFee * Consensus::miningCoefficient + Consensus::blockReward;
++    if (totalStake < csdb::Amount{ 1 }) {
++        totalStake = csdb::Amount{ 1 };
++    }
++    csdb::Amount oneMiningPart = Consensus::stakingOn ? minedValue / totalStake : csdb::Amount{ 0 };
++    csdb::Amount payedReward = 0;
++    size_t numPayedTrusted = 0;
++    cs::Bytes fldBytes;
++    cs::ODataStream stream(fldBytes);
++    for (size_t i = 0; i < confidants.size(); ++i) {
++        csdb::Amount rewardToPay = 0;
++        if (realTrusted[i] != kUntrustedMarker) {
++            if (static_cast<int32_t>(numPayedTrusted) == realTrustedNumber - 1) {
++                rewardToPay = minedValue - payedReward;
++            }
++            else {
++                rewardToPay = oneMiningPart * confidantAndStake[i];
++            }
++            ++numPayedTrusted;
++        }
++        if (rewardToPay > minedValue || rewardToPay < csdb::Amount{ 0 }) {
++            rewardToPay = csdb::Amount{ 0 };
++        }
++        stream << rewardToPay.integral() << rewardToPay.fraction();
++        payedReward += rewardToPay;
++    }
++    return std::string(fldBytes.begin(), fldBytes.end());
++}
++
++void BlockChain::debugRecomputeBlockDiff(const csdb::Pool& rx) const {
++    if (!debugRecomputeOn()) return;
++
++    std::ostringstream ss;
++    ss << "\n=== RECOMPUTE_DIFF seq=" << rx.sequence() << " ===\n";
++
++    {
++        const auto myPrev = getLastHash();
++        const auto rxPrev = rx.previous_hash();
++        ss << "  prev_hash    rx="    << rxPrev.to_string()
++           << " local=" << myPrev.to_string()
++           << (myPrev == rxPrev ? "  OK" : "  DIVERGE") << "\n";
++    }
++    {
++        const auto mySeq = getLastSeq() + 1;
++        ss << "  sequence     rx="    << rx.sequence()
++           << " local_next=" << mySeq
++           << (mySeq == rx.sequence() ? "  OK" : "  DIVERGE") << "\n";
++    }
++    {
++        std::string ts;
++        if (rx.user_field_ids().count(kFieldTimestamp) > 0) {
++            ts = rx.user_field(kFieldTimestamp).value<std::string>();
++        }
++        ss << "  timestamp    rx=\"" << ts << "\"\n";
++    }
++    {
++        std::string rxR;
++        if (rx.user_field_ids().count(kFieldBlockReward) > 0) {
++            rxR = rx.user_field(kFieldBlockReward).value<std::string>();
++        }
++        ss << "  blockReward  rx_size=" << rxR.size()
++           << " rx_hex=" << cs::Utils::byteStreamToHex(
++                  reinterpret_cast<const uint8_t*>(rxR.data()), rxR.size())
++           << "\n";
++    }
++    {
++        const auto& conf = rx.confidants();
++        ss << "  numberTrusted rx=" << static_cast<int>(rx.numberTrusted())
++           << "  confidants_count=" << conf.size() << "\n";
++        ss << "  realTrusted   rx=0x" << std::hex << rx.realTrusted() << std::dec << "\n";
++    }
++    {
++        const auto& nw = rx.newWallets();
++        const size_t cnt = nw.size();
++        cs::WalletsIds::WalletId myNext = 0;
++        {
++            std::lock_guard lock(cacheMutex_);
++            myNext = walletIds_->getNextId();
++        }
++        ss << "  newWallets    rx_count=" << cnt
++           << "  local_nextId=" << myNext << "\n";
++    }
++    {
++        ss << "  numberConfirmations rx=" << static_cast<int>(rx.numberConfirmations())
++           << "  confirmationMask rx=0x" << std::hex << rx.roundConfirmationMask() << std::dec
++           << "  confirmations_size=" << rx.roundConfirmations().size() << "\n";
++    }
++    {
++        ss << "  pool_hash   rx=" << rx.hash().to_string() << "\n";
++    }
++
++    // Per-confidant local WalletData (inputs to setBlockReward).
++    ss << "  -- per-confidant local WalletData --\n";
++    for (size_t i = 0; i < rx.confidants().size(); ++i) {
++        const auto& pk = rx.confidants()[i];
++        WalletData wd;
++        const bool found = findWalletData(csdb::Address::from_public_key(pk), wd);
++        const size_t srcCount = (wd.delegateSources_ ? wd.delegateSources_->size() : 0u);
++        const size_t tgtCount = (wd.delegateTargets_ ? wd.delegateTargets_->size() : 0u);
++        ss << "    [" << i << "] "
++           << cs::Utils::byteStreamToHex(pk.data(), pk.size()).substr(0, 16) << "...  "
++           << (found ? "found" : "MISSING")
++           << "  bal="   << amtToString(wd.balance_)
++           << "  deleg=" << amtToString(wd.delegated_)
++           << "  srcN="  << srcCount
++           << "  tgtN="  << tgtCount
++           << "  trxN="  << wd.transNum_ << "\n";
++    }
++    // Per-field SHA-256 fingerprints of the received block. Pair with the
++    // sha.* lines in TRUSTED_SIGN_DUMP to localize which sub-region of the
++    // signed stream diverged between this node and the network majority.
++    auto sha = [](const void* p, size_t n) -> std::string {
++        const auto h = cscrypto::calculateHash(static_cast<const cs::Byte*>(p), n);
++        return cs::Utils::byteStreamToHex(h.data(), h.size());
++    };
++    auto appendRaw = [](cs::Bytes& dst, const void* p, size_t n) {
++        const auto* b = static_cast<const cs::Byte*>(p);
++        dst.insert(dst.end(), b, b + n);
++    };
++
++    {
++        std::string ts;
++        if (rx.user_field_ids().count(kFieldTimestamp) > 0) {
++            ts = rx.user_field(kFieldTimestamp).value<std::string>();
++        }
++        ss << "  sha.timestamp     " << sha(ts.data(), ts.size()) << "\n";
++    }
++    {
++        std::string rxR;
++        if (rx.user_field_ids().count(kFieldBlockReward) > 0) {
++            rxR = rx.user_field(kFieldBlockReward).value<std::string>();
++        }
++        ss << "  sha.blockReward   " << sha(rxR.data(), rxR.size()) << "\n";
++
++        // Shadow recomputation: what blockReward WOULD this node produce if it
++        // had signed this round? Diff against rx_hex tells us whether this
++        // node's wallet-state-driven calc agrees with the network writer's.
++        const std::string localR = computeShadowBlockReward(rx);
++        ss << "  sha.blockReward.local " << sha(localR.data(), localR.size())
++           << (localR == rxR ? "  MATCH" : "  DIVERGE") << "\n";
++        if (localR != rxR) {
++            ss << "  local.blockReward hex="
++               << cs::Utils::byteStreamToHex(
++                      reinterpret_cast<const uint8_t*>(localR.data()), localR.size())
++               << "\n";
++        }
++    }
++    {
++        cs::Bytes buf;
++        for (const auto& k : rx.confidants()) {
++            appendRaw(buf, k.data(), k.size());
++        }
++        ss << "  sha.confidants    " << sha(buf.data(), buf.size())
++           << "  count=" << rx.confidants().size() << "\n";
++    }
++    {
++        const uint64_t rt = rx.realTrusted();
++        const uint8_t  nt = rx.numberTrusted();
++        cs::Bytes buf;
++        appendRaw(buf, &rt, sizeof(rt));
++        buf.push_back(nt);
++        ss << "  sha.rt+nt         " << sha(buf.data(), buf.size()) << "\n";
++    }
++    {
++        cs::Bytes buf;
++        const uint8_t  nc = rx.numberConfirmations();
++        const uint64_t cm = rx.roundConfirmationMask();
++        buf.push_back(nc);
++        appendRaw(buf, &cm, sizeof(cm));
++        for (const auto& sig : rx.roundConfirmations()) {
++            appendRaw(buf, sig.data(), sig.size());
++        }
++        const std::string rxSha = sha(buf.data(), buf.size());
++        ss << "  sha.confirmations " << rxSha
++           << "  count=" << rx.roundConfirmations().size() << "\n";
++
++        // Shadow confirmation view: query this node's confirmationList_ for the
++        // same round and serialize it the same way. If sha differs, this node's
++        // local confirmation set drifted from the network writer's set — a
++        // sign-time-only divergence we can't catch by comparing finalized state.
++        if (confirmationGetter_) {
++            const auto local = confirmationGetter_(static_cast<cs::RoundNumber>(rx.sequence()));
++            if (local.has_value()) {
++                cs::Bytes lbuf;
++                const uint8_t lnc = static_cast<uint8_t>(local->mask.size());
++                const uint64_t lcm = cs::Utils::maskToBits(local->mask);
++                lbuf.push_back(lnc);
++                appendRaw(lbuf, &lcm, sizeof(lcm));
++                for (const auto& sig : local->signatures) {
++                    appendRaw(lbuf, sig.data(), sig.size());
++                }
++                const std::string localSha = sha(lbuf.data(), lbuf.size());
++                ss << "  sha.confirmations.local " << localSha
++                   << "  count=" << local->signatures.size()
++                   << (localSha == rxSha ? "  MATCH" : "  DIVERGE") << "\n";
++            }
++            else {
++                ss << "  sha.confirmations.local (no entry in confirmationList_)\n";
++            }
++        }
++    }
++    {
++        const auto& nw = rx.newWallets();
++        cs::Bytes buf;
++        for (const auto& w : nw) {
++            const size_t   ti = w.addressId_.trxInd_;
++            const size_t   at = w.addressId_.addressType_;
++            const auto     wi = w.walletId_;
++            appendRaw(buf, &ti, sizeof(ti));
++            appendRaw(buf, &at, sizeof(at));
++            appendRaw(buf, &wi, sizeof(wi));
++        }
++        ss << "  sha.newWallets    " << sha(buf.data(), buf.size())
++           << "  count=" << nw.size() << "\n";
++    }
++    {
++        const csdb::Amount rc = rx.roundCost();
++        const int32_t  ri = rc.integral();
++        const uint64_t rf = rc.fraction();
++        cs::Bytes buf;
++        appendRaw(buf, &ri, sizeof(ri));
++        appendRaw(buf, &rf, sizeof(rf));
++        ss << "  sha.roundCost     " << sha(buf.data(), buf.size())
++           << "  integral=" << ri << "  fraction=" << rf << "\n";
++    }
++    {
++        ss << "  trx.count         " << rx.transactions().size() << "\n";
++    }
++
++    // Full to_binary() byte stream for the received block. csdb::Pool caches
++    // its binary form during compose(); the rx we get here may not have been
++    // composed yet (signatures applied but compose() pending), so .to_binary()
++    // returns empty. Clone+compose to force the canonical form, then diff
++    // against the local TRUSTED_SIGN_DUMP to_binary_hex for the same seq to
++    // find the exact diverging byte/field. Skipped if size > 64 KB.
++    csdb::Pool rxClone = rx.clone();
++    rxClone.compose();
++    const cs::Bytes binBytes = rxClone.to_binary();
++    ss << "  to_binary_size " << binBytes.size() << "\n";
++    ss << "  sha.to_binary     " << sha(binBytes.data(), binBytes.size()) << "\n";
++    if (binBytes.size() <= 65536) {
++        ss << "  to_binary_hex  "
++           << cs::Utils::byteStreamToHex(binBytes.data(), binBytes.size()) << "\n";
++    } else {
++        ss << "  to_binary_hex  (skipped: size > 64KB)\n";
++    }
++    ss << "  composed_hash  " << rxClone.hash().to_string() << "\n";
++    ss << "=== END_RECOMPUTE_DIFF seq=" << rx.sequence() << " ===";
++
++    csdebug() << ss.str();
++}
++
+ void BlockChain::setBlocksToBeRemoved(cs::Sequence number) {
+     if (blocksToBeRemoved_ > 0) {
+         csdebug() << kLogPrefix << "Can't change number of blocks to be removed, because the previous removal is still not finished";
+         return;
+     }
++    if (number > 100) {
++        cslog() << "TRACE: setBlocksToBeRemoved with number=" << number << " (lastSeq=" << lastSequence_.load() << ")";
++    }
+     csdebug() << kLogPrefix << "Allowed NUMBER blocks to remove is set to " << blocksToBeRemoved_;
+     blocksToBeRemoved_ = number;
+ }
