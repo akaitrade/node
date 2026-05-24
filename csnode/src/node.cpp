@@ -204,6 +204,10 @@ bool Node::init() {
             + "\nblockReward = " + Consensus::blockReward.to_string()
             + "\nminingCoefficient = " + Consensus::miningCoefficient.to_string();
         csinfo() << curMsg;
+        if (solver_) {
+            solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
+            solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
+        }
         return true;
     }
     if (!blockChain_.init(
@@ -236,6 +240,11 @@ bool Node::init() {
 
     if (initialConfidants_.size() < Consensus::MinTrustedNodes) {
         cslog() << "After reading blockchain, bootstrap nodes number is " << initialConfidants_.size();
+    }
+
+    if (solver_) {
+        solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
+        solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
     }
 
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
