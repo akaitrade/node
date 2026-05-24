@@ -1,7 +1,11 @@
 #define CS_LOG_CHANNEL "smartcontracts"
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 #include <exception>
+
+#include <lib/system/utils.hpp>
 
 //#include <boost/archive/text_oarchive.hpp>
 //#include <boost/archive/text_iarchive.hpp>
@@ -36,7 +40,23 @@ void SmartContracts_Serializer::save(const std::filesystem::path& rootDir) {
     boost::archive::binary_oarchive oa(ofs);
     csdebug() << kLogPrefix << __func__;
     contracts_->printClassInfo();
-    oa << contracts_->serialize();
+    const cs::Bytes payload = contracts_->serialize();
+    // CS_DEBUG_RECOMPUTE: log hash of bytes about to be written.
+    {
+        static const bool s_recomp = [] {
+            const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+            return v && *v && std::string_view(v) != "0";
+        }();
+        if (s_recomp) {
+            const auto h = ::cscrypto::calculateHash(payload.data(), payload.size());
+            std::ostringstream ss;
+            ss << "\n=== SMART_SERDE_DUMP save size=" << payload.size()
+               << " hash=" << cs::Utils::byteStreamToHex(h.data(), h.size())
+               << " ===\n=== END_SMART_SERDE_DUMP ===";
+            cslog() << ss.str();
+        }
+    }
+    oa << payload;
 }
 
 ::cscrypto::Hash SmartContracts_Serializer::hash() {
@@ -65,6 +85,21 @@ void SmartContracts_Serializer::load(const std::filesystem::path& rootDir) {
     csdebug() << kLogPrefix << __func__;
     Bytes data;
     ia >> data;
+    // CS_DEBUG_RECOMPUTE: log hash of bytes just read — compare with save hash to detect serde drift.
+    {
+        static const bool s_recomp = [] {
+            const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+            return v && *v && std::string_view(v) != "0";
+        }();
+        if (s_recomp) {
+            const auto h = ::cscrypto::calculateHash(data.data(), data.size());
+            std::ostringstream ss;
+            ss << "\n=== SMART_SERDE_DUMP load size=" << data.size()
+               << " hash=" << cs::Utils::byteStreamToHex(h.data(), h.size())
+               << " ===\n=== END_SMART_SERDE_DUMP ===";
+            cslog() << ss.str();
+        }
+    }
     contracts_->deserialize(data);
     contracts_->printClassInfo();
 

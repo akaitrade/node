@@ -90,6 +90,13 @@ Node::Node(cs::config::Observer& observer)
     // Inject confirmation getter so RECOMPUTE_DIFF can dump sha.confirmations.local
     // alongside the rx side without dragging Node* into BlockChain.
     blockChain_.setConfirmationGetter([this](cs::RoundNumber r) { return getConfirmation(r); });
+    // Inject local-candidate getter so WRITER_DIFF can diff the block this node
+    // built as trusted writer against the network-finalized block that arrives
+    // via storeBlock. Returns nullptr when the solver has no candidate.
+    blockChain_.setLocalCandidateGetter([this]() -> const csdb::Pool* {
+        const auto& candidate = solver_->getDeferredBlock();
+        return candidate.is_valid() ? &candidate : nullptr;
+    });
     // let blockChain_ to subscribe on signals, WalletsIds & WalletsCache are there
     blockChain_.subscribeToSignals();
     // solver MUST subscribe to signals after the BlockChain
@@ -210,6 +217,10 @@ bool Node::init() {
             + "\nblockReward = " + Consensus::blockReward.to_string()
             + "\nminingCoefficient = " + Consensus::miningCoefficient.to_string();
         csinfo() << curMsg;
+        if (solver_) {
+            solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
+            solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
+        }
         return true;
     }
     if (!blockChain_.init(
@@ -245,6 +256,11 @@ bool Node::init() {
     }
 
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
+
+    if (solver_) {
+        solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
+        solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
+    }
 
 #ifdef NODE_API
     api_->run();

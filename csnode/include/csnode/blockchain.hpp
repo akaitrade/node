@@ -225,6 +225,19 @@ public:
     using ConfirmationGetter = std::function<std::optional<cs::TrustedConfirmation>(cs::RoundNumber)>;
     void setConfirmationGetter(ConfirmationGetter cb) { confirmationGetter_ = std::move(cb); }
 
+    // Optional callback to read SolverCore::deferredBlock_ (the block this node
+    // built as trusted writer this round). Returns nullptr when no local candidate
+    // exists. Used by debugWriterDiff to diff local vs. network-finalized block.
+    using LocalCandidateGetter = std::function<const csdb::Pool*()>;
+    void setLocalCandidateGetter(LocalCandidateGetter cb) { localCandidateGetter_ = std::move(cb); }
+
+    // WRITER_DIFF + cascade dumps — gated by CS_DEBUG_RECOMPUTE=1.
+    // Called from storeBlock when the incoming network block differs from the
+    // local candidate (different hash at same seq). Fires WALLETS_DIFF,
+    // CONFIRMATIONS_DIFF, NEWWALLETS_DIFF, and CHARACTERISTIC_DIFF as sub-dumps
+    // for whichever fields diverge.
+    void debugWriterDiff(const csdb::Pool& net, const csdb::Pool& local) const;
+
     /**
      * @fn    std::size_t BlockChain::getCachedBlocksSize() const;
      *
@@ -440,6 +453,7 @@ public:
 
 private:
     ConfirmationGetter confirmationGetter_;
+    LocalCandidateGetter localCandidateGetter_;
 
     void createCachesPath();
     bool findAddrByWalletId(const WalletId id, csdb::Address& addr) const;

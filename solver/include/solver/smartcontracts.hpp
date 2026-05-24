@@ -450,6 +450,12 @@ public:
         return known_contracts.size();
     }
 
+    // Mirror QS-restored known_contracts state into contracts.db (fills gaps).
+    size_t rehydrateContractDbCache(BlockChain& bc);
+
+    // Hash-check each QS-restored state against its chain new_state; clear mismatches.
+    size_t validateRestoredStatesAgainstChain(BlockChain& bc);
+
     size_t contracts_queue_size() const {
         cs::Lock lock(public_access_lock);
         return exe_queue.size();

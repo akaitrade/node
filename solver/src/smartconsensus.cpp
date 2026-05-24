@@ -1,5 +1,8 @@
 #define CS_LOG_CHANNEL "consensus"
+#include <cstdlib>
 #include <map>
+#include <sstream>
+#include <string_view>
 #include <smartconsensus.hpp>
 #include <smartcontracts.hpp>
 
@@ -583,6 +586,37 @@ void SmartConsensus::processStages() {
     st3.id = id();
     st3.sender = ownSmartsConfNum_;
     st3.iteration = 0U;
+    // CS_DEBUG_RECOMPUTE: dump smart-consensus stage-3 fields for cross-node diffing.
+    {
+        static const bool s_recomp = [] {
+            const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+            return v && *v && std::string_view(v) != "0";
+        }();
+        if (s_recomp) {
+            auto sha = [](const void* p, size_t n) -> std::string {
+                const auto h = cscrypto::calculateHash(static_cast<const cs::Byte*>(p), n);
+                return cs::Utils::byteStreamToHex(h.data(), h.size());
+            };
+            std::ostringstream ss;
+            ss << "\n=== SMART_SIGN_DUMP seq=" << smartRoundNumber_
+               << " trx=" << smartTransaction_ << " run=" << static_cast<int>(runCounter_) << " ===\n";
+            ss << "  sender         " << static_cast<int>(st3.sender) << "\n";
+            ss << "  writer         " << static_cast<int>(st3.writer) << "\n";
+            ss << "  realTrustedMask " << cs::Utils::byteStreamToHex(st3.realTrustedMask.data(), st3.realTrustedMask.size()) << "\n";
+            ss << "  sha.mask       " << sha(st3.realTrustedMask.data(), st3.realTrustedMask.size()) << "\n";
+            const auto packHash = finalSmartTransactionPack_.hash().toBinary();
+            ss << "  sha.packHash   " << sha(packHash.data(), packHash.size()) << "\n";
+            ss << "  packageSig     " << cs::Utils::byteStreamToHex(st3.packageSignature.data(), st3.packageSignature.size()) << "\n";
+            // per-stage-1 hash summary
+            for (size_t i = 0; i < smartStageOneStorage_.size(); ++i) {
+                const auto& s1 = smartStageOneStorage_[i];
+                ss << "    s1[" << static_cast<int>(s1.sender) << "] hash "
+                   << cs::Utils::byteStreamToHex(s1.hash.data(), s1.hash.size()) << "\n";
+            }
+            ss << "=== END_SMART_SIGN_DUMP seq=" << smartRoundNumber_ << " ===";
+            cslog() << ss.str();
+        }
+    }
     addSmartStageThree(st3, true);
 }
 
@@ -642,6 +676,39 @@ void SmartConsensus::addSmartStageThree(cs::StageThreeSmarts& stage, bool send) 
             if (!cscrypto::verifySignature(stage.signature, smartConfidants_.at(stage.sender), stage.message.data(), stage.message.size())) {
                 cswarning() << kLogPrefix << FormatRef{ smartRoundNumber_, smartTransaction_ }
                 << " Smart stage Three from ST[" << static_cast<int>(stage.sender) << "]  -  WRONG SIGNATURE!!!";//
+                // CS_DEBUG_RECOMPUTE: cross-node forensic for smart stage-3 sig failure.
+                {
+                    static const bool s_recomp = [] {
+                        const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+                        return v && *v && std::string_view(v) != "0";
+                    }();
+                    if (s_recomp) {
+                        auto sha = [](const void* p, size_t n) -> std::string {
+                            const auto h = cscrypto::calculateHash(static_cast<const cs::Byte*>(p), n);
+                            return cs::Utils::byteStreamToHex(h.data(), h.size());
+                        };
+                        std::ostringstream fd;
+                        fd << "\n=== SMART_STAGE3_FORENSIC seq=" << smartRoundNumber_
+                           << " trx=" << smartTransaction_
+                           << " sender=" << static_cast<int>(stage.sender) << " ===\n";
+                        fd << "  remote.signature " << cs::Utils::byteStreamToHex(stage.signature.data(), stage.signature.size()) << "\n";
+                        fd << "  sha.remote.msg   " << sha(stage.message.data(), stage.message.size())
+                           << "  size=" << stage.message.size() << "\n";
+                        fd << "  remote.mask      " << cs::Utils::byteStreamToHex(stage.realTrustedMask.data(), stage.realTrustedMask.size()) << "\n";
+                        fd << "  local.mask       " << cs::Utils::byteStreamToHex(st3.realTrustedMask.data(), st3.realTrustedMask.size()) << "\n";
+                        // dump signer's public key (first 16 hex chars)
+                        const auto& pk = smartConfidants_.at(stage.sender);
+                        fd << "  signer.pubkey    " << cs::Utils::byteStreamToHex(pk.data(), pk.size()).substr(0, 32) << "...\n";
+                        // per-stage-1 hash summary for both local and received
+                        for (size_t i = 0; i < smartStageOneStorage_.size(); ++i) {
+                            const auto& s1 = smartStageOneStorage_[i];
+                            fd << "    s1[" << static_cast<int>(s1.sender) << "] hash "
+                               << cs::Utils::byteStreamToHex(s1.hash.data(), s1.hash.size()) << "\n";
+                        }
+                        fd << "=== END_SMART_STAGE3_FORENSIC seq=" << smartRoundNumber_ << " ===";
+                        cslog() << fd.str();
+                    }
+                }
                 return;
             }
         }

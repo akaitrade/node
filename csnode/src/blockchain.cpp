@@ -1,6 +1,7 @@
 #define CS_LOG_CHANNEL "blockchain"
 #include <chrono>
 #include <cstdlib>
+#include <iomanip>
 #include <sstream>
 #include <string_view>
 #include <base58.h>
@@ -1769,6 +1770,18 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
 
     if (poolSequence == lastSequence + 1) {
         debugRecomputeBlockDiff(pool);
+        static const bool s_writerDiff = [] {
+            const char* v = std::getenv("CS_DEBUG_RECOMPUTE");
+            return v && *v && std::string_view(v) != "0";
+        }();
+        if (s_writerDiff && localCandidateGetter_) {
+            const csdb::Pool* localCandidate = localCandidateGetter_();
+            if (localCandidate && localCandidate->is_valid()
+                    && localCandidate->sequence() == poolSequence
+                    && localCandidate->hash() != pool.hash()) {
+                debugWriterDiff(pool, *localCandidate);
+            }
+        }
         if (pool.previous_hash() != getLastHash()) {
             csdebug() << "BLOCKCHAIN> new pool\'s prev. hash does not equal to current last hash";
             if (getLastHash().is_empty()) {
@@ -2569,6 +2582,311 @@ void BlockChain::debugRecomputeBlockDiff(const csdb::Pool& rx) const {
     ss << "=== END_RECOMPUTE_DIFF seq=" << rx.sequence() << " ===";
 
     csdebug() << ss.str();
+}
+
+// ---------------------------------------------------------------------------
+// WRITER_DIFF + cascade sub-dumps
+// Called when this node had a local candidate (deferredBlock_ in SolverCore)
+// for the same seq as an incoming network-finalized block and they hash-differ.
+// Gated by CS_DEBUG_RECOMPUTE=1.
+// ---------------------------------------------------------------------------
+void BlockChain::debugWriterDiff(const csdb::Pool& net, const csdb::Pool& local) const {
+    // Reuse the sha / appendRaw helpers from RECOMPUTE_DIFF.
+    auto sha = [](const void* p, size_t n) -> std::string {
+        const auto h = cscrypto::calculateHash(static_cast<const cs::Byte*>(p), n);
+        return cs::Utils::byteStreamToHex(h.data(), h.size());
+    };
+    auto appendRaw = [](cs::Bytes& dst, const void* p, size_t n) {
+        const auto* b = static_cast<const cs::Byte*>(p);
+        dst.insert(dst.end(), b, b + n);
+    };
+
+    // Helper: emit one aligned table row.
+    // col widths: label=30, local=64, network=64, status=6
+    auto row = [](std::ostringstream& s,
+                  const std::string& label,
+                  const std::string& lcl,
+                  const std::string& ntw) {
+        const bool match = (lcl == ntw);
+        s << "  " << std::left << std::setw(30) << label
+          << std::setw(66) << lcl
+          << std::setw(66) << ntw
+          << (match ? "MATCH" : "DIFFER") << "\n";
+    };
+
+    const cs::Sequence seq = net.sequence();
+    std::ostringstream ss;
+    ss << std::left;
+    ss << "\n=== WRITER_DIFF seq=" << seq << " ===\n";
+    ss << "  " << std::setw(30) << ""
+       << std::setw(66) << "local"
+       << std::setw(66) << "network"
+       << "status\n";
+
+    // --- sha.timestamp ---
+    std::string localTs, netTs;
+    if (local.user_field_ids().count(kFieldTimestamp) > 0)
+        localTs = local.user_field(kFieldTimestamp).value<std::string>();
+    if (net.user_field_ids().count(kFieldTimestamp) > 0)
+        netTs = net.user_field(kFieldTimestamp).value<std::string>();
+    const std::string tsLocalSha = sha(localTs.data(), localTs.size());
+    const std::string tsNetSha   = sha(netTs.data(),   netTs.size());
+    row(ss, "sha.timestamp", tsLocalSha, tsNetSha);
+
+    // --- sha.blockReward ---
+    std::string localBr, netBr;
+    if (local.user_field_ids().count(kFieldBlockReward) > 0)
+        localBr = local.user_field(kFieldBlockReward).value<std::string>();
+    if (net.user_field_ids().count(kFieldBlockReward) > 0)
+        netBr = net.user_field(kFieldBlockReward).value<std::string>();
+    const std::string brLocalSha = sha(localBr.data(), localBr.size());
+    const std::string brNetSha   = sha(netBr.data(),   netBr.size());
+    row(ss, "sha.blockReward", brLocalSha, brNetSha);
+    const bool brDiffer = (brLocalSha != brNetSha);
+
+    // --- sha.confidants ---
+    {
+        cs::Bytes lBuf, nBuf;
+        for (const auto& k : local.confidants()) appendRaw(lBuf, k.data(), k.size());
+        for (const auto& k : net.confidants())   appendRaw(nBuf, k.data(), k.size());
+        row(ss, "sha.confidants",
+            sha(lBuf.data(), lBuf.size()) + " cnt=" + std::to_string(local.confidants().size()),
+            sha(nBuf.data(), nBuf.size()) + " cnt=" + std::to_string(net.confidants().size()));
+    }
+
+    // --- sha.realTrustedMask (raw mask bytes from stage3 aren't stored on pool;
+    //     we use bitsToMask round-trip which is what the pool stores) ---
+    {
+        const auto lMask = cs::Utils::bitsToMask(local.numberTrusted(), local.realTrusted());
+        const auto nMask = cs::Utils::bitsToMask(net.numberTrusted(),   net.realTrusted());
+        row(ss, "sha.realTrustedMask",
+            sha(lMask.data(), lMask.size()),
+            sha(nMask.data(), nMask.size()));
+    }
+
+    // --- sha.numberTrusted+rt ---
+    {
+        cs::Bytes lBuf, nBuf;
+        { const uint64_t rt = local.realTrusted(); const uint8_t nt = local.numberTrusted();
+          appendRaw(lBuf, &rt, sizeof(rt)); lBuf.push_back(nt); }
+        { const uint64_t rt = net.realTrusted();   const uint8_t nt = net.numberTrusted();
+          appendRaw(nBuf, &rt, sizeof(rt)); nBuf.push_back(nt); }
+        row(ss, "sha.numberTrusted+rt",
+            sha(lBuf.data(), lBuf.size()),
+            sha(nBuf.data(), nBuf.size()));
+    }
+
+    // --- sha.newWallets ---
+    {
+        const auto& lNW = local.newWallets();
+        const auto& nNW = net.newWallets();
+        cs::Bytes lBuf, nBuf;
+        for (const auto& w : lNW) {
+            const size_t ti = w.addressId_.trxInd_; const size_t at = w.addressId_.addressType_; const auto wi = w.walletId_;
+            appendRaw(lBuf, &ti, sizeof(ti)); appendRaw(lBuf, &at, sizeof(at)); appendRaw(lBuf, &wi, sizeof(wi));
+        }
+        for (const auto& w : nNW) {
+            const size_t ti = w.addressId_.trxInd_; const size_t at = w.addressId_.addressType_; const auto wi = w.walletId_;
+            appendRaw(nBuf, &ti, sizeof(ti)); appendRaw(nBuf, &at, sizeof(at)); appendRaw(nBuf, &wi, sizeof(wi));
+        }
+        row(ss, "sha.newWallets",
+            sha(lBuf.data(), lBuf.size()) + " cnt=" + std::to_string(lNW.size()),
+            sha(nBuf.data(), nBuf.size()) + " cnt=" + std::to_string(nNW.size()));
+        const bool nwDiffer = (sha(lBuf.data(), lBuf.size()) != sha(nBuf.data(), nBuf.size()));
+
+        // NEWWALLETS_DIFF sub-dump
+        if (nwDiffer) {
+            ss << "\n  --- NEWWALLETS_DIFF seq=" << seq << " ---\n";
+            const size_t maxI = std::max(lNW.size(), nNW.size());
+            for (size_t i = 0; i < maxI; ++i) {
+                const bool hasL = i < lNW.size();
+                const bool hasN = i < nNW.size();
+                std::string lStr = hasL
+                    ? ("addrType=" + std::to_string(lNW[i].addressId_.addressType_)
+                     + " trxInd=" + std::to_string(lNW[i].addressId_.trxInd_)
+                     + " walletId=" + std::to_string(lNW[i].walletId_))
+                    : "(none)";
+                std::string nStr = hasN
+                    ? ("addrType=" + std::to_string(nNW[i].addressId_.addressType_)
+                     + " trxInd=" + std::to_string(nNW[i].addressId_.trxInd_)
+                     + " walletId=" + std::to_string(nNW[i].walletId_))
+                    : "(none)";
+                const bool same = hasL && hasN
+                    && lNW[i].addressId_.trxInd_     == nNW[i].addressId_.trxInd_
+                    && lNW[i].addressId_.addressType_ == nNW[i].addressId_.addressType_
+                    && lNW[i].walletId_               == nNW[i].walletId_;
+                ss << "    [" << i << "] local: " << lStr
+                   << "  net: " << nStr
+                   << (same ? "  MATCH" : "  DIFFER") << "\n";
+            }
+            ss << "  --- END_NEWWALLETS_DIFF seq=" << seq << " ---\n";
+        }
+    }
+
+    // --- sha.confirmations ---
+    {
+        cs::Bytes lBuf, nBuf;
+        { const uint8_t nc = local.numberConfirmations(); const uint64_t cm = local.roundConfirmationMask();
+          lBuf.push_back(nc); appendRaw(lBuf, &cm, sizeof(cm));
+          for (const auto& sig : local.roundConfirmations()) appendRaw(lBuf, sig.data(), sig.size()); }
+        { const uint8_t nc = net.numberConfirmations();   const uint64_t cm = net.roundConfirmationMask();
+          nBuf.push_back(nc); appendRaw(nBuf, &cm, sizeof(cm));
+          for (const auto& sig : net.roundConfirmations()) appendRaw(nBuf, sig.data(), sig.size()); }
+        const std::string confLocalSha = sha(lBuf.data(), lBuf.size());
+        const std::string confNetSha   = sha(nBuf.data(), nBuf.size());
+        row(ss, "sha.confirmations",
+            confLocalSha + " cnt=" + std::to_string(local.roundConfirmations().size()),
+            confNetSha   + " cnt=" + std::to_string(net.roundConfirmations().size()));
+        const bool confDiffer = (confLocalSha != confNetSha);
+
+        // CONFIRMATIONS_DIFF sub-dump
+        if (confDiffer) {
+            ss << "\n  --- CONFIRMATIONS_DIFF seq=" << seq << " ---\n";
+            ss << "    local:  count=" << static_cast<int>(local.numberConfirmations())
+               << "  mask=0x" << std::hex << local.roundConfirmationMask() << std::dec
+               << "  sigs=" << local.roundConfirmations().size() << "\n";
+            ss << "    network: count=" << static_cast<int>(net.numberConfirmations())
+               << "  mask=0x" << std::hex << net.roundConfirmationMask() << std::dec
+               << "  sigs=" << net.roundConfirmations().size() << "\n";
+
+            // Per-sig comparison using confidant list as key reference
+            const auto& lConf = local.confidants();
+            const auto& nConf = net.confidants();
+            const auto& lSigs = local.roundConfirmations();
+            const auto& nSigs = net.roundConfirmations();
+            const size_t maxSig = std::max(lSigs.size(), nSigs.size());
+            for (size_t i = 0; i < maxSig; ++i) {
+                const bool hasL = i < lSigs.size();
+                const bool hasN = i < nSigs.size();
+                std::string pkStr;
+                if (i < lConf.size())
+                    pkStr = cs::Utils::byteStreamToHex(lConf[i].data(), lConf[i].size()).substr(0, 16) + "...";
+                else if (i < nConf.size())
+                    pkStr = cs::Utils::byteStreamToHex(nConf[i].data(), nConf[i].size()).substr(0, 16) + "...";
+                const bool same = hasL && hasN && lSigs[i] == nSigs[i];
+                ss << "    [" << i << "] pk=" << pkStr
+                   << (hasL ? "" : "  local:MISSING")
+                   << (hasN ? "" : "  net:MISSING")
+                   << (same ? "  MATCH" : (!hasL || !hasN ? "  MISSING" : "  DIFFER")) << "\n";
+            }
+            ss << "  --- END_CONFIRMATIONS_DIFF seq=" << seq << " ---\n";
+        }
+    }
+
+    // --- sha.roundCost ---
+    {
+        cs::Bytes lBuf, nBuf;
+        { const csdb::Amount rc = local.roundCost(); const int32_t ri = rc.integral(); const uint64_t rf = rc.fraction();
+          appendRaw(lBuf, &ri, sizeof(ri)); appendRaw(lBuf, &rf, sizeof(rf)); }
+        { const csdb::Amount rc = net.roundCost();   const int32_t ri = rc.integral(); const uint64_t rf = rc.fraction();
+          appendRaw(nBuf, &ri, sizeof(ri)); appendRaw(nBuf, &rf, sizeof(rf)); }
+        row(ss, "sha.roundCost",
+            sha(lBuf.data(), lBuf.size()) + " val=" + local.roundCost().to_string(),
+            sha(nBuf.data(), nBuf.size()) + " val=" + net.roundCost().to_string());
+    }
+
+    // --- sha.transactions ---
+    {
+        cs::Bytes lBuf, nBuf;
+        for (const auto& t : local.transactions()) {
+            const auto b = t.to_byte_stream_for_sig();
+            appendRaw(lBuf, b.data(), b.size());
+        }
+        for (const auto& t : net.transactions()) {
+            const auto b = t.to_byte_stream_for_sig();
+            appendRaw(nBuf, b.data(), b.size());
+        }
+        row(ss, "sha.transactions",
+            sha(lBuf.data(), lBuf.size()) + " cnt=" + std::to_string(local.transactions_count()),
+            sha(nBuf.data(), nBuf.size()) + " cnt=" + std::to_string(net.transactions_count()));
+    }
+
+    // --- sha.smartSignatures ---
+    {
+        cs::Bytes lBuf, nBuf;
+        for (const auto& ss2 : local.smartSignatures()) {
+            appendRaw(lBuf, &ss2.smartConsensusPool, sizeof(ss2.smartConsensusPool));
+            for (const auto& kv : ss2.signatures)
+                appendRaw(lBuf, kv.second.data(), kv.second.size());
+        }
+        for (const auto& ss2 : net.smartSignatures()) {
+            appendRaw(nBuf, &ss2.smartConsensusPool, sizeof(ss2.smartConsensusPool));
+            for (const auto& kv : ss2.signatures)
+                appendRaw(nBuf, kv.second.data(), kv.second.size());
+        }
+        row(ss, "sha.smartSignatures",
+            sha(lBuf.data(), lBuf.size()) + " cnt=" + std::to_string(local.smartSignatures().size()),
+            sha(nBuf.data(), nBuf.size()) + " cnt=" + std::to_string(net.smartSignatures().size()));
+    }
+
+    // --- canonical hashes ---
+    ss << "  hash.local     " << local.hash().to_string() << "\n";
+    ss << "  hash.network   " << net.hash().to_string() << "\n";
+
+    // --- to_binary comparison ---
+    const cs::Bytes localBin = local.to_binary();
+    csdb::Pool netClone = net.clone();
+    netClone.compose();
+    const cs::Bytes netBin = netClone.to_binary();
+    ss << "  to_binary_size local=" << localBin.size() << "  network=" << netBin.size() << "\n";
+    if (localBin.size() <= 65536) {
+        ss << "  to_binary_hex local   "
+           << cs::Utils::byteStreamToHex(localBin.data(), localBin.size()) << "\n";
+    } else {
+        ss << "  to_binary_hex local   (skipped: size > 64KB)\n";
+    }
+    if (netBin.size() <= 65536) {
+        ss << "  to_binary_hex network "
+           << cs::Utils::byteStreamToHex(netBin.data(), netBin.size()) << "\n";
+    } else {
+        ss << "  to_binary_hex network (skipped: size > 64KB)\n";
+    }
+
+    // WALLETS_DIFF sub-dump: per-confidant wallet state when blockReward differs
+    if (brDiffer) {
+        ss << "\n  --- WALLETS_DIFF seq=" << seq << " (blockReward DIFFER) ---\n";
+        ss << "    local blockReward hex="
+           << cs::Utils::byteStreamToHex(reinterpret_cast<const uint8_t*>(localBr.data()), localBr.size()) << "\n";
+        ss << "    net   blockReward hex="
+           << cs::Utils::byteStreamToHex(reinterpret_cast<const uint8_t*>(netBr.data()),   netBr.size())   << "\n";
+        const auto& conf = net.confidants();
+        for (size_t i = 0; i < conf.size(); ++i) {
+            WalletData wd;
+            const bool found = findWalletData(csdb::Address::from_public_key(conf[i]), wd);
+            const size_t srcN = wd.delegateSources_ ? wd.delegateSources_->size() : 0u;
+            const size_t tgtN = wd.delegateTargets_ ? wd.delegateTargets_->size() : 0u;
+            ss << "    [" << i << "] "
+               << cs::Utils::byteStreamToHex(conf[i].data(), conf[i].size()).substr(0, 16) << "...  "
+               << (found ? "found" : "MISSING")
+               << "  bal="   << amtToString(wd.balance_)
+               << "  deleg=" << amtToString(wd.delegated_)
+               << "  srcN="  << srcN
+               << "  tgtN="  << tgtN
+               << "  trxN="  << wd.transNum_ << "\n";
+        }
+        ss << "  --- END_WALLETS_DIFF seq=" << seq << " ---\n";
+    }
+
+    // CHARACTERISTIC_DIFF sub-dump: transaction count + char mask when other
+    // fields don't explain the divergence (catch-all for remaining byte diffs).
+    {
+        const bool anyFieldDiffer = (tsLocalSha != tsNetSha || brDiffer
+            || local.transactions_count() != net.transactions_count()
+            || local.smartSignatures().size() != net.smartSignatures().size());
+        if (!anyFieldDiffer && localBin != netBin) {
+            ss << "\n  --- CHARACTERISTIC_DIFF seq=" << seq << " (binary differs but fields match) ---\n";
+            ss << "    local:  trx_count=" << local.transactions_count()
+               << "  numberTrusted=" << static_cast<int>(local.numberTrusted())
+               << "  realTrusted=0x" << std::hex << local.realTrusted() << std::dec << "\n";
+            ss << "    network: trx_count=" << net.transactions_count()
+               << "  numberTrusted=" << static_cast<int>(net.numberTrusted())
+               << "  realTrusted=0x" << std::hex << net.realTrusted() << std::dec << "\n";
+            ss << "  --- END_CHARACTERISTIC_DIFF seq=" << seq << " ---\n";
+        }
+    }
+
+    ss << "=== END_WRITER_DIFF seq=" << seq << " ===";
+    cslog() << ss.str();
 }
 
 void BlockChain::setBlocksToBeRemoved(cs::Sequence number) {
