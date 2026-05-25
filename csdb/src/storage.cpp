@@ -294,6 +294,7 @@ private:
     PoolHash last_hash;     // Last pool's hash
     size_t count_pool = 0;  // Number of transaction's pools inthe storage (initially filled in check)
     cs::Sequence startSequence = 0;
+    bool allowSparseChain = false;
 
     void set_last_error(Storage::Error error = Storage::NoError, const ::std::string& message = ::std::string());
     void set_last_error(Storage::Error error, const char* message, ...);
@@ -413,6 +414,21 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
     }
 
     if (startSequence > last_seq_in_db + 1) {
+        if (allowSparseChain) {
+            // Validator-only DB-less boot: chain DB is empty/sparse while
+            // caches are at a much higher head. Skip the rescan entirely;
+            // caller will set last_hash via injectLastHash from QS head.
+            // count_pool represents the logical chain length (next-seq-to-write),
+            // not the physical block count — pruning never decrements it.
+            // Without this, pool_remove_last_repair and friends fail with
+            // "incorrect last sequence passed: X, storage size: 0".
+            count_pool = startSequence;
+            cswarning() << "Storage: sparse chain accepted — startSequence=" << startSequence
+                        << " last_seq_in_db=" << last_seq_in_db
+                        << " (validator-only DB-less boot); count_pool=" << count_pool;
+            emit stop_reading_event();
+            return true;
+        }
         cserror() << "startSequence > last_seq_in_db + 1";
         return false;
     }
@@ -682,6 +698,7 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     }
 
     d->startSequence = opt.startSequence;
+    d->allowSparseChain = opt.allowSparseChain;
 
     if (!d->rescan(callback)) {
         d->db.reset();
@@ -702,7 +719,8 @@ bool Storage::open(
     bool useEmptyPoolStubs,
     uint64_t rocksDbBlockCacheBytes,
     uint64_t rocksDbMemtableBytes,
-    const std::string& dbBackend
+    const std::string& dbBackend,
+    bool allowSparseChain
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
@@ -745,7 +763,13 @@ bool Storage::open(
 #endif
     OpenOptions opt{db, newBlockchainTop, startReadFrom};
     opt.useEmptyPoolStubs = useEmptyPoolStubs;
+    opt.allowSparseChain = allowSparseChain;
     return open(opt, callback);
+}
+
+void Storage::injectLastHash(const PoolHash& h) {
+    std::unique_lock<std::mutex> lock(d->data_lock);
+    d->last_hash = h;
 }
 
 bool Storage::flush() {

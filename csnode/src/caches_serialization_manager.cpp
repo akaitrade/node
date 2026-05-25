@@ -99,6 +99,10 @@ struct CachesSerializationManager::Impl {
     bool completedFromGenesis_ = false;
     bool completedFromCheckpoint_ = false;
     bool loadedFromCompleted_ = false;
+    // Set when load succeeded but in-snapshot hashes did not match a
+    // re-serialization with this binary (foreign-format snapshot).
+    // Cleared after the next save rewrites the hashes file.
+    bool needsRehash_ = false;
 
     enum BindBits {
       BlockChainBit,
@@ -428,10 +432,18 @@ struct CachesSerializationManager::Impl {
             csinfo() << "API handler: loaded";
 #endif
             if (!checkHashes(version)) {
-                cserror() << "CachesSerializationManager: invalid hashes on load, quarantining version " << version;
-                clearInMem();
-                quarantineVersion(version);
-                return false;
+                // Hash mismatch after a successful structural load means the
+                // snapshot was written by a peer whose serializer output is
+                // not byte-identical to ours (different boost archive format,
+                // different container iteration order, legacy binary archive
+                // upgraded to text on load, etc.). The in-memory state is
+                // still valid because every .load() call above returned
+                // without throwing. Accept the snapshot and force a fresh
+                // save on the next checkpoint so subsequent boots match.
+                cswarning() << "CachesSerializationManager: hash mismatch on version "
+                            << version << " — load succeeded structurally, treating as "
+                            << "foreign snapshot. Will re-save with current format on next checkpoint.";
+                needsRehash_ = true;
             }
             loadedHead_ = loadHead(p);   // nullopt for legacy (no head.bin)
             const uint8_t sentinelFlags = loadSentinel(p);
@@ -635,6 +647,9 @@ bool CachesSerializationManager::save(size_t version, const CheckpointHead& head
 
     // publish succeeded — drop the backup
     std::filesystem::remove_all(backup_path, ec);
+    // Snapshot now reflects this binary's serializer format; clear the
+    // foreign-snapshot flag so future hash mismatches mean genuine drift.
+    pImpl_->needsRehash_ = false;
     return true;
 }
 

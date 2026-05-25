@@ -543,6 +543,11 @@ private:
     std::atomic<cs::Sequence> oldestRetained_{0};
     // Stashed at init(); used by validator-mode prune to locate head_floor.bin.
     std::string dbPath_;
+    // Validator-mode QS boot: head_hash was injected from CheckpointHead but
+    // not verifiable against any local chain DB. On the first arriving block
+    // we trust the network's previous_hash and update storage's last_hash to
+    // match. Cleared after the first successful store. See blockchain.cpp init.
+    std::atomic_bool acceptFirstForeignPrevHash_{false};
     cs::Sequence blocksToBeRemoved_ = 0;
     std::atomic_bool stop_ = false;
 

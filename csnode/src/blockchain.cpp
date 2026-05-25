@@ -7,6 +7,8 @@
 #include <string_view>
 #include <base58.h>
 #include <csdb/currency.hpp>
+#include <csdb/pool.hpp>
+#include <csdb/empty_pool_stub.hpp>
 #include <lib/system/hash.hpp>
 #include <lib/system/logger.hpp>
 #include <lib/system/utils.hpp>
@@ -101,19 +103,39 @@ bool BlockChain::tryQuickStart(
     }
 
     // single-block chain-binding check; Storage::open re-opens for live walk
-    auto verifier = [&dbPath, &dbBackend](const cs::CheckpointHead& head) -> bool {
+    const bool validatorOnly = cs::ConfigHolder::instance().config()->getStorageSettings().validatorOnly;
+    auto verifier = [&dbPath, &dbBackend, validatorOnly](const cs::CheckpointHead& head) -> bool {
         if (head.head_hash.empty()) return true;  // legacy / no binding to verify
         auto db = cs::chain_integrity::open_db(dbBackend, dbPath);
         if (!db) {
             cswarning() << "tryQuickStart: cannot open chain DB for verification; allowing checkpoint";
             return true;
         }
-        const bool ok = cs::chain_integrity::verify_at(*db, head.sequence, head.head_hash);
-        if (!ok) {
-            cserror() << "tryQuickStart: chain-binding mismatch at seq " << head.sequence
-                      << "; quarantining checkpoint";
+        cs::Bytes blob;
+        if (!db->get(static_cast<uint32_t>(head.sequence), &blob)) {
+            // Block absent from local chain DB. For a validator booting from
+            // copied caches this is expected (sparse/empty bin/); allow and
+            // let the network fill in. For full nodes it indicates a stale
+            // chain DB next to a fresh cache, which is unsafe — reject.
+            if (validatorOnly) {
+                cswarning() << "tryQuickStart: chain DB has no block at seq " << head.sequence
+                            << "; validator-only — nothing to verify against, allowing checkpoint";
+                return true;
+            }
+            cserror() << "tryQuickStart: chain DB has no block at seq " << head.sequence
+                      << " but checkpoint records one; full node refuses (stale DB or fork)";
+            return false;
         }
-        return ok;
+        csdb::Pool p = csdb::is_empty_pool_stub(blob)
+            ? csdb::parse_empty_pool_stub(blob)
+            : csdb::Pool::from_binary(std::move(blob));
+        if (!p.is_valid() || p.sequence() != head.sequence
+            || p.hash().to_binary() != head.head_hash) {
+            cserror() << "tryQuickStart: chain-binding mismatch at seq " << head.sequence
+                      << " — checkpoint hash and chain DB hash differ; quarantining";
+            return false;
+        }
+        return true;
     };
 
     bool ok = serializationManPtr_->load(verifier);
@@ -194,6 +216,22 @@ bool BlockChain::init(
 
     cs::Sequence firstBlockToReadInDatabase = 0;
     if (successfulQuickStart) {
+        // Cache was saved by applyBlockToCaches BEFORE `lastSequence_` is
+        // bumped (post-save assignment at line 1673), so deserialized
+        // lastSequence_ is typically head.sequence-1 while head.head_hash is
+        // the hash of head.sequence. The on-disk wallet/contract state
+        // already reflects block head.sequence (applyBlockToCaches ran for it).
+        // Align lastSequence_ to head.sequence so next-block expectations
+        // (lastSequence_+1, getLastHash matching previous_hash) are correct.
+        if (serializationManPtr && serializationManPtr->getLoadedHead().has_value()) {
+            const auto& head = *serializationManPtr->getLoadedHead();
+            if (head.sequence > lastSequence_.load() && !head.head_hash.empty()) {
+                cslog() << kLogPrefix << "QS load: bumping lastSequence_ from "
+                        << lastSequence_.load() << " to head.sequence=" << head.sequence
+                        << " (cache was saved pre-update)";
+                lastSequence_ = head.sequence;
+            }
+        }
         if (lastSequence_ != 0) {
             firstBlockToReadInDatabase = lastSequence_ + 1;
             trxIndex_->pinFloor(lastSequence_.load());
@@ -250,9 +288,29 @@ bool BlockChain::init(
                        storageCfg.useStubs,
                        static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
                        static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
-                       storageCfg.dbBackend)) {
+                       storageCfg.dbBackend,
+                       storageCfg.validatorOnly /*allowSparseChain*/)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
+    }
+
+    // Validator booting from QS with an empty/sparse chain DB: storage opened
+    // in sparse mode (skipped rescan), so its last_hash is empty. Inject the
+    // QS head_hash so getLastHash() returns the right value for arriving
+    // block (head.sequence+1) which carries this as previous_hash.
+    if (storageCfg.validatorOnly && successfulQuickStart && storage_.last_hash().is_empty()
+        && serializationManPtr && serializationManPtr->getLoadedHead().has_value()) {
+        const auto& head = *serializationManPtr->getLoadedHead();
+        if (!head.head_hash.empty()) {
+            csdb::PoolHash h = csdb::PoolHash::from_binary(cs::Bytes(head.head_hash));
+            storage_.injectLastHash(h);
+            // QS head_hash is unverifiable locally (no chain DB to check
+            // against). On the first arriving block we trust the network's
+            // previous_hash since the block's signatures are still verified.
+            acceptFirstForeignPrevHash_ = true;
+            cslog() << kLogPrefix << "validator-only: injected last_hash from QS head at seq " << head.sequence
+                    << "; first arriving block's previous_hash will be trusted (one-shot)";
+        }
     }
 
     // Spin up the parallel signature verifier (sync-time only; idle at steady state).
@@ -1886,6 +1944,19 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
     if (poolSequence == lastSequence + 1) {
         debugRecomputeBlockDiff(pool);
         if (pool.previous_hash() != getLastHash()) {
+            // Validator-mode first-block boot-tolerance: head_hash injected
+            // from QS is unverifiable locally; adopt the network's view.
+            // The block's own signatures are still verified downstream.
+            if (acceptFirstForeignPrevHash_.exchange(false)
+                && !pool.previous_hash().is_empty()) {
+                cswarning() << kLogPrefix << "validator-only: first block " << poolSequence
+                            << " carries previous_hash " << pool.previous_hash().to_string()
+                            << " differing from injected QS last_hash " << getLastHash().to_string()
+                            << "; trusting network (one-shot)";
+                storage_.injectLastHash(pool.previous_hash());
+                // fall through to store the block normally
+            }
+            else {
             csdebug() << "BLOCKCHAIN> new pool\'s prev. hash does not equal to current last hash";
             if (getLastHash().is_empty()) {
                 cserror() << kLogPrefix << "own last hash is empty";
@@ -1905,6 +1976,7 @@ bool BlockChain::storeBlock(csdb::Pool& pool, cs::PoolStoreType type, bool skipV
                 removeLastBlock();
             }
             return false;
+            }
         }
 
         setTransactionsFees(pool, type);

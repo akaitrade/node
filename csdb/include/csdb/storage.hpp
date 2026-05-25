@@ -105,6 +105,11 @@ public:
         // When true (default), empty pools are persisted via the compact
         // empty-pool-stub format. Reads remain dual-format regardless.
         bool useEmptyPoolStubs = true;
+        // When true, tolerate `startSequence > last_seq_in_db + 1` (chain DB
+        // is sparse or empty while caches sit at a much higher head — the
+        // validator-only DB-less boot pattern). Skips the rescan loop; caller
+        // is responsible for last_hash via injectLastHash.
+        bool allowSparseChain = false;
     };
 
     struct OpenProgress {
@@ -152,7 +157,12 @@ public:
               bool useEmptyPoolStubs = true,
               uint64_t rocksDbBlockCacheBytes = 0,
               uint64_t rocksDbMemtableBytes = 0,
-              const std::string& dbBackend = std::string{});
+              const std::string& dbBackend = std::string{},
+              bool allowSparseChain = false);
+
+    // Inject a known last_hash when the chain DB was opened in sparse mode
+    // (allowSparseChain) and the caller already knows the head from QS.
+    void injectLastHash(const PoolHash& h);
 
     /**
      * @brief Creating the storage using the parameters set.
