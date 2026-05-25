@@ -58,7 +58,7 @@ enum BootstrapType {
 struct PoolSyncData {
     cs::Sequence blockPoolsCount = 100;              // max block count in one request: cannot be 0
     uint16_t sequencesVerificationFrequency = 350;   // sequences received verification frequency : 0-never; 1-once per round: other- in ms;
-    uint16_t postSyncSoakRounds = 2;                 // refuse Trusted role for N rounds after synchroFinished (0 = disable)
+    uint16_t postSyncSoakRounds = 0;                 // refuse Trusted role for N rounds after synchroFinished (0 = disable)
 };
 
 struct StorageData {

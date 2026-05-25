@@ -255,14 +255,14 @@ struct CachesSerializationManager::Impl {
         f.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
     }
 
-    // returns false for missing/legacy files
-    bool loadSentinel(const std::filesystem::path& dir) {
+    // returns 0 for missing/legacy files; otherwise raw flag byte
+    uint8_t loadSentinel(const std::filesystem::path& dir) {
         std::ifstream f(dir / kSentinelFile, std::ios::binary);
-        if (!f.is_open()) return false;
+        if (!f.is_open()) return 0;
         uint8_t flags = 0;
         f.read(reinterpret_cast<char*>(&flags), sizeof(flags));
-        if (!f) return false;
-        return (flags & kSentinelCompletedFromGenesisBit) != 0;
+        if (!f) return 0;
+        return flags;
     }
 
     std::optional<CheckpointHead> loadHead(const std::filesystem::path& dir) {
@@ -434,9 +434,11 @@ struct CachesSerializationManager::Impl {
                 return false;
             }
             loadedHead_ = loadHead(p);   // nullopt for legacy (no head.bin)
-            loadedFromCompleted_ = loadSentinel(p);
-            // a completed snapshot remains completed after a successful reload
+            const uint8_t sentinelFlags = loadSentinel(p);
+            loadedFromCompleted_ = (sentinelFlags & kSentinelCompletedFromGenesisBit) != 0;
+            // sticky bits: a completed/checkpoint snapshot stays so after successful reload
             if (loadedFromCompleted_) completedFromGenesis_ = true;
+            if (sentinelFlags & kSentinelCompletedFromCheckpointBit) completedFromCheckpoint_ = true;
             if (verify && loadedHead_.has_value() && !verify(*loadedHead_)) {
                 cserror() << "CachesSerializationManager: chain-binding verification failed for version "
                           << version << "; quarantining";
@@ -726,6 +728,10 @@ void CachesSerializationManager::setCompletedFromCheckpoint() {
 
 bool CachesSerializationManager::isLoadedFromCompletedSnapshot() const {
     return pImpl_->loadedFromCompleted_;
+}
+
+bool CachesSerializationManager::isLoadedFromCheckpointSnapshot() const {
+    return pImpl_->completedFromCheckpoint_;
 }
 
 void CachesSerializationManager::clear(size_t version) {

@@ -183,6 +183,13 @@ bool BlockChain::init(
                       << "Ship a fresh validator pack with matching QS checkpoint.";
             return false;
         }
+        if (!sto.validatorOnly && successfulQuickStart && serializationManPtr
+            && serializationManPtr->isLoadedFromCheckpointSnapshot()) {
+            cserror() << kLogPrefix << "refusing to boot full node from validator-only "
+                      << "(rolling-window) snapshot. Either set storage.validator_only=true "
+                      << "in config, or restore a full-walked snapshot.";
+            return false;
+        }
     }
 
     cs::Sequence firstBlockToReadInDatabase = 0;

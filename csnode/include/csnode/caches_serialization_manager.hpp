@@ -66,6 +66,9 @@ public:
     // window but were not walked from genesis. Set in validator-only mode.
     void setCompletedFromCheckpoint();
     bool isLoadedFromCompletedSnapshot() const;
+    // True if the loaded snapshot carries the validator-mode checkpoint bit
+    // (rolling-window-consistent, not genesis-walked). Full nodes must refuse.
+    bool isLoadedFromCheckpointSnapshot() const;
     void pruneCheckpoints(size_t keep);
 
 private:
