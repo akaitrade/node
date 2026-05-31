@@ -58,6 +58,12 @@ struct PoolSyncData {
     uint16_t sequencesVerificationFrequency = 350;   // sequences received verification frequency : 0-never; 1-once per round: other- in ms;
 };
 
+struct StorageData {
+    size_t checkpointKeep = 5;              // retained periodic checkpoints (qs/0 always kept on top)
+    size_t checkpointEvery = 500'000;       // blocks between periodic checkpoints (rolling history depth = checkpointEvery * checkpointKeep)
+    size_t checkpointEveryMinutes = 0;      // wall-clock fallback: also save if this many minutes elapsed since last save (0 = disabled; opt-in for slow networks)
+};
+
 struct ApiData {
     // on by default:
     uint16_t port = 9090;
@@ -214,6 +220,10 @@ public:
         return poolSyncData_;
     }
 
+    const StorageData& getStorageSettings() const {
+        return storageData_;
+    }
+
     const ApiData& getApiSettings() const {
         return apiData_;
     }
@@ -343,6 +353,7 @@ private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
     void readPoolSynchronizerData(const boost::property_tree::ptree& config);
+    void readStorageData(const boost::property_tree::ptree& config);
     void readApiData(const boost::property_tree::ptree& config);
     void readConveyerData(const boost::property_tree::ptree& config);
     void readEventsReportData(const boost::property_tree::ptree& config);
@@ -390,6 +401,7 @@ private:
     boost::log::settings loggerSettings_{};
 
     PoolSyncData poolSyncData_;
+    StorageData storageData_;
     ApiData apiData_;
     DbSQLData dbSQLData_;
 

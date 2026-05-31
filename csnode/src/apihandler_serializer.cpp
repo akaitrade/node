@@ -61,6 +61,7 @@ void APIHandler_Serializer::load(const std::filesystem::path& rootDir) {
 }
 
 void APIHandler_Serializer::clear(const std::filesystem::path& rootDir) {
+    (void)rootDir;
     auto clearHelper = [this](auto& entity) {
       auto ref = lockedReference(entity);
       ref->clear();
@@ -72,8 +73,6 @@ void APIHandler_Serializer::clear(const std::filesystem::path& rootDir) {
     clearHelper(*deployedByCreator_);
 
     mExecuteCount_->clear();
-
-    save(rootDir);
 }
 
 ::cscrypto::Hash APIHandler_Serializer::hash() {

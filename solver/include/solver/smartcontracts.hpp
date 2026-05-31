@@ -12,6 +12,7 @@
 
 #include <csnode/node.hpp>  // introduce csconnector::connector::ApiExecHandlerPtr at least
 
+#include <cassert>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -353,6 +354,12 @@ public:
     static bool dbcache_read(const BlockChain& blockchain, const csdb::Address& abs_addr, SmartContractRef& ref_start /*output*/, std::string& state /*output*/);
     static bool dbcache_update(const BlockChain& blockchain, const csdb::Address& abs_addr, const SmartContractRef& ref_start, const std::string& state, bool force_update);
 
+    // Mirror QS-restored known_contracts state into contracts.db (fills gaps).
+    size_t rehydrateContractDbCache(BlockChain& bc);
+
+    // Hash-check each QS-restored state against its chain new_state; clear mismatches.
+    size_t validateRestoredStatesAgainstChain(BlockChain& bc);
+
     static std::string get_contract_state(const BlockChain& storage, const csdb::Address& abs_addr);
 
     static std::string to_base58(const BlockChain& storage, const csdb::Address& addr);
@@ -410,7 +417,9 @@ public:
     void net_update_contract_state(const csdb::Address& contract_abs_addr, const cs::Bytes& contract_data);
 
     csdb::Address absolute_address(const csdb::Address& optimized_address) const {
-        return bc.getAddressByType(optimized_address, BlockChain::AddressType::PublicKey);
+        auto result = bc.getAddressByType(optimized_address, BlockChain::AddressType::PublicKey);
+        assert(result.is_public_key() && "absolute_address resolved to non-pubkey form");
+        return result;
     }
 
     std::string to_base58(const csdb::Address& addr) {

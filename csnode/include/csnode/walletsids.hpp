@@ -54,6 +54,8 @@ public:
         return *norm_;
     }
 
+    WalletId getNextId() const { return nextId_; }
+
 private:
     struct Wallet {
         WalletAddress address; struct byAddress {};

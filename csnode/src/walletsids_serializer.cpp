@@ -26,9 +26,9 @@ void WalletsIds_Serializer::bind(WalletsIds& ids) {
 }
 
 void WalletsIds_Serializer::clear(const std::filesystem::path& rootDir) {
+    (void)rootDir;
     data_->clear();
     *nextId_ = 0;
-    save(rootDir);
 }
 
 void WalletsIds_Serializer::save(const std::filesystem::path& rootDir) {

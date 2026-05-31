@@ -10,6 +10,7 @@
 #include <solver/solvercore.hpp>
 #include <solver/smartcontracts.hpp>
 
+#include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
 #include <csnode/node.hpp>
@@ -169,7 +170,18 @@ bool Node::init() {
         ) {
             if (isStopRequested()) {
                 cslog() << "Init aborted by user; preserving QUICK START state.";
-                if (cachesSerializationManager_.save(0)) {
+                cs::CheckpointHead headInfo;
+                const auto topSeq = blockChain_.getLastSeq();
+                auto hh = blockChain_.getHashBySequence(topSeq);
+                if (!hh.is_empty()) {
+                    headInfo.sequence = topSeq;
+                    headInfo.head_hash = hh.to_binary();
+                    if (topSeq > 0) {
+                        auto ph = blockChain_.getHashBySequence(topSeq - 1);
+                        if (!ph.is_empty()) headInfo.prev_hash = ph.to_binary();
+                    }
+                }
+                if (cachesSerializationManager_.save(0, headInfo)) {
                     blockChain_.flushIndexes();
                     cslog() << "Saved interim QUICK START state to qs/0.";
                 }
@@ -192,6 +204,10 @@ bool Node::init() {
             + "\nblockReward = " + Consensus::blockReward.to_string()
             + "\nminingCoefficient = " + Consensus::miningCoefficient.to_string();
         csinfo() << curMsg;
+        if (solver_) {
+            solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
+            solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
+        }
         return true;
     }
     if (!blockChain_.init(
@@ -200,7 +216,18 @@ bool Node::init() {
     ) {
         if (isStopRequested()) {
             cslog() << "Init aborted by user; preserving QUICK START state.";
-            if (cachesSerializationManager_.save(0)) {
+            cs::CheckpointHead headInfo;
+            const auto topSeq = blockChain_.getLastSeq();
+            auto hh = blockChain_.getHashBySequence(topSeq);
+            if (!hh.is_empty()) {
+                headInfo.sequence = topSeq;
+                headInfo.head_hash = hh.to_binary();
+                if (topSeq > 0) {
+                    auto ph = blockChain_.getHashBySequence(topSeq - 1);
+                    if (!ph.is_empty()) headInfo.prev_hash = ph.to_binary();
+                }
+            }
+            if (cachesSerializationManager_.save(0, headInfo)) {
                 blockChain_.flushIndexes();
                 cslog() << "Saved interim QUICK START state to qs/0.";
             }
@@ -213,6 +240,11 @@ bool Node::init() {
 
     if (initialConfidants_.size() < Consensus::MinTrustedNodes) {
         cslog() << "After reading blockchain, bootstrap nodes number is " << initialConfidants_.size();
+    }
+
+    if (solver_) {
+        solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
+        solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
     }
 
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
@@ -3706,18 +3738,26 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 }
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
+    const bool trxIndexReady = blockChain_.isTrxIndexReady();
+
+    if (!trxIndexReady) {
+        cswarning() << "trxIndex __incomplete__ — refusing Trusted role this round";
+    }
+
     bool found = false;
     uint8_t confidantIndex = 0;
 
-    for (auto& conf : roundTable.confidants) {
-        if (conf == nodeIdKey_) {
-            myLevel_ = Level::Confidant;
-            myConfidantIndex_ = confidantIndex;
-            found = true;
-            break;
-        }
+    if (trxIndexReady) {
+        for (auto& conf : roundTable.confidants) {
+            if (conf == nodeIdKey_) {
+                myLevel_ = Level::Confidant;
+                myConfidantIndex_ = confidantIndex;
+                found = true;
+                break;
+            }
 
-        confidantIndex++;
+            confidantIndex++;
+        }
     }
 
     if (!found) {
@@ -3826,7 +3866,9 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
     stat_.onRoundStart(cs::Conveyer::instance().currentRoundNumber(), false /*skip_logs*/);
     csdebug() << line2.str();
 
-    solver_->nextRound(updateRound);
+    if (trxIndexReady) {
+        solver_->nextRound(updateRound);
+    }
     if (cacheLBs_) {
         getBlockChain().cacheLastBlocks();
         if (getBlockChain().getIncorrectBlockNumbers()->empty()) {

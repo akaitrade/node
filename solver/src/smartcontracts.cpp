@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #include <serializer.hpp>
@@ -2047,6 +2048,14 @@ bool SmartContracts::execute_async(const std::vector<ExecutionItem>& executions)
     auto runnable = [this, data_list{std::move(data_list)}]() mutable {
         // actually, multi-execution list always refers to the same contract, so we need not to distinct different contracts last state
         std::string last_state;
+        // Seed first execution with cached state; later iterations chain forward.
+        if (!data_list.empty()) {
+            cs::Lock lock(public_access_lock);
+            auto it = known_contracts.find(data_list.front().abs_addr);
+            if (it != known_contracts.end() && !it->second.state.empty()) {
+                last_state = it->second.state;
+            }
+        }
         for (auto& data : data_list) {
             // use data.result.newStatef member to pass last contract's state in multi-call
             data.explicit_last_state = last_state;
@@ -3128,6 +3137,109 @@ bool SmartContracts::dbcache_update(const csdb::Address& abs_addr, const SmartCo
     return SmartContracts::dbcache_update(bc, abs_addr, ref_start, state, force_update);
 }
 
+size_t SmartContracts::rehydrateContractDbCache(BlockChain& blockchain) {
+    cs::Lock lock(public_access_lock);
+    size_t already_present = 0;
+    size_t overwritten = 0;
+    size_t empty_in_ram = 0;
+    size_t rehydrated = 0;
+    for (auto& kv : known_contracts) {
+        const auto& abs_addr = kv.first;
+        const auto& item = kv.second;
+        if (item.state.empty()) { ++empty_in_ram; continue; }
+        SmartContractRef db_ref;
+        std::string db_state;
+        const bool db_has = SmartContracts::dbcache_read(blockchain, abs_addr, db_ref, db_state);
+        const SmartContractRef& ram_ref = item.ref_state.is_valid() ? item.ref_state : item.ref_execute;
+        if (!ram_ref.is_valid()) { ++empty_in_ram; continue; }
+        if (db_has && !db_state.empty()) { ++already_present; continue; }
+        if (SmartContracts::dbcache_update(blockchain, abs_addr, ram_ref, item.state, true /*force*/)) {
+            if (db_has) ++overwritten; else ++rehydrated;
+        }
+    }
+    cslog() << kLogPrefix << "rehydrated " << rehydrated << " contract states into contracts.db ("
+            << already_present << " already present with non-empty state, "
+            << overwritten << " overwrote empty-state entries, "
+            << empty_in_ram << " empty in RAM)";
+    return rehydrated;
+}
+
+size_t SmartContracts::validateRestoredStatesAgainstChain(BlockChain& blockchain) {
+    cs::Lock lock(public_access_lock);
+    using namespace trx_uf;
+    size_t verified = 0;
+    size_t invalidated_hash_mismatch = 0;
+    size_t invalidated_tx_missing = 0;
+    size_t unverifiable = 0;
+    for (auto& kv : known_contracts) {
+        const auto& abs_addr = kv.first;
+        auto& item = kv.second;
+        if (item.state.empty()) continue;
+        const SmartContractRef& chain_ref = item.ref_state.is_valid() ? item.ref_state : item.ref_execute;
+        if (!chain_ref.is_valid()) { ++unverifiable; continue; }
+        csdb::Transaction t = get_transaction(chain_ref, abs_addr);
+        if (!t.is_valid()) {
+            cswarning() << kLogPrefix << to_base58(abs_addr)
+                << ": qs-restored new_state ref " << chain_ref
+                << " not found on chain; invalidating cached state";
+            item.ref_execute = SmartContractRef{};
+            item.ref_cache   = SmartContractRef{};
+            item.ref_state   = SmartContractRef{};
+            item.state.clear();
+            blockchain.updateContractData(abs_addr, cs::Bytes{});
+            ++invalidated_tx_missing;
+            continue;
+        }
+        const cs::Hash local_hash = cscrypto::calculateHash(
+            reinterpret_cast<const cs::Byte*>(item.state.data()), item.state.size());
+        auto h_fld = t.user_field(new_state::Hash);
+        if (h_fld.is_valid()) {
+            std::string h_str = h_fld.value<std::string>();
+            cs::Hash chain_hash;
+            if (h_str.size() != chain_hash.size()) { ++unverifiable; continue; }
+            std::copy(h_str.cbegin(), h_str.cend(), chain_hash.begin());
+            if (local_hash != chain_hash) {
+                cswarning() << kLogPrefix << to_base58(abs_addr)
+                    << ": qs-restored state hash diverges from chain at "
+                    << chain_ref << "; invalidating (will re-derive)";
+                item.ref_execute = SmartContractRef{};
+                item.ref_cache   = SmartContractRef{};
+                item.ref_state   = SmartContractRef{};
+                item.state.clear();
+                blockchain.updateContractData(abs_addr, cs::Bytes{});
+                ++invalidated_hash_mismatch;
+            } else {
+                ++verified;
+            }
+            continue;
+        }
+        auto v_fld = t.user_field(new_state::Value);
+        if (v_fld.is_valid()) {
+            std::string chain_value = v_fld.value<std::string>();
+            if (chain_value != item.state) {
+                cswarning() << kLogPrefix << to_base58(abs_addr)
+                    << ": qs-restored state value diverges from chain at "
+                    << chain_ref << "; invalidating (will re-derive)";
+                item.ref_execute = SmartContractRef{};
+                item.ref_cache   = SmartContractRef{};
+                item.ref_state   = SmartContractRef{};
+                item.state.clear();
+                blockchain.updateContractData(abs_addr, cs::Bytes{});
+                ++invalidated_hash_mismatch;
+            } else {
+                ++verified;
+            }
+            continue;
+        }
+        ++unverifiable;
+    }
+    cslog() << kLogPrefix << "qs state validation: " << verified << " verified, "
+            << invalidated_hash_mismatch << " invalidated (hash mismatch), "
+            << invalidated_tx_missing << " invalidated (tx missing), "
+            << unverifiable << " unverifiable (no hash/value on chain)";
+    return invalidated_hash_mismatch + invalidated_tx_missing;
+}
+
 bool SmartContracts::wait_until_executor(unsigned int test_freq, unsigned int max_periods /*= std::numeric_limits<unsigned int>::max()*/) {
     //csdebug() << kLogPrefix << __func__;
     if (!exec_handler_ptr) {
@@ -3391,21 +3503,20 @@ Bytes SmartContracts::serialize() {
         ++qIt;
     }
 
-    //TODO: next two set should be sorted unless we impact the difference of hashes while loading contracts
-    size_t bSize = blacklistedContracts_.size();
-    os << bSize;
-    auto bIt = blacklistedContracts_.begin();
-    for (size_t i = 0; i < bSize; ++i) {
-        os << bIt->public_key();
-        ++bIt;
+    // Copy unordered_sets into ordered sets for deterministic byte output.
+    // Iteration over std::unordered_set is implementation-defined, so direct
+    // iteration produced different hash values on each save → cache integrity
+    // check failed on load even when the logical state was identical.
+    std::set<csdb::Address> sortedBlacklist(blacklistedContracts_.begin(), blacklistedContracts_.end());
+    os << sortedBlacklist.size();
+    for (const auto& addr : sortedBlacklist) {
+        os << addr.public_key();
     }
 
-    size_t lSize = locked_contracts.size();
-    os << lSize;
-    auto lIt = locked_contracts.begin();
-    for (size_t i = 0; i < lSize; ++i) {
-        os << lIt->public_key();
-        ++lIt;
+    std::set<csdb::Address> sortedLocked(locked_contracts.begin(), locked_contracts.end());
+    os << sortedLocked.size();
+    for (const auto& addr : sortedLocked) {
+        os << addr.public_key();
     }
     return data;
 }
@@ -3514,11 +3625,11 @@ SmartContracts::StateItem SmartContracts::StateItem::from_bytes(Bytes& data) {
     is >> uSize;
     for (uint64_t i = 0ULL; i < uSize; ++i) {
         std::string u1;
-        is >> u1;   
+        is >> u1;
         uint64_t u1Size = 0;
-        is >> u1Size;    
+        is >> u1Size;
         std::map<csdb::Address, std::string> iMap;
-        for (size_t i1 = 0ULL; i < u1Size; ++i) {
+        for (size_t i1 = 0ULL; i1 < u1Size; ++i1) {
             PublicKey pKey;
             std::string s1;
             is >> pKey;
@@ -3556,9 +3667,7 @@ SmartContracts::QueueItem SmartContracts::QueueItem::from_bytes(Bytes& data) {
     for (size_t i = 0ULL; i < eSize;++i) {
         Bytes eData;
         is >> eData;
-        SmartContracts::ExecutionItem tmp;
-        tmp.from_bytes(eData);
-        res.executions.push_back(tmp);
+        res.executions.push_back(SmartContracts::ExecutionItem::from_bytes(eData));
     }
     is >> res.status;
     is >> res.seq_enqueue;
@@ -3582,9 +3691,8 @@ Bytes SmartContracts::ExecutionItem::to_bytes() {
     os << consumed_fee.integral() << consumed_fee.fraction();
     uint64_t uSize = uses.size();
     os << uSize;
-    auto it = uses.begin();
-    while (it != uses.end()) {
-        os << it->public_key();
+    for (const auto& addr : uses) {
+        os << addr.public_key();
     }
 
     os << result.toBinary();
@@ -3598,7 +3706,7 @@ SmartContracts::ExecutionItem SmartContracts::ExecutionItem::from_bytes(Bytes& d
     is >> res.ref_start.sequence >> res.ref_start.transaction;
     Bytes tdata;
     is >> tdata;
-    res.transaction.from_binary(tdata);
+    res.transaction = csdb::Transaction::from_binary(tdata);
     int32_t tint;
     uint64_t tfrac;
 

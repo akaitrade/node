@@ -152,11 +152,8 @@ ValidationPlugin::ErrorType HashValidator::validateBlock(const csdb::Pool& block
 
   auto prevHash = block.previous_hash();
   auto& prevBlock = getPrevBlock();
-  
-  auto data = prevBlock.to_binary();
-  auto countedPrevHash = csdb::PoolHash::calc_from_data(cs::Bytes(data.data(),
-                                                          data.data() +
-                                                          prevBlock.hashingLength()));
+
+  auto countedPrevHash = prevBlock.hash();
   if (prevHash != countedPrevHash) {
       cserror() << kLogPrefix << ": hash " << countedPrevHash.to_string() << " of block (" << prevBlock.sequence()
           << ") hash != real prev pool's hash " << prevHash.to_string() << " of (" << block.sequence() << ")";
@@ -387,10 +384,7 @@ ValidationPlugin::ErrorType BalanceOnlyChecker::validateBlock(const csdb::Pool& 
     csdebug() << kLogPrefix << ": checking Block";
     auto prevHash = pool.previous_hash();
     auto prevBlock = getBlockChain().getLastBlock();
-    auto data = prevBlock.to_binary();
-    auto countedPrevHash = csdb::PoolHash::calc_from_data(cs::Bytes(data.data(),
-        data.data() +
-        prevBlock.hashingLength()));
+    auto countedPrevHash = prevBlock.hash();
     if (prevHash != countedPrevHash) {
         csfatal() << kLogPrefix << ": hash of block (" << prevBlock.sequence()
             << ") hash: " << countedPrevHash.to_string() << " != real prev pool's hash of (" << pool.sequence() << "): " << prevHash.to_string();
