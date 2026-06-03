@@ -307,6 +307,8 @@ bool Node::init() {
             syncWatchdog_->setStuckThreshold(std::chrono::minutes(wd.stuckThreshold));
             syncWatchdog_->setTelemetryEnabled(wd.emitTelemetry);
             syncWatchdog_->setKickEnabled(wd.kickEnabled);
+            syncWatchdog_->setHardResetAfterKicks(wd.hardResetAfterKicks);
+            syncWatchdog_->setMinBehindRounds(wd.minBehindRounds);
             syncWatchdog_->start();
         }
     }

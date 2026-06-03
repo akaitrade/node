@@ -464,6 +464,19 @@ void PoolSynchronizer::stop() {
     cslog() << "SYNC: shutdown — pool synchronizer stopped";
 }
 
+void PoolSynchronizer::forceResync() {
+    if (stopped_.load(std::memory_order_acquire)) return;
+    const auto cachedSize = blockChain_ ? blockChain_->getCachedBlocksSize() : 0u;
+    cswarning() << "SYNC: forceResync — clearing cache (" << cachedSize
+                << " blocks) and dropping sync state to retry from scratch";
+    timer_.stop();
+    isSyncroStarted_ = false;
+    synchroLog_.clear();
+    if (blockChain_) {
+        blockChain_->clearBlockCache();
+    }
+}
+
 void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg) {
     csdebug() << __func__;
     if (msg == SyncroMessage::AwaitAnswer) {

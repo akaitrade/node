@@ -1060,6 +1060,8 @@ void Config::readWatchdogData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, "stuck_threshold",  watchdogData_.stuckThreshold);
     checkAndSaveValue(data, block, "emit_telemetry",   watchdogData_.emitTelemetry);
     checkAndSaveValue(data, block, "kick_enabled",     watchdogData_.kickEnabled);
+    checkAndSaveValue(data, block, "hard_reset_after_kicks", watchdogData_.hardResetAfterKicks);
+    checkAndSaveValue(data, block, "min_behind_rounds",      watchdogData_.minBehindRounds);
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

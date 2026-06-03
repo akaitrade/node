@@ -40,12 +40,16 @@ bool SyncWatchdog::isExpectingProgress(uint64_t roundsAdvanced) const {
 }
 
 void SyncWatchdog::run() {
-    auto lastSeenSeq    = blockchain_.getLastSeq();
-    auto lastSeenRound  = cs::Conveyer::instance().currentRoundNumber();
-    auto lastChangeTime = std::chrono::steady_clock::now();
+    auto lastSeenSeq      = blockchain_.getLastSeq();
+    auto lastSeenRound    = cs::Conveyer::instance().currentRoundNumber();
+    auto lastChangeTime   = std::chrono::steady_clock::now();
+    size_t consecutiveKicks = 0;
 
     cslog() << "SyncWatchdog: started (interval " << checkInterval_.count()
-            << "s, threshold " << stuckThreshold_.count() << "m)";
+            << "s, threshold " << stuckThreshold_.count() << "m, kick="
+            << (kickEnabled_.load() ? "on" : "off")
+            << ", hardResetAfter=" << hardResetAfterKicks_
+            << ", minBehind=" << minBehindRounds_ << ")";
 
     while (running_.load(std::memory_order_acquire)) {
         {
@@ -60,31 +64,50 @@ void SyncWatchdog::run() {
         const auto currentRound = cs::Conveyer::instance().currentRoundNumber();
         const uint64_t roundsAdvanced = (currentRound > lastSeenRound)
                                       ? (currentRound - lastSeenRound) : 0;
+        const uint64_t behind = (currentRound > currentSeq) ? (currentRound - currentSeq) : 0;
         const auto now = std::chrono::steady_clock::now();
+        const bool progressed = (currentSeq != lastSeenSeq);
 
-        if (currentSeq != lastSeenSeq) {
-            lastSeenSeq    = currentSeq;
-            lastSeenRound  = currentRound;
-            lastChangeTime = now;
+        if (progressed) {
+            lastSeenSeq      = currentSeq;
+            lastChangeTime   = now;
+            consecutiveKicks = 0;
+        }
+        lastSeenRound = currentRound;
+
+        // Caught up (or close enough): nothing to do this tick.
+        if (behind < minBehindRounds_) continue;
+
+        // Don't act on a genuinely idle chain (no rounds advancing means
+        // network is silent, not that we're stuck).
+        if (!isExpectingProgress(roundsAdvanced) && !sync_.isSyncroStarted()) {
             continue;
         }
 
         const auto stuckFor = std::chrono::duration_cast<std::chrono::seconds>(now - lastChangeTime);
-        if (stuckFor < stuckThreshold_) continue;
 
-        if (!isExpectingProgress(roundsAdvanced)) {
-            // chain genuinely idle — silent, but reset the round baseline so
-            // the next fire reflects a fresh observation window
-            lastSeenRound = currentRound;
-            continue;
-        }
+        // If we're behind but apply has made *some* progress within the last
+        // stuckThreshold window, let the normal sync engine keep working.
+        if (progressed && stuckFor < stuckThreshold_) continue;
 
+        // Behind + stalled long enough → keep nudging the sync engine every
+        // check interval (not only once every stuckThreshold). The kick is
+        // cheap; if normal sync is already running it harmlessly re-runs.
         onStuckDetected(currentSeq, stuckFor, sync_.isSyncroStarted(),
                         blockchain_.getCachedBlocksSize(), roundsAdvanced);
+        ++consecutiveKicks;
 
-        // throttle: require another stuckThreshold window before re-firing
-        lastChangeTime = now;
-        lastSeenRound  = currentRound;
+        // After N ineffective kicks, do a full reset (drop cached blocks +
+        // sync state) so the next nudge starts fresh.
+        if (kickEnabled_.load(std::memory_order_acquire)
+            && consecutiveKicks >= hardResetAfterKicks_) {
+            cswarning() << "SyncWatchdog: hard reset after " << consecutiveKicks
+                        << " ineffective kicks (lastSeq=" << currentSeq
+                        << " behind=" << behind << ")";
+            sync_.forceResync();
+            consecutiveKicks = 0;
+            lastChangeTime   = now;   // give the reset a stuckThreshold window to take effect
+        }
     }
 
     cslog() << "SyncWatchdog: stopped";

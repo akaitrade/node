@@ -147,10 +147,12 @@ struct EventsReportData {
 
 struct WatchdogData {
     bool   enabled         = true;    // master switch
-    size_t checkInterval   = 60;      // seconds between samples
-    size_t stuckThreshold  = 10;      // minutes of no-progress before firing
+    size_t checkInterval   = 30;      // seconds between samples
+    size_t stuckThreshold  = 2;       // minutes of no-progress before firing
     bool   emitTelemetry   = true;    // send StuckDetected to event_report
-    bool   kickEnabled     = false;   // opt-in: call Node::processSync() on stuck
+    bool   kickEnabled     = true;    // kick sync (PoolSynchronizer reset) on stuck
+    size_t hardResetAfterKicks = 3;   // consecutive ineffective kicks before full sync reset
+    size_t minBehindRounds = 5;       // ignore stalls when within N rounds of network head
 };
 
 struct DbSQLData {

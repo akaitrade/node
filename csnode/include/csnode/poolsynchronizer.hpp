@@ -39,6 +39,13 @@ public:
     // cleared. Safe to call multiple times.
     void stop();
 
+    // Full sync-state reset used by SyncWatchdog when soft kicks fail to make
+    // progress. Drops isSyncroStarted_, stops the request timer, clears any
+    // cached blocks that are blocking apply, and forgets per-peer cooldowns
+    // so the next sync() request can fan out to a fresh set of neighbours.
+    // Caller is expected to invoke sync() immediately after.
+    void forceResync();
+
     cs::Sequence getMaxNeighbourSequence();
     static const RoundNumber kRoundDifferentForSync = values::kDefaultMetaStorageMaxSize;
     void getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg);

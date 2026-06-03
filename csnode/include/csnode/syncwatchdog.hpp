@@ -34,6 +34,8 @@ public:
     void setStuckThreshold(std::chrono::minutes v)  { stuckThreshold_ = v; }
     void setKickEnabled(bool v)                     { kickEnabled_.store(v, std::memory_order_release); }
     void setTelemetryEnabled(bool v)                { telemetryEnabled_.store(v, std::memory_order_release); }
+    void setHardResetAfterKicks(size_t v)           { hardResetAfterKicks_ = v; }
+    void setMinBehindRounds(size_t v)               { minBehindRounds_ = v; }
 
 private:
     void run();
@@ -47,10 +49,12 @@ private:
 
     std::thread             thread_;
     std::atomic<bool>       running_{false};
-    std::atomic<bool>       kickEnabled_{false};
+    std::atomic<bool>       kickEnabled_{true};
     std::atomic<bool>       telemetryEnabled_{true};
-    std::chrono::seconds    checkInterval_{60};
-    std::chrono::minutes    stuckThreshold_{10};
+    std::chrono::seconds    checkInterval_{30};
+    std::chrono::minutes    stuckThreshold_{2};
+    size_t                  hardResetAfterKicks_{3};
+    size_t                  minBehindRounds_{5};
 
     std::mutex              wakeMux_;
     std::condition_variable wakeCv_;
